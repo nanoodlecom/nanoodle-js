@@ -1,10 +1,14 @@
 {
   "name": "nanoodle",
   "version": "0.1.0",
-  "description": "Run nanoodle AI workflows (noodle-graph.json) server-side against the NanoGPT API. Zero dependencies.",
+  "description": "Run nanoodle visual AI workflows from JavaScript — zero-dependency executor for saved noodle-graph.json files",
   "type": "module",
   "main": "./src/index.mjs",
-  "exports": "./src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./package.json": "./package.json"
+  },
+  "sideEffects": false,
   "bin": {
     "nanoodle": "./bin/nanoodle.mjs"
   },
@@ -22,12 +26,27 @@
   ],
   "keywords": [
     "nanoodle",
-    "nanogpt",
     "workflow",
     "ai",
+    "nanogpt",
     "image-generation",
-    "video-generation"
+    "video-generation",
+    "llm",
+    "agent",
+    "automation",
+    "tts",
+    "transcription",
+    "byok",
+    "no-deps",
+    "zero-dependencies"
   ],
   "license": "MIT",
-  "homepage": "https://nanoodle.io"
+  "homepage": "https://nanoodle.io",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/255BITS/nanoodle-js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/255BITS/nanoodle-js/issues"
+  }
 }

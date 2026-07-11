@@ -6,7 +6,8 @@
  *                           --set n3.size=1k --out ./out [--json]
  *   nanoodle inspect graph.json
  *
- * API key: NANOGPT_API_KEY env var (or --key <key>).
+ * API key: NANOGPT_API_KEY env var, --key <key>, or --env-file <path> (.env-style file).
+ * Precedence: --key > --env-file > NANOGPT_API_KEY. NANOGPT_BASE_URL overrides the API host.
  */
 import { mkdir, readFile } from "node:fs/promises";
 import { join, extname } from "node:path";
@@ -16,8 +17,8 @@ import { MediaRef, extForMime } from "../src/media.mjs";
 
 function usage(code = 1) {
   console.error(`usage:
-  nanoodle run <graph.json> [--input k=v]... [--set k=v]... [--out dir] [--json] [--key K] [--timeout ms]
-  nanoodle inspect <graph.json>
+  nanoodle run <graph.json> [--input k=v]... [--set k=v]... [--out dir] [--json] [--key K] [--env-file path] [--timeout ms]
+  nanoodle inspect <graph.json> [--key K] [--env-file path]
 
   --input k=v   set a workflow input ("Text=hello", "n2.system=@notes.txt"; @path reads a file —
                 media files ride as media, .txt/.md/.json as text)
@@ -25,6 +26,7 @@ function usage(code = 1) {
   --out dir     save media outputs into dir (text outputs are printed)
   --json        print a machine-readable result
   --key K       NanoGPT API key (defaults to NANOGPT_API_KEY)
+  --env-file p  read NANOGPT_API_KEY from a .env-style file (--key wins if both given)
   --timeout ms  overall run timeout`);
   process.exit(code);
 }
@@ -50,7 +52,7 @@ async function main() {
   if (!cmd || cmd === "--help" || cmd === "-h") usage(cmd ? 0 : 1);
   if (cmd !== "run" && cmd !== "inspect") usage();
 
-  let graphPath = null, outDir = null, asJson = false, apiKey = process.env.NANOGPT_API_KEY, timeoutMs;
+  let graphPath = null, outDir = null, asJson = false, keyFlag = null, envFile = null, timeoutMs;
   const inputArgs = [], setArgs = [];
   let i = 0;
   const val = (flag) => { // a value-taking flag at end of argv is a usage error, not a TypeError
@@ -64,7 +66,8 @@ async function main() {
     else if (a === "--set") setArgs.push(val("--set"));
     else if (a === "--out") outDir = val("--out");
     else if (a === "--json") asJson = true;
-    else if (a === "--key") apiKey = val("--key");
+    else if (a === "--key") keyFlag = val("--key");
+    else if (a === "--env-file") envFile = val("--env-file");
     else if (a === "--timeout") timeoutMs = +val("--timeout");
     else if (a.startsWith("-")) { console.error("unknown flag: " + a); usage(); }
     else if (!graphPath) graphPath = a;
@@ -72,7 +75,18 @@ async function main() {
   }
   if (!graphPath) usage();
 
-  const wf = await Workflow.load(graphPath, { apiKey });
+  // key precedence: --key > --env-file > NANOGPT_API_KEY (same .env parsing as scripts/live-spot-check.mjs)
+  let apiKey = keyFlag ?? process.env.NANOGPT_API_KEY;
+  if (envFile && keyFlag == null) {
+    let envText;
+    try { envText = await readFile(envFile, "utf8"); }
+    catch (e) { console.error(`--env-file: cannot read ${envFile}: ${e.message}`); process.exit(1); }
+    const m = envText.match(/^NANOGPT_API_KEY\s*=\s*"?([^"\n]+)"?/m);
+    if (!m) { console.error(`--env-file: no NANOGPT_API_KEY entry in ${envFile}`); process.exit(1); }
+    apiKey = m[1].trim();
+  }
+
+  const wf = await Workflow.load(graphPath, { apiKey, baseUrl: process.env.NANOGPT_BASE_URL || undefined });
 
   if (cmd === "inspect") {
     const pad = (s, n) => String(s).padEnd(n);

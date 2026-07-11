@@ -1,35 +1,59 @@
 # nanoodle
 
-Run [nanoodle](https://nanoodle.io) AI workflows server-side. Build a workflow visually in the
-nanoodle editor, hit 💾 to download `noodle-graph.json`, and re-execute it anywhere Node runs —
-against the same [NanoGPT](https://nano-gpt.com) API the app uses.
+**Run [nanoodle](https://nanoodle.io) visual AI workflows from JavaScript.** nanoodle is a
+no-server, bring-your-own-key editor where you wire AI nodes (LLMs, image, video, audio) into a
+graph and download it as `noodle-graph.json`. This package is the zero-dependency executor for
+those files: load a saved workflow, feed it inputs, get its outputs — same execution semantics
+as the app (topological order, concurrent lanes, wired-field overrides), against the same
+[NanoGPT](https://nano-gpt.com) API. Build and test workflows visually at
+[nanoodle.io](https://nanoodle.io); automate them here.
 
-- **Zero runtime dependencies** (Node >= 20, built-in `fetch`)
-- Same execution semantics as the app: topological order, concurrent lanes, wired-field overrides
+- Zero runtime dependencies — Node >= 20, built-in `fetch`
 - Text, image, video (submit + poll), audio (sync + async poll), vision, transcription
 - Cost tracking per node and per run
+- Library and CLI in one install
 
-## Quickstart
+## Install
 
 ```bash
-npm install nanoodle
-export NANOGPT_API_KEY=...   # nano-gpt.com API key (or OAuth access token)
+npm install nanoodle     # library + CLI
+npx nanoodle --help      # or run the CLI without installing
 ```
+
+## Quickstart (library)
 
 ```js
 import { Workflow } from "nanoodle";
 
-const wf = await Workflow.load("noodle-graph.json");
+const wf = await Workflow.load("noodle-graph.json");           // key from NANOGPT_API_KEY
 const result = await wf.run({ Text: "a cozy ramen shop on a rainy night" });
-
-console.log(String(result.get("Image")));   // media outputs are MediaRef (url + bytes()/save())
-await result.get("Image").save("ramen.png");
+await result.get("Image").save("ramen.png");                   // media outputs: MediaRef (url + bytes()/save())
 console.log(result.costUsd, result.remainingBalance);
 ```
 
 With the starter graph from the app (text → LLM prompt-writer → image), that's the whole program.
 
-### Discover a workflow's interface
+## Quickstart (CLI)
+
+Inspect first — it's offline and shows the workflow's inputs, outputs, and settings:
+
+```bash
+npx nanoodle inspect graph.json
+```
+
+Then run (this calls the NanoGPT API and spends from your balance):
+
+```bash
+export NANOGPT_API_KEY=...   # or --key K, or --env-file .env
+npx nanoodle run graph.json --input Text="a cozy ramen shop" --out ./out
+npx nanoodle run graph.json --input n2.system=@style.txt --set n3.size=1k --json
+```
+
+`--env-file path` reads `NANOGPT_API_KEY` from a `.env`-style file (`--key` wins if both are
+given). `--input k=@path` reads a file — media files ride as media, `.txt`/`.md`/`.json` as
+text. `--out dir` saves media outputs to disk; `--json` prints a machine-readable result.
+
+## Inputs, outputs, settings
 
 ```js
 wf.inputs    // [{ key: "Text", nodeId: "n1", field: "text", kind: "textarea", optional: false, def: "..." }]
@@ -37,9 +61,10 @@ wf.outputs   // [{ key: "Image", nodeId: "n3", type: "image", ports: [{ name: "i
 wf.settings  // [{ key: "n3.model", kind: "model", def: "nano-banana-2-lite" }, ...]
 ```
 
-Input keys resolve flexibly (case-insensitive): the node's custom name, `nodeId.field`
-(`"n2.system"`), a bare node id, or the input's label. A workflow with exactly one required
-input also accepts a bare value: `wf.run("hello")`.
+Input keys resolve flexibly (case-insensitive): the node's custom name (`"Text"`),
+`nodeId.field` (`"n2.system"`), a bare node id, or the input's label. Output keys are the sink
+node's custom name (or its type name). A workflow with exactly one required input also accepts
+a bare value: `wf.run("hello")`. Settings use `nodeId.field` keys (`"n3.model"`).
 
 ### Media inputs
 
@@ -54,7 +79,7 @@ await wf.run({ Image: bytesUint8Array });                      // raw bytes (MIM
 Media is sent inline as base64 (NanoGPT has no upload endpoint); files over ~4.4 MB are
 refused locally with a clear error before any paid call.
 
-### Settings, progress, errors
+### Progress and errors
 
 ```js
 const result = await wf.run(
@@ -72,14 +97,6 @@ the partial results, per-node statuses, and cost so far. Failures in lanes no ou
 only surface in `result.errors`. Unknown/unsupported node types, missing required inputs, bad
 keys, and a missing API key all fail **before** anything is spent.
 
-### CLI
-
-```bash
-npx nanoodle inspect graph.json
-npx nanoodle run graph.json --input Text="a cozy ramen shop" --set n3.size=1k --out ./out
-npx nanoodle run graph.json --input n2.system=@style.txt --json
-```
-
 ## Supported nodes
 
 | runs | node types |
@@ -95,14 +112,21 @@ Workflows containing unsupported node types load with a warning and fail fast at
 this library passes your mask through verbatim, so supply a black/white mask matching the
 source dimensions.
 
-## Cost
+## API key and cost
 
-NanoGPT bills per generation and reports the price on each response; `result.costUsd` totals it
-and `result.costExact` turns false when any call omitted a price (the total is then a floor).
-`result.remainingBalance` is the freshest balance the API reported. A price of 0 means
-known-free (subscription-included), not unknown.
+This is bring-your-own-key: you need a [nano-gpt.com](https://nano-gpt.com) API key (or OAuth
+access token) with balance, and **every `run()` spends real money** — NanoGPT bills per
+generation. The library reports what each run cost: `result.costUsd` totals the prices NanoGPT
+returned, `result.costExact` turns false when any call omitted a price (the total is then a
+floor), and `result.remainingBalance` is the freshest balance the API reported. A price of 0
+means known-included (subscription), not unknown. `inspect` and loading/validating workflows
+never call the API.
 
-## Testing
+## Specs and testing
+
+The format and execution semantics are specified in [docs/](docs/):
+[DESIGN.md](docs/DESIGN.md), [SPEC-format.md](docs/SPEC-format.md),
+[SPEC-engine.md](docs/SPEC-engine.md), [SPEC-io.md](docs/SPEC-io.md).
 
 Tests run fully offline against a mock NanoGPT server (`tests/harness/`):
 

@@ -293,7 +293,7 @@ test("CLI: '--input' with no value prints a usage error naming the flag (no Type
   const dir = await mkdtemp(join(tmpdir(), "nanoodle-cli-"));
   const graphPath = join(dir, "g.json");
   await writeFile(graphPath, JSON.stringify({ nodes: [{ id: "n1", type: "text", fields: { text: "hi" } }], links: [] }));
-  for (const flag of ["--input", "--set", "--out", "--key", "--timeout"]) {
+  for (const flag of ["--input", "--set", "--out", "--key", "--env-file", "--timeout"]) {
     const r = spawnSync(process.execPath, [bin, "run", graphPath, flag], { encoding: "utf8" });
     assert.equal(r.status, 1, flag);
     assert.match(r.stderr, new RegExp(flag + " expects a value"), flag);
