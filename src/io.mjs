@@ -158,6 +158,10 @@ export function deriveOutputs(graph) {
 
 /* ============================== SETTINGS ============================== */
 
+// Option lists verbatim from play.html (SIZES line 897, DURATIONS line 3232).
+const SIZES = ["1024x1024", "1024x1536", "1536x1024", "auto"];
+const DURATIONS = ["5", "10"];
+
 /** Per-node knobs that are not part of the IO shape (mirrors play.html SETTING_SPECS). */
 export const SETTING_SPECS = {
   llm: [
@@ -174,14 +178,14 @@ export const SETTING_SPECS = {
   ],
   image: [
     { f: "model", label: "Model", kind: "model" },
-    { f: "size", label: "Image size", kind: "select", def: "1024x1024" },
+    { f: "size", label: "Image size", kind: "select", options: SIZES, def: "1024x1024" },
     { f: "variations", label: "Variations", kind: "number", def: "1" },
     { f: "seed", label: "Seed", kind: "number" },
   ],
   edit: [
     { f: "model", label: "Model", kind: "model" },
     { f: "prompt", label: "Edit instruction", kind: "textarea" },
-    { f: "size", label: "Image size", kind: "select", def: "1024x1024" },
+    { f: "size", label: "Image size", kind: "select", options: SIZES, def: "1024x1024" },
     { f: "seed", label: "Seed", kind: "number" },
   ],
   draw: [
@@ -192,14 +196,14 @@ export const SETTING_SPECS = {
     { f: "model", label: "Model", kind: "model" },
     { f: "resolution", label: "Resolution", kind: "select", def: "" },
     { f: "aspect", label: "Aspect ratio", kind: "select", options: ["16:9", "9:16", "1:1", "4:3", "3:4"], def: "16:9" },
-    { f: "duration", label: "Duration", kind: "select", def: "5" },
+    { f: "duration", label: "Duration", kind: "select", options: DURATIONS, def: "5" },
   ],
   ivideo: [
     { f: "model", label: "Model", kind: "model" },
     { f: "prompt", label: "Motion prompt", kind: "textarea" },
     { f: "resolution", label: "Resolution", kind: "select", def: "" },
     { f: "aspect", label: "Aspect ratio", kind: "select", options: ["16:9", "9:16", "1:1", "4:3", "3:4"], def: "16:9" },
-    { f: "duration", label: "Duration", kind: "select", def: "5" },
+    { f: "duration", label: "Duration", kind: "select", options: DURATIONS, def: "5" },
   ],
   vedit: [
     { f: "model", label: "Model", kind: "model" },
@@ -237,7 +241,7 @@ export const SETTING_SPECS = {
   join: [{ f: "sep", label: "Separator (use \\n for a line break)", kind: "text", def: " " }],
   inpaint: [
     { f: "model", label: "Model", kind: "model" },
-    { f: "size", label: "Image size", kind: "select", def: "1024x1024" },
+    { f: "size", label: "Image size", kind: "select", options: SIZES, def: "1024x1024" },
     { f: "seed", label: "Seed", kind: "number" },
   ],
 };

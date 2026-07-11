@@ -158,3 +158,26 @@ test("optional inputs: system override via its own key", async (t) => {
   await wf.run({ Text: "x", "System prompt": "Be terse." });
   assert.equal(srv.requests[0].json.messages[0].content, "Be terse.");
 });
+
+test("size and duration settings ship the app's option lists (play.html SIZES/DURATIONS)", () => {
+  // cross-language parity: PY used to invent size values ("512x512", "1k"...) and
+  // JS omitted the lists entirely — both now match the app verbatim, incl. "auto"
+  const wf = Workflow.fromJSON({
+    nodes: [
+      { id: "n1", type: "image", fields: { model: "m", prompt: "p" } },
+      { id: "n2", type: "edit", fields: { model: "m" } },
+      { id: "n3", type: "inpaint", fields: { model: "m" } },
+      { id: "n4", type: "tvideo", fields: { model: "m", prompt: "p" } },
+      { id: "n5", type: "ivideo", fields: { model: "m" } },
+    ],
+  }, noNet);
+  const SIZES = ["1024x1024", "1024x1536", "1536x1024", "auto"];
+  for (const nid of ["n1", "n2", "n3"]) {
+    const size = wf.settings.find((s) => s.nodeId === nid && s.field === "size");
+    assert.deepEqual(size.options, SIZES, nid + ".size");
+  }
+  for (const nid of ["n4", "n5"]) {
+    const duration = wf.settings.find((s) => s.nodeId === nid && s.field === "duration");
+    assert.deepEqual(duration.options, ["5", "10"], nid + ".duration");
+  }
+});
