@@ -76,8 +76,8 @@ await wf.run({ Image: "https://example.com/photo.jpg" });      // hosted URL
 await wf.run({ Image: bytesUint8Array });                      // raw bytes (MIME sniffed)
 ```
 
-Media is sent inline as base64 (NanoGPT has no upload endpoint); files over ~4.4 MB are
-refused locally with a clear error before any paid call.
+Media is sent inline as base64 (NanoGPT has no upload endpoint); files over ~4.4 MB
+(~3.5 MB for transcription) are refused locally with a clear error before any paid call.
 
 ### Progress and errors
 
