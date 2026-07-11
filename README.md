@@ -112,6 +112,13 @@ Workflows containing unsupported node types load with a warning and fail fast at
 this library passes your mask through verbatim, so supply a black/white mask matching the
 source dimensions.
 
+## Use it as an agent skill
+
+A saved workflow plus a short `SKILL.md` playbook makes a skill any coding agent can run —
+Claude Code (`.claude/skills/<name>/SKILL.md`) or anything that reads markdown and runs shell.
+Recipe + copy-pasteable template: [docs/agent-skills.md](docs/agent-skills.md); complete
+example: [examples/agent-skill/poster-generator/](examples/agent-skill/poster-generator/).
+
 ## API key and cost
 
 This is bring-your-own-key: you need a [nano-gpt.com](https://nano-gpt.com) API key (or OAuth
