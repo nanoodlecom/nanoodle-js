@@ -1,6 +1,6 @@
 {
   "name": "nanoodle",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Run nanoodle visual AI workflows from JavaScript — zero-dependency executor for saved noodle-graph.json files",
   "type": "module",
   "main": "./src/index.mjs",
