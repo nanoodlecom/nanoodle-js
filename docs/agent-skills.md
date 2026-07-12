@@ -96,9 +96,9 @@ The file has two parts:
      over `--env-file`.
   2. The exact run command, with one `--input` per input key. Paths relative to the skill
      directory (or absolute).
-  3. Where outputs land (`--out <dir>`): key + MIME-derived extension. Tell the agent to
-     use the path printed on the `<OutputKey>:` line (or `--json`), not a hard-coded
-     `.png`.
+  3. Where outputs land (`--out <dir>`, default `./noodle-out`): key + MIME-derived
+     extension. Tell the agent to use `outputs.<OutputKey>` from the JSON summary the CLI
+     prints to stdout, not a hard-coded `.png`.
   4. An honest per-run cost note — runs spend real NanoGPT credit, so the agent (and its
      user) should know roughly how much.
 
@@ -130,8 +130,8 @@ npx nanoodle run <path-to-this-skill>/workflows/<file>.noodle-graph.json \
   --input "<InputKey>=<what to put here>" \
   --out <output-dir>
 
-Add `--env-file …` only if the key is not in the environment. Add `--json` for a structured
-result (paths, costUsd, remainingBalance).
+Add `--env-file …` only if the key is not in the environment. The CLI prints a JSON summary
+(paths, costUsd, remainingBalance) to stdout; add `--json` to silence the stderr progress lines.
 
 Inspect the interface anytime with:
 npx nanoodle inspect <path-to-this-skill>/workflows/<file>.noodle-graph.json

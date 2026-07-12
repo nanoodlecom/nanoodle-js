@@ -31,8 +31,11 @@ CLI (bin/nanoodle.mjs, "nanoodle" bin entry):
 ```
 nanoodle run graph.json --input Text="a cozy ramen shop" --input n2.system=@file.txt --set n3.size=1k --out ./out [--json]
 nanoodle inspect graph.json      # prints inputs/outputs/settings + node table
+nanoodle init [path]             # scaffolds the starter graph (default ./noodle-graph.json)
 ```
---out saves media outputs to files (fetch https, decode data:), prints text outputs; --json prints machine-readable result.
+Media outputs are saved under --out (default ./noodle-out, created only when needed; fetch https, decode data:).
+The JSON run summary is ALWAYS printed to stdout; progress/log lines go to stderr; --json is quiet mode
+(suppresses the stderr lines). Exit 0 success / 1 failure. This run contract is shared with nanoodle-py.
 
 ## Public API — Python (mirror, pythonic)
 ```python

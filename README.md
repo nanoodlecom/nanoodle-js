@@ -48,24 +48,34 @@ With the app’s starter graph (text → LLM prompt-writer → image), that’s 
 
 ## Quickstart (CLI)
 
-Inspect first — offline; shows inputs, outputs, and settings:
+No graph yet? Scaffold the starter (text → LLM prompt-writer → image) and
+inspect it — both offline, no key needed:
 
 ```bash
-npx nanoodle inspect graph.json
+npx nanoodle init                        # writes ./noodle-graph.json
+npx nanoodle inspect noodle-graph.json   # shows inputs, outputs, settings
 ```
 
 Then run (calls NanoGPT and spends from your balance):
 
 ```bash
 export NANOGPT_API_KEY=...   # or --key K, or --env-file .env
-npx nanoodle run graph.json --input Text="a cozy ramen shop" --out ./out
-npx nanoodle run graph.json --input n2.system=@style.txt --set n3.size=1k --json
+npx nanoodle run noodle-graph.json --input Text="a cozy ramen shop on a rainy night"
+npx nanoodle run graph.json --input n2.system=@style.txt --set n3.size=1k --out ./renders
 ```
 
-- `--env-file path` — load `NANOGPT_API_KEY` from a `.env`-style file (`--key` wins if both are set)
+Media outputs are saved under `--out` (default `./noodle-out`, created only
+when there is media to save); a JSON run summary always goes to stdout,
+progress lines to stderr; exit code `0` on success, `1` on failure.
+
 - `--input k=@path` — read a file (media as media; `.txt` / `.md` / `.json` as text)
-- `--out dir` — save media outputs to disk
-- `--json` — machine-readable result
+- `--set k=v` — override a setting (`n3.model=flux-pro`)
+- `--out dir` — where media outputs land (default `./noodle-out`)
+- `--json` — quiet mode: skip the stderr progress lines (the JSON summary is printed either way)
+- `--env-file path` — load `NANOGPT_API_KEY` from a `.env`-style file (`--key` wins if both are set)
+
+Share URLs (`nanoodle.com/#g=...`) aren’t accepted yet — export the graph as
+JSON from the editor for now.
 
 ## Inputs, outputs, settings
 

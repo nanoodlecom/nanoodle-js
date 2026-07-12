@@ -21,6 +21,7 @@
   "files": [
     "src",
     "bin",
+    "templates",
     "README.md",
     "LICENSE"
   ],
@@ -28,6 +29,11 @@
     "nanoodle",
     "workflow",
     "ai",
+    "ai-workflow",
+    "node-graph",
+    "dag",
+    "pipeline",
+    "cli",
     "nanogpt",
     "image-generation",
     "video-generation",

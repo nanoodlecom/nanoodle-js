@@ -2,33 +2,64 @@
 /**
  * nanoodle CLI — run and inspect noodle-graph.json workflows.
  *
- *   nanoodle run graph.json --input Text="a cozy ramen shop" --input n2.system=@file.txt \
- *                           --set n3.size=1k --out ./out [--json]
+ *   nanoodle run graph.json --input Text="a cozy ramen shop" --out ./noodle-out
  *   nanoodle inspect graph.json
+ *   nanoodle init [path]
+ *
+ * Contract: media outputs are written under --out (default ./noodle-out); a JSON
+ * run summary always goes to stdout; progress/log lines go to stderr; exit 0 on
+ * success, 1 on failure.
  *
  * API key: NANOGPT_API_KEY env var, --key <key>, or --env-file <path> (.env-style file).
  * Precedence: --key > --env-file > NANOGPT_API_KEY. NANOGPT_BASE_URL overrides the API host.
  */
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, extname } from "node:path";
 import process from "node:process";
 import { Workflow, RunError, mediaFromFile } from "../src/index.mjs";
 import { MediaRef, extForMime } from "../src/media.mjs";
 
-function usage(code = 1) {
-  console.error(`usage:
-  nanoodle run <graph.json> [--input k=v]... [--set k=v]... [--out dir] [--json] [--key K] [--env-file path] [--timeout ms]
-  nanoodle inspect <graph.json> [--key K] [--env-file path]
-  nanoodle --version
+const HELP = `nanoodle — run nanoodle.com visual AI workflows from the terminal
 
+usage:
+  nanoodle run <graph.json> [--input k=v]... [--set k=v]... [--out dir] [--json] [--key K] [--env-file path] [--timeout ms]
+  nanoodle inspect <graph.json>
+  nanoodle init [path]
+  nanoodle --help | --version
+
+commands:
+  run       execute a workflow (needs an API key; spends from your NanoGPT balance)
+  inspect   show a workflow's inputs, outputs, and settings — fully offline, no key needed
+  init      write the starter graph (text → LLM prompt-writer → image) to path (default ./noodle-graph.json)
+
+flags:
   --input k=v   set a workflow input ("Text=hello", "n2.system=@notes.txt"; @path reads a file —
                 media files ride as media, .txt/.md/.json as text)
   --set k=v     override a setting ("n3.model=flux-pro", "n3.size=1k")
-  --out dir     save media outputs into dir (text outputs are printed)
-  --json        print a machine-readable result
+  --out dir     directory for media outputs (default ./noodle-out, created only when needed)
+  --json        quiet mode: skip progress/log lines on stderr
+                (the JSON run summary is always printed to stdout either way)
   --key K       NanoGPT API key (defaults to NANOGPT_API_KEY)
   --env-file p  read NANOGPT_API_KEY from a .env-style file (--key wins if both given)
-  --timeout ms  overall run timeout`);
+  --timeout ms  overall run timeout
+
+examples:
+  # scaffold the starter graph and see its inputs/outputs — no API key needed
+  nanoodle init && nanoodle inspect noodle-graph.json
+
+  # run it: media lands in ./noodle-out, JSON summary on stdout
+  export NANOGPT_API_KEY=...   # key from nano-gpt.com
+  nanoodle run noodle-graph.json --input Text="a cozy ramen shop on a rainy night"
+
+  # feed a file into a wired field, override a setting, pick the output dir
+  nanoodle run graph.json --input n2.system=@style.txt --set n3.size=1k --out ./renders
+
+Graphs are the noodle-graph.json files saved from the https://nanoodle.com editor (💾).
+Share URLs (nanoodle.com/#g=...) are not accepted yet — export the JSON from the editor for now.
+Exit codes: 0 success, 1 failure. The API key is never logged.`;
+
+function usage(code = 1) {
+  (code === 0 ? console.log : console.error)(HELP);
   process.exit(code);
 }
 
@@ -56,9 +87,28 @@ async function main() {
     process.exit(0);
   }
   if (!cmd || cmd === "--help" || cmd === "-h") usage(cmd ? 0 : 1);
+
+  if (cmd === "init") {
+    const dest = argv[0] ?? "noodle-graph.json";
+    if (argv.length > 1 || dest.startsWith("-")) usage();
+    // the template is the same starter graph the tests exercise (tests/fixtures/starter-graph.json)
+    const tpl = await readFile(new URL("../templates/starter-graph.json", import.meta.url), "utf8");
+    try {
+      await writeFile(dest, tpl, { flag: "wx" }); // never overwrite
+    } catch (e) {
+      if (e.code === "EEXIST") { console.error(`init: ${dest} already exists — not overwriting`); process.exit(1); }
+      throw e;
+    }
+    console.log(dest);
+    console.error(`wrote ${dest} — starter graph (text → LLM prompt-writer → image)
+next: nanoodle inspect ${dest}
+then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
+    return;
+  }
+
   if (cmd !== "run" && cmd !== "inspect") usage();
 
-  let graphPath = null, outDir = null, asJson = false, keyFlag = null, envFile = null, timeoutMs;
+  let graphPath = null, outDir = null, quiet = false, keyFlag = null, envFile = null, timeoutMs;
   const inputArgs = [], setArgs = [];
   let i = 0;
   const val = (flag) => { // a value-taking flag at end of argv is a usage error, not a TypeError
@@ -71,7 +121,7 @@ async function main() {
     if (a === "--input") inputArgs.push(val("--input"));
     else if (a === "--set") setArgs.push(val("--set"));
     else if (a === "--out") outDir = val("--out");
-    else if (a === "--json") asJson = true;
+    else if (a === "--json") quiet = true;
     else if (a === "--key") keyFlag = val("--key");
     else if (a === "--env-file") envFile = val("--env-file");
     else if (a === "--timeout") timeoutMs = +val("--timeout");
@@ -139,7 +189,7 @@ async function main() {
   try {
     result = await wf.run(inputs, {
       settings, timeoutMs,
-      onProgress: asJson ? undefined : (e) => {
+      onProgress: quiet ? undefined : (e) => {
         if (e.type === "node-start") console.error(`▶ ${e.name} (${e.nodeId})`);
         if (e.type === "node-done") console.error(`✔ ${e.name} (${e.nodeId}) ${e.ms}ms${e.costUsd != null ? ` $${e.costUsd}` : ""}`);
         if (e.type === "node-error") console.error(`✖ ${e.name} (${e.nodeId}): ${e.error}`);
@@ -156,37 +206,36 @@ async function main() {
     }
   }
 
-  if (outDir) await mkdir(outDir, { recursive: true });
+  // media outputs land under --out (default ./noodle-out; created only if there is media to save)
+  const dir = outDir ?? "noodle-out";
+  let dirMade = false;
   const printable = {};
   for (const o of wf.outputs) {
     const value = result.outputs[o.key];
     if (value === undefined) { printable[o.key] = null; continue; }
     if (value instanceof MediaRef) {
-      if (outDir) {
-        const safe = o.key.replace(/[^\w.-]+/g, "_");
-        const path = join(outDir, safe + "." + extForMime(value.mime || ""));
-        await value.save(path);
-        printable[o.key] = path;
-        if (!asJson) console.log(`${o.key}: saved ${path}`);
-      } else {
-        printable[o.key] = value.url.length > 200 ? value.url.slice(0, 80) + `… (${value.url.length} chars — use --out to save)` : value.url;
-        if (!asJson) console.log(`${o.key}: ${printable[o.key]}`);
-      }
+      if (!dirMade) { await mkdir(dir, { recursive: true }); dirMade = true; }
+      const safe = o.key.replace(/[^\w.-]+/g, "_");
+      const path = join(dir, safe + "." + extForMime(value.mime || ""));
+      await value.save(path);
+      printable[o.key] = path;
+      if (!quiet) console.error(`${o.key}: saved ${path}`);
     } else {
       printable[o.key] = value;
-      if (!asJson) console.log(`${o.key}: ${value}`);
+      if (!quiet) console.error(`${o.key}: ${value}`);
     }
   }
-  if (asJson) {
-    console.log(JSON.stringify({
-      outputs: printable,
-      costUsd: result.costUsd,
-      costExact: result.costExact,
-      remainingBalance: result.remainingBalance,
-      errors: result.errors,
-      nodes: Object.fromEntries(Object.entries(result.nodes).map(([id, r]) => [id, { status: r.status, ms: r.ms, costUsd: r.costUsd, error: r.error }])),
-    }, null, 2));
-  } else {
+
+  // the run summary is ALWAYS the JSON on stdout (contract shared with nanoodle-py and the docs)
+  console.log(JSON.stringify({
+    outputs: printable,
+    costUsd: result.costUsd,
+    costExact: result.costExact,
+    remainingBalance: result.remainingBalance,
+    errors: result.errors,
+    nodes: Object.fromEntries(Object.entries(result.nodes).map(([id, r]) => [id, { status: r.status, ms: r.ms, costUsd: r.costUsd, error: r.error }])),
+  }, null, 2));
+  if (!quiet) {
     const approx = result.costExact ? "" : "≥ ";
     console.error(`cost: ${approx}$${result.costUsd}${result.remainingBalance != null ? ` · balance: $${result.remainingBalance}` : ""}`);
   }

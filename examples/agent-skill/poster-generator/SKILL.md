@@ -31,8 +31,9 @@ npx nanoodle run workflows/poster.noodle-graph.json \
   --out ./poster-out
 ```
 
-Add `--env-file .env` only when the key is not already exported. For a machine-readable
-payload (paths, cost, balance), add `--json`.
+Add `--env-file .env` only when the key is not already exported. The CLI always prints a
+machine-readable JSON summary (paths, cost, balance) to stdout; add `--json` to silence the
+stderr progress lines.
 
 Optional style override (workflow also exposes this input):
 
@@ -48,11 +49,11 @@ npx nanoodle inspect workflows/poster.noodle-graph.json
 
 ## Outputs
 
-- Media is saved under `--out` as `Poster.<ext>` where `<ext>` follows the image MIME
-  (often `jpg` or `png`). **Use the path the CLI prints on the `Poster:` line** — do not
-  hard-code `.png`.
-- With `--json`, the path is in `outputs.Poster` (and cost/balance in the same object).
-- The CLI also prints total cost (and remaining balance when the API reports it) to stderr.
+- Media is saved under `--out` (default `./noodle-out`) as `Poster.<ext>` where `<ext>`
+  follows the image MIME (often `jpg` or `png`). **Use the `outputs.Poster` path from the
+  JSON summary on stdout** — do not hard-code `.png`.
+- The CLI also prints progress, saved-file lines, and total cost (with remaining balance
+  when the API reports it) to stderr.
 
 ## Cost
 
