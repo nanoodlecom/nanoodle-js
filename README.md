@@ -212,6 +212,20 @@ pays at most once; graphs with several paid nodes produce one small invoice
 per node. Chat and image nodes are live-verified; async video/audio job
 polling under accountless mode is untested upstream.
 
+### Accountless image, start to finish
+
+The starter graph (text → LLM prompt-writer → image), run with **no NanoGPT
+account and no API key** — scan the Nano invoice, and the image node settles
+for a few cents of XNO:
+
+```bash
+nanoodle run noodle-graph.json --input Text="a cozy ramen shop on a rainy night" --pay --out ./noodle-out
+# → LLM node runs, image node prints a nano: QR, waits for the deposit,
+#   then writes noodle-out/Image.jpg
+```
+
+![Accountless x402 run of the starter graph — a bowl of ramen generated with no account and no API key](noodle-out/Image.jpg)
+
 ## Specs and testing
 
 Format and execution semantics live in [docs/](docs/):
