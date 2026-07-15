@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { NanoodleError, RunError, UnsupportedNodeError } from "./errors.mjs";
-import { NODE_TYPES, displayName, isInputPort, materialize, topoSort } from "./graph.mjs";
+import { NODE_TYPES, displayName, isInputPort, materialize, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
 import { deriveInputs, deriveOutputs, deriveSettings, resolveInputKey, resolveSettingKey } from "./io.mjs";
 import { NanoClient } from "./client.mjs";
 import { MediaRef, coerceMediaInput } from "./media.mjs";
@@ -8,6 +8,16 @@ import { RUNNERS } from "./nodes.mjs";
 import { decodeShareUrl, isShareRef } from "./share.mjs";
 
 const MEDIA_KINDS = new Set(["image", "audio", "video", "inpaint"]);
+
+function abortReason(signal) {
+  const r = signal && signal.reason;
+  if (r instanceof Error) return r;
+  return new NanoodleError(r != null ? String(r) : "run aborted", { code: "aborted" });
+}
+
+function throwIfAborted(signal) {
+  if (signal && signal.aborted) throw abortReason(signal);
+}
 
 /** The outcome of Workflow.run(). Media values are MediaRef; text values plain strings. */
 export class RunResult {
@@ -139,6 +149,11 @@ export class Workflow {
 
     const order = topoSort(graph); // throws naming cyclic nodes
 
+    // Local-only graphs never POST media — skip the ~4 MB inline cap on inputs.
+    // Mixed/network graphs keep the cap so we fail before spending on an oversize body.
+    const hasNetwork = graph.nodes.some((n) => NODE_TYPES[n.type] && NODE_TYPES[n.type].network);
+    const mediaCoerceOpts = { enforceInlineMax: hasNetwork };
+
     // effective fields: graph fields + settings overrides + user inputs
     const effFields = new Map(graph.nodes.map((n) => [n.id, { ...n.fields }]));
     for (const { entry, value } of settingAssignments) {
@@ -146,8 +161,17 @@ export class Workflow {
     }
     const explicit = new Set();
     for (const { entry, value } of inputAssignments) {
-      effFields.get(entry.nodeId)[entry.field] = this._coerceInput(entry, value);
+      effFields.get(entry.nodeId)[entry.field] = this._coerceInput(entry, value, mediaCoerceOpts);
       explicit.add(entry);
+    }
+    // vframes: raise frames to highest wired frameK (play.html wiredFramesFloor) so a
+    // persisted frames=1 with frame3 wired doesn't starve the consumer after paid upstream.
+    for (const n of graph.nodes) {
+      if (n.type !== "vframes") continue;
+      const fields = effFields.get(n.id);
+      const floor = wiredFramesFloor(graph, n.id);
+      const cur = Math.max(1, Math.min(MAX_FRAMES, parseInt(fields.frames, 10) || 1));
+      if (floor > cur) fields.frames = String(floor);
     }
     // defaults + required check
     for (const entry of this.inputs) {
@@ -165,7 +189,7 @@ export class Workflow {
     }
 
     // API key (or an x402 payment callback) required only when the graph actually calls NanoGPT
-    if (!this.client.apiKey && !this.client.payment && graph.nodes.some((n) => NODE_TYPES[n.type].network)) {
+    if (!this.client.apiKey && !this.client.payment && hasNetwork) {
       throw new NanoodleError("no API key — pass { apiKey } to Workflow.load/fromJSON, set NANOGPT_API_KEY, or pass { payment } for accountless x402 runs (this workflow calls the NanoGPT API)");
     }
 
@@ -187,6 +211,7 @@ export class Workflow {
     const cost = { total: 0, exact: true, balance: null };
     const byId = new Map(graph.nodes.map((n) => [n.id, n]));
     const promises = new Map();
+    const mediaFetch = this.client.fetch;
 
     const ctxFor = (node, rec) => {
       const onCost = (c) => {
@@ -205,12 +230,17 @@ export class Workflow {
         audio: (model, input, extra) => this.client.audio(model, input, extra, io),
         transcribe: (model, audioUrl, language) => this.client.transcribe(model, audioUrl, language, io),
         fetchMedia: (url) => this.client.fetchMediaDataUrl(url, io),
+        // local media (resize/combine/…) — same fetch + signal as network I/O
+        fetch: mediaFetch,
+        signal: ac.signal,
+        progress: (msg) => emit({ type: "node-progress", nodeId: node.id, name: displayName(node), message: msg }),
       };
     };
 
     const execNode = async (n) => {
       const rec = nodesRec[n.id];
       try {
+        throwIfAborted(ac.signal);
         const inbound = graph.links.filter((l) => l.to.node === n.id);
         const inp = {};
         let fields = effFields.get(n.id);
@@ -226,9 +256,11 @@ export class Workflow {
           else if (v != null) fields = { ...fields, [l.to.port]: v };
         }
         if (upstreamFail) throw new NanoodleError("upstream failed: " + upstreamFail);
+        throwIfAborted(ac.signal);
         emit({ type: "node-start", nodeId: n.id, name: displayName(n) });
         const t0 = Date.now();
         const out = await RUNNERS[n.type]({ ...n, fields }, inp, ctxFor(n, rec));
+        throwIfAborted(ac.signal);
         rec.status = "done";
         rec.out = out;
         rec.ms = Date.now() - t0;
@@ -274,6 +306,25 @@ export class Workflow {
       remainingBalance: cost.balance,
     });
 
+    // timeout/abort must fail the run even when local media finished after the deadline
+    // (or nodes never observed the signal). Prefer the abort reason when present.
+    if (ac.signal.aborted) {
+      const reason = abortReason(ac.signal);
+      const msg = reason.message || "run aborted";
+      // mark any still-pending nodes so result.errors is complete
+      for (const n of order) {
+        const rec = nodesRec[n.id];
+        if (rec && rec.status === "pending") {
+          rec.status = "error";
+          rec.error = msg;
+          if (!errors.some((e) => e.nodeId === n.id)) {
+            errors.push({ nodeId: n.id, name: displayName(n), message: msg });
+          }
+        }
+      }
+      throw new RunError(msg, result, reason.code ? { code: reason.code } : {});
+    }
+
     const failedSinks = this.outputs.filter((o) => nodesRec[o.nodeId] && nodesRec[o.nodeId].status === "error");
     if (failedSinks.length) {
       const detail = failedSinks.map((o) => `"${o.key}": ${nodesRec[o.nodeId].error}`).join("; ");
@@ -282,9 +333,9 @@ export class Workflow {
     return result;
   }
 
-  _coerceInput(entry, value) {
+  _coerceInput(entry, value, mediaOpts) {
     if (MEDIA_KINDS.has(entry.kind)) {
-      return coerceMediaInput(value, `input "${entry.key}"`);
+      return coerceMediaInput(value, `input "${entry.key}"`, mediaOpts);
     }
     if (entry.kind === "choice") {
       const v = String(value);

@@ -136,9 +136,15 @@ Implemented in `src/local-media.mjs` + `src/mp4cat.mjs` (JS) / `nanoodle/local_m
 Node behaviour:
 - **resize** — `mode` fit|fill|exact, width/height; fit never upscales; PNG stays PNG else JPEG.
 - **vframes** — `frames` 1–12, `gap` seconds, `dir` end|start; emits `frame1..frameN` JPEG data URLs.
-- **combine** — clip1../vid1.. inputs (≥2); remux when params match, else re-encode; `dedup` only on re-encode path.
+  - **wiredFramesFloor**: before run, `fields.frames` is raised to the highest wired outbound `frameK` port (same as play.html). Prevents starving a `frame3` consumer when a saved graph still has `frames:1` after paid upstream steps. Settings UI also floors the knob to that value.
+- **combine** — clip1../vid1.. inputs (≥2), ordered by port number across both families; remux when params match, else re-encode; `dedup` only on re-encode path.
 - **soundtrack** — video+audio; `loop` loops audio to fill video length; mux → mp4.
 - **trim** — audio → mono WAV @ 16 kHz; `start` + `length` (default 30s when blank).
 - **extractaudio** — video → mono WAV @ 16 kHz; blank `length` = whole clip after start.
+
+**Executor plumbing:**
+- `run({ timeoutMs, signal })` aborts in-flight ffmpeg (SIGKILL) and fails the run; local media nodes check the signal between frames/clips.
+- Custom `fetch` from `Workflow` opts is passed into local media (https CDN inputs).
+- `MEDIA_INLINE_MAX` (~4.4 MB) is enforced on user media **inputs only when the graph has network nodes**. Local-only graphs may accept larger data: URLs; network send sites still refuse oversized bodies.
 
 Missing ffmpeg when the pure path cannot cover the op → clear error naming the binary. No `UnsupportedNodeError` for these types.

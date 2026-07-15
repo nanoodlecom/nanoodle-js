@@ -9,14 +9,31 @@ export const VID_PORT_RE = /^vid\d+$/;
 export const CLIP_PORT_RE = /^clip\d+$/;    // combine clips
 export const REF_PORT_RE = /^ref\d+$/;      // tvideo reference images
 export const FRAME_PORT_RE = /^frame\d+$/;  // vframes outputs
+export const MAX_FRAMES = 12;
 
 const DYNAMIC_INPUT_RES = [IMG_PORT_RE, EDIT_IMG_RE, VID_PORT_RE, CLIP_PORT_RE, REF_PORT_RE];
 const DYNAMIC_INPUT_NAMES = new Set(["audio", "endframe"]);
 
 /**
+ * Highest frameN port wired OUT of a vframes node. fields.frames is shape-affecting:
+ * run() emits frame1..frameN and downstream links read fixed frameK ports. A count below
+ * the highest wired port starves consumers mid-run (after upstream paid steps). Mirrors
+ * play.html wiredFramesFloor — floor is raised at run and in deriveSettings.
+ */
+export function wiredFramesFloor(graph, nodeId) {
+  let floor = 1;
+  for (const l of (graph && graph.links) || []) {
+    if (l.from.node !== nodeId) continue;
+    const m = /^frame(\d+)$/.exec(String(l.from.port));
+    if (m) floor = Math.max(floor, parseInt(m[1], 10) || 1);
+  }
+  return Math.min(floor, MAX_FRAMES);
+}
+
+/**
  * Node-type registry (execution-relevant subset of the app's NODE_TYPES).
  * flags: local (pure logic / on-device media) | network (calls NanoGPT) | note.
- * Local media ops (resize/vframes/combine/soundtrack/trim/extractaudio) need ffmpeg on PATH.
+ * Local media: pure-JS first (MP4CAT / PCM-WAV / PNG); ffmpeg on PATH is the heavy fallback.
  */
 export const NODE_TYPES = {
   text:    { title: "Text",            inputs: [], outputs: [{ name: "text", type: "text" }], local: true },
@@ -35,7 +52,7 @@ export const NODE_TYPES = {
   tvideo:  { title: "Text→Video",      inputs: [], outputs: [{ name: "video", type: "video" }], network: true },
   ivideo:  { title: "Image→Video",     inputs: ["image"], outputs: [{ name: "video", type: "video" }], network: true },
   vedit:   { title: "Video edit",      inputs: ["video"], outputs: [{ name: "video", type: "video" }], network: true },
-  vframes: { title: "Video → frames",  inputs: ["video"], outputs: [{ name: "frame1", type: "image" }], local: true, framesOut: true },
+  vframes: { title: "Video → frames",  inputs: ["video"], outputs: [{ name: "frame1", type: "image" }], local: true, framesOut: true }, // dynamic frame1..N
   combine: { title: "Combine videos",  inputs: [], outputs: [{ name: "video", type: "video" }], local: true },
   soundtrack: { title: "Soundtrack",   inputs: ["video", "audio"], outputs: [{ name: "video", type: "video" }], local: true },
   lipsync: { title: "Avatar / lipsync", inputs: ["image", "audio"], outputs: [{ name: "video", type: "video" }], network: true },

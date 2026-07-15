@@ -128,10 +128,29 @@ export async function mediaFromFile(path, mime) {
 }
 
 /**
+ * Refuse a data: URL that exceeds NanoGPT's inline body cap.
+ * Used at network send sites and when coercing inputs for graphs that call NanoGPT.
+ * Local-only graphs (resize/combine/vframes/…) skip this — they never POST media.
+ */
+export function assertInlineMediaSize(url, what = "media") {
+  if (typeof url === "string" && url.startsWith("data:") && url.length > MEDIA_INLINE_MAX) {
+    throw new NanoodleError(
+      what + ": media is too large to send inline (~4 MB max). nanoodle sends media as base64 in the request body " +
+      "(NanoGPT has no upload endpoint) — use a smaller file.");
+  }
+}
+
+/**
  * Coerce a user-supplied media input into a URL string (data: or http(s)).
  * Accepts: data:/https URL strings, MediaRef, Uint8Array/Buffer, { data, mime }.
+ *
+ * @param {*} value
+ * @param {string} what label for errors
+ * @param {{ enforceInlineMax?: boolean }} [opts] when true (default), refuse data: URLs
+ *   over MEDIA_INLINE_MAX. Pass false for local-only workflows that never hit NanoGPT.
  */
-export function coerceMediaInput(value, what) {
+export function coerceMediaInput(value, what, opts = {}) {
+  const enforceInlineMax = opts.enforceInlineMax !== false;
   let url;
   if (value instanceof MediaRef) url = value.url;
   else if (typeof value === "string") {
@@ -148,10 +167,6 @@ export function coerceMediaInput(value, what) {
   } else {
     throw new NanoodleError(what + ": unsupported media value (" + typeof value + ")");
   }
-  if (url.startsWith("data:") && url.length > MEDIA_INLINE_MAX) {
-    throw new NanoodleError(
-      what + ": media is too large to send inline (~4 MB max). nanoodle sends media as base64 in the request body " +
-      "(NanoGPT has no upload endpoint) — use a smaller file.");
-  }
+  if (enforceInlineMax) assertInlineMediaSize(url, what);
   return url;
 }

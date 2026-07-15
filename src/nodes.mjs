@@ -12,6 +12,15 @@ function mdl(n) {
   return m; // model strings pass through VERBATIM — endpoint choice is by node TYPE
 }
 
+/** Local-media opts from the workflow ctx (custom fetch + AbortSignal). */
+function mediaOpts(ctx) {
+  if (!ctx) return {};
+  return {
+    ...(ctx.fetch ? { fetch: ctx.fetch } : {}),
+    ...(ctx.signal ? { signal: ctx.signal } : {}),
+  };
+}
+
 function portIdx(name) {
   const m = /(\d+)$/.exec(name);
   return m ? +m[1] : 1;
@@ -313,54 +322,68 @@ export const RUNNERS = {
 
   // ---- local media (pure-JS first like the browser; ffmpeg soft fallback) ----
 
-  async resize(n, inp) {
+  async resize(n, inp, ctx) {
     if (!inp.image) throw new NanoodleError("no image input");
+    const media = mediaOpts(ctx);
     return {
-      image: await resizeCropImage(inp.image, n.fields.mode || "fit", n.fields.width, n.fields.height),
+      image: await resizeCropImage(inp.image, n.fields.mode || "fit", n.fields.width, n.fields.height, media),
     };
   },
 
-  async vframes(n, inp) {
+  async vframes(n, inp, ctx) {
     if (!inp.video) throw new NanoodleError("no video input");
+    const media = mediaOpts(ctx);
     return extractVideoFrames(inp.video, {
       count: n.fields.frames,
       gap: n.fields.gap,
       dir: n.fields.dir || "end",
+      ...media,
+      onProgress: ctx && ctx.progress,
     });
   },
 
-  async combine(n, inp) {
-    // browser uses vid1.. / clip1.. families; accept either (CLIP first when both present)
-    const clips = [
-      ...collectPorts(inp, CLIP_PORT_RE),
-      ...collectPorts(inp, VID_PORT_RE),
-    ].filter((v, i, a) => v && a.indexOf(v) === i);
+  async combine(n, inp, ctx) {
+    // Browser wires vid1..; some docs/saves use clip1.. — accept both, ordered by port number
+    // (not CLIP-then-VID, which reorders mixed graphs).
+    const keys = Object.keys(inp)
+      .filter((k) => CLIP_PORT_RE.test(k) || VID_PORT_RE.test(k))
+      .sort((a, b) => portIdx(a) - portIdx(b) || a.localeCompare(b));
+    const clips = [];
+    const seen = new Set();
+    for (const k of keys) {
+      const v = inp[k];
+      if (!v || seen.has(v)) continue;
+      seen.add(v);
+      clips.push(v);
+    }
     if (clips.length < 2) throw new NanoodleError("wire at least two clips to combine");
     const dedup = n.fields.dedup == null ? true
       : !(n.fields.dedup === false || n.fields.dedup === "false" || n.fields.dedup === 0 || n.fields.dedup === "0");
-    return { video: await concatVideos(clips, dedup) };
+    const media = mediaOpts(ctx);
+    return { video: await concatVideos(clips, dedup, { ...media, onProgress: ctx && ctx.progress }) };
   },
 
-  async soundtrack(n, inp) {
+  async soundtrack(n, inp, ctx) {
     if (!inp.video) throw new NanoodleError("no video input");
     if (!inp.audio) throw new NanoodleError("no audio input");
     const loop = n.fields.loop === true || n.fields.loop === "true" || n.fields.loop === 1 || n.fields.loop === "1";
-    return { video: await muxSoundtrack(inp.video, inp.audio, loop) };
+    const media = mediaOpts(ctx);
+    return { video: await muxSoundtrack(inp.video, inp.audio, loop, { ...media, onProgress: ctx && ctx.progress }) };
   },
 
-  async trim(n, inp) {
+  async trim(n, inp, ctx) {
     if (!inp.audio) throw new NanoodleError("no audio input");
     const start = parseFloat(n.fields.start) || 0;
     const length = parseFloat(n.fields.length);
-    return { audio: await trimAudioToWav(inp.audio, start, Number.isFinite(length) ? length : 30, 16000) };
+    return { audio: await trimAudioToWav(inp.audio, start, Number.isFinite(length) ? length : 30, 16000, mediaOpts(ctx)) };
   },
 
-  async extractaudio(n, inp) {
+  async extractaudio(n, inp, ctx) {
     if (!inp.video) throw new NanoodleError("no video input");
     const start = parseFloat(n.fields.start) || 0;
     const lenRaw = parseFloat(n.fields.length);
     const length = (Number.isFinite(lenRaw) && lenRaw > 0) ? lenRaw : 0;
-    return { audio: await extractAudioToWav(inp.video, start, length, 16000) };
+    return { audio: await extractAudioToWav(inp.video, start, length, 16000, mediaOpts(ctx)) };
   },
 
   async llm(n, inp, ctx) {
