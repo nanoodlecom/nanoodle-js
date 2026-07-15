@@ -1,6 +1,8 @@
 /**
  * Local media nodes (resize / vframes / combine / soundtrack / trim / extractaudio).
- * Soft dependency: ffmpeg on PATH. Each node type gets its own behavioral coverage.
+ *
+ * Pure-JS path (MP4CAT remux, PCM-WAV trim, PNG resize) runs without ffmpeg — same
+ * algorithms as nanoodle/ play.html. ffmpeg is the heavy fallback for everything else.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -9,7 +11,9 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { Workflow, mediaFromFile, MediaRef } from "../src/index.mjs";
-import { resizePlan } from "../src/local-media.mjs";
+import {
+  resizePlan, encodeWavMono, concatVideos, resizeCropImage, trimAudioToWav, MP4CAT,
+} from "../src/local-media.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const media = (name) => join(here, "fixtures", "media", name);
@@ -54,10 +58,30 @@ test("resizePlan: missing both dims → null", () => {
   assert.equal(resizePlan(10, 10, "fit", 0, 0), null);
 });
 
-/* ---------- resize ---------- */
+/* ---------- pure helpers (no ffmpeg) ---------- */
 
-test("resize: fit shrinks a PNG and returns image MediaRef", async (t) => {
-  skipWithoutFfmpeg(t);
+test("encodeWavMono: writes a valid PCM16 mono WAV header", () => {
+  const samples = new Float32Array(160); // 10 ms @ 16 kHz
+  for (let i = 0; i < samples.length; i++) samples[i] = Math.sin(i / 10);
+  const wav = encodeWavMono(samples, 16000);
+  assert.equal(String.fromCharCode(...wav.slice(0, 4)), "RIFF");
+  assert.equal(String.fromCharCode(...wav.slice(8, 12)), "WAVE");
+  assert.equal(wav.length, 44 + samples.length * 2);
+});
+
+test("MP4CAT: matching fixtures remux without ffmpeg", async () => {
+  const A = new Uint8Array(await readFile(media("clipA.mp4")));
+  const B = new Uint8Array(await readFile(media("clipB.mp4")));
+  assert.equal(MP4CAT.isMp4(A), true);
+  assert.equal(MP4CAT.mp4ParamsMatch([A, B]), true);
+  const out = MP4CAT.concatMp4([A, B], { dedup: false });
+  assert.equal(MP4CAT.isMp4(out), true);
+  assert.ok(out.length > A.length);
+});
+
+/* ---------- resize (pure PNG path — no ffmpeg) ---------- */
+
+test("resize: fit shrinks a PNG and returns image MediaRef", async () => {
   const png = await asDataUrl(media("nn-red.png"), "image/png");
   const wf = Workflow.fromJSON({
     nodes: [
@@ -69,13 +93,20 @@ test("resize: fit shrinks a PNG and returns image MediaRef", async (t) => {
   const result = await wf.run({});
   const out = result.get("Resize / crop");
   assert.ok(out instanceof MediaRef);
-  assert.match(out.url, /^data:image\//);
+  assert.match(out.url, /^data:image\/png/);
   const bytes = await out.bytes();
   assert.ok(bytes.length > 20);
+  // pure path: 64×48 fit into 32×32 → 32×24
+  assert.equal(bytes[0], 0x89);
 });
 
-test("resize: missing width+height errors clearly", async (t) => {
-  skipWithoutFfmpeg(t);
+test("resizeCropImage pure: fit never needs ffmpeg for PNG", async () => {
+  const png = await asDataUrl(media("nn-red.png"), "image/png");
+  const out = await resizeCropImage(png, "fit", 32, 32);
+  assert.match(out, /^data:image\/png;base64,/);
+});
+
+test("resize: missing width+height errors clearly", async () => {
   const png = await asDataUrl(media("nn-red.png"), "image/png");
   const wf = Workflow.fromJSON({
     nodes: [
@@ -87,10 +118,9 @@ test("resize: missing width+height errors clearly", async (t) => {
   await assert.rejects(wf.run({}), /width or height/i);
 });
 
-/* ---------- trim ---------- */
+/* ---------- trim (pure PCM-WAV path — no ffmpeg) ---------- */
 
-test("trim: slices wav to mono data:audio/wav", async (t) => {
-  skipWithoutFfmpeg(t);
+test("trim: slices wav to mono data:audio/wav", async () => {
   const wav = await mediaFromFile(media("nn-tone.wav"));
   const wf = Workflow.fromJSON({
     nodes: [
@@ -102,14 +132,19 @@ test("trim: slices wav to mono data:audio/wav", async (t) => {
   const result = await wf.run({ Audio: wav });
   const out = result.get("Trim audio");
   assert.ok(out instanceof MediaRef);
-  assert.match(out.mime || "", /wav|audio/i);
+  assert.match(out.mime || out.url, /wav|audio/i);
   const bytes = await out.bytes();
   assert.ok(bytes.length < 32078); // shorter than full 1s fixture
   assert.equal(String.fromCharCode(...bytes.slice(0, 4)), "RIFF");
 });
 
-test("trim: start past end is a clear error", async (t) => {
-  skipWithoutFfmpeg(t);
+test("trimAudioToWav pure: no ffmpeg for PCM WAV", async () => {
+  const wav = await asDataUrl(media("nn-tone.wav"), "audio/wav");
+  const out = await trimAudioToWav(wav, 0, 0.25, 16000);
+  assert.match(out, /^data:audio\/wav/);
+});
+
+test("trim: start past end is a clear error", async () => {
   const wav = await mediaFromFile(media("nn-tone.wav"));
   const wf = Workflow.fromJSON({
     nodes: [
@@ -162,10 +197,9 @@ test("vframes: extracts N jpeg frames from video", async (t) => {
   assert.match(result.nodes.n2.out.frame2, /^data:image\//);
 });
 
-/* ---------- combine ---------- */
+/* ---------- combine (pure MP4CAT path — no ffmpeg for matching mp4s) ---------- */
 
-test("combine: concatenates two clips into one video", async (t) => {
-  skipWithoutFfmpeg(t);
+test("combine: concatenates two clips into one video", async () => {
   const a = await mediaFromFile(media("clipA.mp4"));
   const b = await mediaFromFile(media("clipB.mp4"));
   const wf = Workflow.fromJSON({
@@ -184,10 +218,17 @@ test("combine: concatenates two clips into one video", async (t) => {
   assert.ok(out instanceof MediaRef);
   const bytes = await out.bytes();
   assert.ok(bytes.length > 1000);
+  assert.equal(MP4CAT.isMp4(bytes), true);
 });
 
-test("combine: fewer than two clips errors", async (t) => {
-  skipWithoutFfmpeg(t);
+test("concatVideos pure: matching mp4s remux without ffmpeg", async () => {
+  const a = await asDataUrl(media("clipA.mp4"), "video/mp4");
+  const b = await asDataUrl(media("clipB.mp4"), "video/mp4");
+  const out = await concatVideos([a, b], false);
+  assert.match(out, /^data:video\/mp4/);
+});
+
+test("combine: fewer than two clips errors", async () => {
   const a = await mediaFromFile(media("clipA.mp4"));
   const wf = Workflow.fromJSON({
     nodes: [

@@ -311,7 +311,7 @@ export const RUNNERS = {
     return { text: [inp.a, inp.b].filter((v) => v != null && v !== "").join(sep) };
   },
 
-  // ---- local media (ffmpeg on PATH; soft dependency, not an npm package) ----
+  // ---- local media (pure-JS first like the browser; ffmpeg soft fallback) ----
 
   async resize(n, inp) {
     if (!inp.image) throw new NanoodleError("no image input");

@@ -122,14 +122,23 @@ No streaming retries needed (engine is non-streaming). Poll GET failures: silent
 - join: [a,b].filter(non-empty).join(sep) where sep = fields.sep ?? " ", literal "\\n" in sep means newline
 - comment: skip
 
-## Local media nodes (on-device; require ffmpeg on PATH — soft dependency, not an npm package)
-Implemented in `src/local-media.mjs` (JS) / `nanoodle/local_media.py` (Py). Behaviour mirrors the browser:
+## Local media nodes (on-device; pure-JS first, ffmpeg fallback)
+Implemented in `src/local-media.mjs` + `src/mp4cat.mjs` (JS) / `nanoodle/local_media.py` (Py). Behaviour mirrors the browser (play.html / index.html):
 
+**Pure-JS path (no ffmpeg)** — same algorithms the app uses when it can avoid re-encode:
+- **combine** — matching mp4s → lossless `MP4CAT` remux (browser primary path; `dedup` ignored on remux).
+- **trim** — PCM WAV → slice + `encodeWavMono` mono @ target rate.
+- **resize** — PNG via pure decode/scale/encode (canvas-equivalent `resizePlan` geometry).
+
+**ffmpeg/ffprobe on PATH (soft dependency, not an npm package)** — when pure JS can't handle the format:
+- mismatched / non-mp4 **combine**, JPEG **resize**, **vframes**, **soundtrack**, non-WAV **trim**, **extractaudio**.
+
+Node behaviour:
 - **resize** — `mode` fit|fill|exact, width/height; fit never upscales; PNG stays PNG else JPEG.
 - **vframes** — `frames` 1–12, `gap` seconds, `dir` end|start; emits `frame1..frameN` JPEG data URLs.
-- **combine** — clip1../vid1.. inputs (≥2); `dedup` drops ~1 frame from subsequent clips; concat → mp4.
+- **combine** — clip1../vid1.. inputs (≥2); remux when params match, else re-encode; `dedup` only on re-encode path.
 - **soundtrack** — video+audio; `loop` loops audio to fill video length; mux → mp4.
 - **trim** — audio → mono WAV @ 16 kHz; `start` + `length` (default 30s when blank).
 - **extractaudio** — video → mono WAV @ 16 kHz; blank `length` = whole clip after start.
 
-Missing ffmpeg → clear error naming the binary. No `UnsupportedNodeError` for these types.
+Missing ffmpeg when the pure path cannot cover the op → clear error naming the binary. No `UnsupportedNodeError` for these types.

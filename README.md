@@ -146,7 +146,7 @@ all fail **before** anything is spent.
 | local media† | resize, vframes, combine, soundtrack, trim, extractaudio |
 | NanoGPT | llm (incl. vision + audio input), image, draw, edit, inpaint*, vision, tvideo, ivideo, vedit, lipsync, music, remix, tts, transcribe |
 
-† **local media** needs **ffmpeg** on `PATH` (soft dependency — not an npm package). Same behaviour as the browser app; clear error if ffmpeg is missing.
+† **local media** prefers a pure-JS path that matches the browser (lossless mp4 remux, PCM-WAV trim, PNG resize). **ffmpeg** on `PATH` is the fallback for everything else (soft dependency — not an npm package); clear error if it’s required and missing.
 
 \* **inpaint:** the browser app composites the mask onto black at the source
 pixel size; this library passes your mask through verbatim. Supply a
