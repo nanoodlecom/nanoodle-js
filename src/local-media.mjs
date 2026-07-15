@@ -23,32 +23,68 @@ import { bytesToDataUrl, dataUrlBytes, sniffMime, MEDIA_INLINE_MAX } from "./med
 import { MP4CAT } from "./mp4cat.mjs";
 
 const MAX_FRAMES = 12;
+/** Refuse pure PNG decode above this edge (memory guard; canvas-class bound). */
+const MAX_IMAGE_DIM = 8192;
+/** Refuse pure WAV decode above this many interleaved samples (~17 min mono @ 48 kHz). */
+const MAX_WAV_SAMPLES = 50_000_000;
+const PROC_STDOUT_MAX = 32 * 1024 * 1024;
 
 /* ---------- process helpers ------------------------------------------------ */
 
-function runProc(bin, args, { timeoutMs = 120000 } = {}) {
+function abortError(signal) {
+  const r = signal && signal.reason;
+  if (r instanceof Error) return r;
+  return new NanoodleError(r != null ? String(r) : "run aborted", { code: "aborted" });
+}
+
+export function throwIfAborted(signal) {
+  if (signal && signal.aborted) throw abortError(signal);
+}
+
+function runProc(bin, args, { timeoutMs = 120000, signal } = {}) {
   return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) return reject(abortError(signal));
     const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0);
+    let settled = false;
+    const finish = (fn) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(to);
+      if (signal) signal.removeEventListener("abort", onAbort);
+      fn();
+    };
     const to = setTimeout(() => {
       child.kill("SIGKILL");
-      reject(new NanoodleError(`${bin} timed out after ${timeoutMs}ms`));
+      finish(() => reject(new NanoodleError(`${bin} timed out after ${timeoutMs}ms`, { code: "timeout" })));
     }, timeoutMs);
-    child.stdout.on("data", (d) => { stdout = Buffer.concat([stdout, d]); });
-    child.stderr.on("data", (d) => { stderr = Buffer.concat([stderr, d]); });
+    const onAbort = () => {
+      child.kill("SIGKILL");
+      finish(() => reject(abortError(signal)));
+    };
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    child.stdout.on("data", (d) => {
+      if (stdout.length < PROC_STDOUT_MAX) {
+        stdout = Buffer.concat([stdout, d.length + stdout.length > PROC_STDOUT_MAX
+          ? d.subarray(0, PROC_STDOUT_MAX - stdout.length) : d]);
+      }
+    });
+    child.stderr.on("data", (d) => {
+      // keep a trailing window for error messages
+      stderr = Buffer.concat([stderr, d]);
+      if (stderr.length > 64 * 1024) stderr = stderr.subarray(stderr.length - 64 * 1024);
+    });
     child.on("error", (e) => {
-      clearTimeout(to);
       if (e && e.code === "ENOENT") {
-        reject(new NanoodleError(
+        finish(() => reject(new NanoodleError(
           `local media nodes need ffmpeg on PATH (not found: ${bin}). ` +
-          "Install ffmpeg, or run this graph in the nanoodle browser app."));
-      } else reject(e);
+          "Install ffmpeg, or run this graph in the nanoodle browser app.")));
+      } else finish(() => reject(e));
     });
     child.on("close", (code) => {
-      clearTimeout(to);
-      if (code === 0) resolve({ stdout, stderr: stderr.toString("utf8") });
-      else reject(new NanoodleError(
-        `${bin} failed (exit ${code}): ${(stderr.toString("utf8") || "").trim().slice(-400) || "no stderr"}`));
+      if (code === 0) finish(() => resolve({ stdout, stderr: stderr.toString("utf8") }));
+      else finish(() => reject(new NanoodleError(
+        `${bin} failed (exit ${code}): ${(stderr.toString("utf8") || "").trim().slice(-400) || "no stderr"}`)));
     });
   });
 }
@@ -172,13 +208,15 @@ function decodePng(bytes) {
   const idats = [];
   let p = 8;
   while (p + 8 <= u8.length) {
-    const len = (u8[p] << 24) | (u8[p + 1] << 16) | (u8[p + 2] << 8) | u8[p + 3];
+    // >>> 0: PNG chunk lengths are unsigned; JS << is signed 32-bit
+    const len = ((u8[p] << 24) | (u8[p + 1] << 16) | (u8[p + 2] << 8) | u8[p + 3]) >>> 0;
+    if (p + 12 + len > u8.length) throw new NanoodleError("couldn't read that image to resize");
     const type = String.fromCharCode(u8[p + 4], u8[p + 5], u8[p + 6], u8[p + 7]);
     const data = u8.subarray(p + 8, p + 8 + len);
     p += 12 + len;
     if (type === "IHDR") {
-      w = (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3];
-      h = (data[4] << 24) | (data[5] << 16) | (data[6] << 8) | data[7];
+      w = ((data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3]) >>> 0;
+      h = ((data[4] << 24) | (data[5] << 16) | (data[6] << 8) | data[7]) >>> 0;
       bitDepth = data[8];
       colorType = data[9];
       if (data[10] !== 0 || data[11] !== 0 || data[12] !== 0) {
@@ -190,6 +228,10 @@ function decodePng(bytes) {
   }
   if (!(w > 0) || !(h > 0) || bitDepth !== 8) {
     throw new NanoodleError("couldn't read that image to resize");
+  }
+  if (w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM) {
+    throw new NanoodleError(
+      `image is too large to resize in-process (${w}×${h}; max ${MAX_IMAGE_DIM}px) — use smaller source dimensions`);
   }
   // colorType: 0 gray, 2 RGB, 4 gray+A, 6 RGBA (no palette)
   if (colorType !== 0 && colorType !== 2 && colorType !== 4 && colorType !== 6) {
@@ -366,7 +408,8 @@ function parsePcmWav(bytes) {
       if (format === 3) bits = -32; // float32 sentinel
     } else if (id === "data") {
       dataOff = body;
-      dataLen = size;
+      // clamp claimed size to bytes actually present (truncated / lying headers)
+      dataLen = Math.min(size, Math.max(0, u8.length - body));
       break;
     }
     p = body + size + (size & 1); // word-align
@@ -377,18 +420,30 @@ function parsePcmWav(bytes) {
   let samples;
   if (bits === 16) {
     const n = Math.floor(dataLen / 2);
+    if (n > MAX_WAV_SAMPLES) {
+      throw new NanoodleError("audio is too long to trim in-process — use a shorter clip");
+    }
     samples = new Float32Array(n);
     for (let i = 0; i < n; i++) samples[i] = dv.getInt16(dataOff + i * 2, true) / 0x8000;
   } else if (bits === 8) {
     const n = dataLen;
+    if (n > MAX_WAV_SAMPLES) {
+      throw new NanoodleError("audio is too long to trim in-process — use a shorter clip");
+    }
     samples = new Float32Array(n);
     for (let i = 0; i < n; i++) samples[i] = (u8[dataOff + i] - 128) / 128;
   } else if (bits === -32) {
     const n = Math.floor(dataLen / 4);
+    if (n > MAX_WAV_SAMPLES) {
+      throw new NanoodleError("audio is too long to trim in-process — use a shorter clip");
+    }
     samples = new Float32Array(n);
     for (let i = 0; i < n; i++) samples[i] = dv.getFloat32(dataOff + i * 4, true);
   } else if (bits === 32) {
     const n = Math.floor(dataLen / 4);
+    if (n > MAX_WAV_SAMPLES) {
+      throw new NanoodleError("audio is too long to trim in-process — use a shorter clip");
+    }
     samples = new Float32Array(n);
     for (let i = 0; i < n; i++) samples[i] = dv.getInt32(dataOff + i * 4, true) / 0x80000000;
   } else {
@@ -460,13 +515,15 @@ function trimPcmWavPure(bytes, start, len, rate, { wholeIfBlank = false } = {}) 
  * Pure path: PNG via zlib (canvas-equivalent geometry). JPEG/WebP/… → ffmpeg.
  * Browser keeps PNG for PNG sources (alpha); others → JPEG q≈0.92 (ffmpeg -q:v 2).
  */
-export async function resizeCropImage(url, mode, tw, th, { fetch: fetchFn } = {}) {
+export async function resizeCropImage(url, mode, tw, th, { fetch: fetchFn, signal } = {}) {
+  throwIfAborted(signal);
   const w = Math.max(0, parseInt(tw, 10) || 0);
   const h = Math.max(0, parseInt(th, 10) || 0);
   if (!w && !h) throw new NanoodleError("set a width or height to resize to");
   const m = mode || "fit";
 
   const bytes = await urlBytes(url, fetchFn);
+  throwIfAborted(signal);
   const mime = sniffMime(bytes);
 
   if (mime === "image/png") {
@@ -478,21 +535,28 @@ export async function resizeCropImage(url, mode, tw, th, { fetch: fetchFn } = {}
       }
       return dataUrl;
     } catch (e) {
-      if (e instanceof NanoodleError && /width or height|inline limit/i.test(e.message || "")) throw e;
+      // rethrow user-facing limits; only fall through for "couldn't read" / exotic PNG
+      if (e instanceof NanoodleError) {
+        if (/width or height|inline limit|too large to resize/i.test(e.message || "")) throw e;
+        if (!/couldn't read that image/i.test(e.message || "")) throw e;
+      } else {
+        throw e; // unexpected (OOM etc.) — don't mask with ffmpeg
+      }
       // exotic PNG → try ffmpeg
     }
   }
 
-  return resizeCropImageFfmpeg(url, m, w, h, { fetch: fetchFn });
+  return resizeCropImageFfmpeg(url, m, w, h, { fetch: fetchFn, signal });
 }
 
-async function resizeCropImageFfmpeg(url, m, w, h, { fetch: fetchFn } = {}) {
+async function resizeCropImageFfmpeg(url, m, w, h, { fetch: fetchFn, signal } = {}) {
   return withTemp(async (dir) => {
+    throwIfAborted(signal);
     const inPath = await writeInput(dir, "in", url, fetchFn);
     const probe = await runProc("ffprobe", [
       "-v", "error", "-select_streams", "v:0",
       "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", inPath,
-    ]);
+    ], { signal });
     const dims = String(probe.stdout).trim().split("x").map(Number);
     const sw = dims[0], sh = dims[1];
     if (!(sw > 0) || !(sh > 0)) throw new NanoodleError("couldn't read that image to resize");
@@ -513,7 +577,7 @@ async function resizeCropImageFfmpeg(url, m, w, h, { fetch: fetchFn } = {}) {
     const args = ["-y", "-i", inPath, "-vf", vf];
     if (wantPng) args.push("-frames:v", "1", outPath);
     else args.push("-frames:v", "1", "-q:v", "2", outPath);
-    await runProc("ffmpeg", args);
+    await runProc("ffmpeg", args, { signal });
 
     const out = await dataUrlFromFile(outPath, wantPng ? "image/png" : "image/jpeg");
     if (out.length > MEDIA_INLINE_MAX) {
@@ -530,8 +594,10 @@ async function resizeCropImageFfmpeg(url, m, w, h, { fetch: fetchFn } = {}) {
  * Pure path for PCM WAV (encodeWavMono + slice, same defaults as play.html).
  * len<=0 means "to end" for extract; for trim browser default length is 30 when blank.
  */
-export async function trimAudioToWav(url, start, len, rate = 16000, { fetch: fetchFn, wholeIfBlank = false } = {}) {
+export async function trimAudioToWav(url, start, len, rate = 16000, { fetch: fetchFn, wholeIfBlank = false, signal } = {}) {
+  throwIfAborted(signal);
   const bytes = await urlBytes(url, fetchFn);
+  throwIfAborted(signal);
   const mime = sniffMime(bytes);
 
   if (mime === "audio/wav") {
@@ -539,16 +605,23 @@ export async function trimAudioToWav(url, start, len, rate = 16000, { fetch: fet
       const wav = trimPcmWavPure(bytes, start, len, rate, { wholeIfBlank });
       return dataUrlFromBytes(wav, "audio/wav");
     } catch (e) {
-      if (e instanceof NanoodleError && /past the end/i.test(e.message || "")) throw e;
+      // past-end / too-long are final; only "unsupported format" falls through to ffmpeg
+      if (e instanceof NanoodleError) {
+        if (/past the end|too long to trim/i.test(e.message || "")) throw e;
+        if (!/unsupported format/i.test(e.message || "")) throw e;
+      } else {
+        throw e;
+      }
       // non-PCM or exotic WAV → ffmpeg
     }
   }
 
-  return trimAudioToWavFfmpeg(url, start, len, rate, { fetch: fetchFn, wholeIfBlank });
+  return trimAudioToWavFfmpeg(url, start, len, rate, { fetch: fetchFn, wholeIfBlank, signal });
 }
 
-async function trimAudioToWavFfmpeg(url, start, len, rate = 16000, { fetch: fetchFn, wholeIfBlank = false } = {}) {
+async function trimAudioToWavFfmpeg(url, start, len, rate = 16000, { fetch: fetchFn, wholeIfBlank = false, signal } = {}) {
   return withTemp(async (dir) => {
+    throwIfAborted(signal);
     const inPath = await writeInput(dir, "in", url, fetchFn);
     const outPath = join(dir, "out.wav");
     const s = Math.max(0, Number(start) || 0);
@@ -557,9 +630,13 @@ async function trimAudioToWavFfmpeg(url, start, len, rate = 16000, { fetch: fetc
     try {
       const pr = await runProc("ffprobe", [
         "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", inPath,
-      ]);
+      ], { signal });
       dur = parseFloat(String(pr.stdout).trim());
-    } catch { /* some containers lack duration; ffmpeg -t still works */ }
+    } catch (e) {
+      if (e instanceof NanoodleError && (e.code === "aborted" || e.code === "timeout" || /timed out|aborted/i.test(e.message || ""))) throw e;
+      if (signal && signal.aborted) throw abortError(signal);
+      /* some containers lack duration; ffmpeg -t still works */
+    }
 
     if (dur != null && isFinite(dur) && s >= dur) {
       throw new NanoodleError(
@@ -578,8 +655,9 @@ async function trimAudioToWavFfmpeg(url, start, len, rate = 16000, { fetch: fetc
     if (take != null) args.push("-t", String(take));
     args.push("-vn", "-ac", "1", "-ar", String(rate || 16000), "-f", "wav", outPath);
     try {
-      await runProc("ffmpeg", args);
+      await runProc("ffmpeg", args, { signal });
     } catch (e) {
+      if (e instanceof NanoodleError && (e.code === "aborted" || e.code === "timeout")) throw e;
       const msg = e.message || "";
       if (/does not contain any stream|Output file does not contain|no audio/i.test(msg)
         || /Stream map|matches no streams/i.test(msg)) {
@@ -600,7 +678,8 @@ export async function extractAudioToWav(url, start, len, rate = 16000, opts = {}
 
 /* ---------- vframes (ffmpeg — needs a video decoder) ----------------------- */
 
-export async function extractVideoFrames(url, { count = 1, gap = 0.5, dir = "end", fetch: fetchFn, onProgress } = {}) {
+export async function extractVideoFrames(url, { count = 1, gap = 0.5, dir = "end", fetch: fetchFn, onProgress, signal } = {}) {
+  throwIfAborted(signal);
   const n = Math.max(1, Math.min(MAX_FRAMES, parseInt(count, 10) || 1));
   const stepSec = Number.isFinite(Number(gap)) ? Math.max(0, Number(gap)) : 0.5;
   const fromEnd = (dir || "end") === "end";
@@ -608,21 +687,23 @@ export async function extractVideoFrames(url, { count = 1, gap = 0.5, dir = "end
 
   return withTemp(async (dir) => {
     const inPath = await writeInput(dir, "in", url, fetchFn);
+    throwIfAborted(signal);
     const pr = await runProc("ffprobe", [
       "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", inPath,
-    ]);
+    ], { signal });
     const dur = parseFloat(String(pr.stdout).trim());
     if (!isFinite(dur) || dur <= 0) throw new NanoodleError("video has no readable duration");
 
     const out = {};
     for (let i = 0; i < n; i++) {
+      throwIfAborted(signal);
       if (onProgress) onProgress(`extracting frame ${i + 1}/${n}…`);
       let t = fromEnd ? (dur - EPS - i * stepSec) : (i * stepSec);
       t = Math.max(0, Math.min(Math.max(0, dur - EPS), t));
       const framePath = join(dir, `f${i + 1}.jpg`);
       await runProc("ffmpeg", [
         "-y", "-ss", String(t), "-i", inPath, "-frames:v", "1", "-q:v", "2", framePath,
-      ]);
+      ], { signal });
       out["frame" + (i + 1)] = await dataUrlFromFile(framePath, "image/jpeg");
     }
     return out;
@@ -638,13 +719,15 @@ export async function extractVideoFrames(url, { count = 1, gap = 0.5, dir = "end
  *      would kill the keyframe).
  *   2. Else re-encode via ffmpeg (browser falls back to MediaRecorder).
  */
-export async function concatVideos(urls, dedup = true, { fetch: fetchFn, onProgress } = {}) {
+export async function concatVideos(urls, dedup = true, { fetch: fetchFn, onProgress, signal } = {}) {
   if (!urls || urls.length < 2) throw new NanoodleError("wire at least two clips to combine");
+  throwIfAborted(signal);
 
   // Pure path: load all bytes, try MP4CAT (exact browser primary path)
   try {
     const bufs = [];
     for (let i = 0; i < urls.length; i++) {
+      throwIfAborted(signal);
       if (onProgress) onProgress(`loading clip ${i + 1}/${urls.length}…`);
       bufs.push(await urlBytes(urls[i], fetchFn));
     }
@@ -655,17 +738,22 @@ export async function concatVideos(urls, dedup = true, { fetch: fetchFn, onProgr
       return dataUrlFromBytes(out, "video/mp4");
     }
   } catch (e) {
-    if (e instanceof NanoodleError && /wire at least two|no media|download media/i.test(e.message || "")) throw e;
-    // fall through to ffmpeg
+    if (e && (e.code === "aborted" || e.code === "timeout")) throw e;
+    if (e instanceof NanoodleError) {
+      if (/wire at least two|no media|download media|aborted|timed out/i.test(e.message || "")) throw e;
+      throw e; // other deliberate errors (not remux glitches)
+    }
+    // MP4CAT throws plain Error on parse issues → fall through to ffmpeg
   }
 
-  return concatVideosFfmpeg(urls, dedup, { fetch: fetchFn, onProgress });
+  return concatVideosFfmpeg(urls, dedup, { fetch: fetchFn, onProgress, signal });
 }
 
-async function concatVideosFfmpeg(urls, dedup = true, { fetch: fetchFn, onProgress } = {}) {
+async function concatVideosFfmpeg(urls, dedup = true, { fetch: fetchFn, onProgress, signal } = {}) {
   return withTemp(async (dir) => {
     const paths = [];
     for (let i = 0; i < urls.length; i++) {
+      throwIfAborted(signal);
       if (onProgress) onProgress(`loading clip ${i + 1}/${urls.length}…`);
       paths.push(await writeInput(dir, `c${i}`, urls[i], fetchFn));
     }
@@ -674,13 +762,14 @@ async function concatVideosFfmpeg(urls, dedup = true, { fetch: fetchFn, onProgre
     // MediaRecorder path equivalent; pure remux path above never drops frames).
     const prepared = [];
     for (let i = 0; i < paths.length; i++) {
+      throwIfAborted(signal);
       if (dedup && i > 0) {
         const trimmed = join(dir, `t${i}.mp4`);
         await runProc("ffmpeg", [
           "-y", "-ss", "0.033", "-i", paths[i],
           "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
           "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", trimmed,
-        ]);
+        ], { signal });
         prepared.push(trimmed);
       } else {
         prepared.push(paths[i]);
@@ -696,13 +785,14 @@ async function concatVideosFfmpeg(urls, dedup = true, { fetch: fetchFn, onProgre
     try {
       await runProc("ffmpeg", [
         "-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-movflags", "+faststart", outPath,
-      ]);
-    } catch {
+      ], { signal });
+    } catch (e) {
+      if (e instanceof NanoodleError && (e.code === "aborted" || e.code === "timeout" || /aborted|timed out/i.test(e.message || ""))) throw e;
       await runProc("ffmpeg", [
         "-y", "-f", "concat", "-safe", "0", "-i", listPath,
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
         "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", outPath,
-      ]);
+      ], { signal });
     }
     return dataUrlFromFile(outPath, "video/mp4");
   });
@@ -715,8 +805,9 @@ async function concatVideosFfmpeg(urls, dedup = true, { fetch: fetchFn, onProgre
  * Browser re-records via MediaRecorder; headless uses ffmpeg. (Pure mp4 audio-track
  * replace is a future pure-path candidate once we can encode AAC without ffmpeg.)
  */
-export async function muxSoundtrack(videoUrl, audioUrl, loop = false, { fetch: fetchFn, onProgress } = {}) {
+export async function muxSoundtrack(videoUrl, audioUrl, loop = false, { fetch: fetchFn, onProgress, signal } = {}) {
   return withTemp(async (dir) => {
+    throwIfAborted(signal);
     if (onProgress) onProgress("adding soundtrack…");
     const vPath = await writeInput(dir, "v", videoUrl, fetchFn);
     const aPath = await writeInput(dir, "a", audioUrl, fetchFn);
@@ -726,9 +817,13 @@ export async function muxSoundtrack(videoUrl, audioUrl, loop = false, { fetch: f
     try {
       const pr = await runProc("ffprobe", [
         "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", vPath,
-      ]);
+      ], { signal });
       vdur = parseFloat(String(pr.stdout).trim());
-    } catch { /* optional */ }
+    } catch (e) {
+      if (e instanceof NanoodleError && (e.code === "aborted" || e.code === "timeout" || /timed out|aborted/i.test(e.message || ""))) throw e;
+      if (signal && signal.aborted) throw abortError(signal);
+      /* optional */
+    }
 
     const args = ["-y", "-i", vPath];
     if (loop) args.push("-stream_loop", "-1");
@@ -738,9 +833,10 @@ export async function muxSoundtrack(videoUrl, audioUrl, loop = false, { fetch: f
     args.push("-movflags", "+faststart", outPath);
 
     try {
-      await runProc("ffmpeg", args);
+      await runProc("ffmpeg", args, { signal });
     } catch (e) {
       if (isMissingFfmpeg(e)) throw e;
+      if (e instanceof NanoodleError && (e.code === "aborted" || e.code === "timeout" || /aborted|timed out/i.test(e.message || ""))) throw e;
       const args2 = ["-y", "-i", vPath];
       if (loop) args2.push("-stream_loop", "-1");
       args2.push("-i", aPath, "-map", "0:v:0", "-map", "1:a:0",
@@ -749,10 +845,10 @@ export async function muxSoundtrack(videoUrl, audioUrl, loop = false, { fetch: f
       if (loop && vdur != null && isFinite(vdur)) args2.push("-t", String(vdur));
       else args2.push("-shortest");
       args2.push("-movflags", "+faststart", outPath);
-      await runProc("ffmpeg", args2);
+      await runProc("ffmpeg", args2, { signal });
     }
     return dataUrlFromFile(outPath, "video/mp4");
   });
 }
 
-export { MAX_FRAMES, MP4CAT };
+export { MAX_FRAMES, MAX_IMAGE_DIM, MP4CAT };

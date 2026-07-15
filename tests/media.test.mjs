@@ -62,6 +62,8 @@ test("coerceMediaInput: URLs verbatim, bytes → sniffed data:, plain strings re
   assert.throws(() => coerceMediaInput("./photo.png", "x"), /mediaFromFile/);
   const big = "data:image/png;base64," + "A".repeat(MEDIA_INLINE_MAX);
   assert.throws(() => coerceMediaInput(big, "x"), /too large to send inline/);
+  // local-only graphs opt out of the inline cap
+  assert.equal(coerceMediaInput(big, "x", { enforceInlineMax: false }), big);
 });
 
 test("sniffMime magic bytes", () => {

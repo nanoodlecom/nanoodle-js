@@ -1,5 +1,5 @@
 import { NanoodleError } from "./errors.mjs";
-import { NODE_TYPES, displayName, topoSort } from "./graph.mjs";
+import { NODE_TYPES, displayName, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
 
 /* ============================== INPUTS ============================== */
 
@@ -154,9 +154,10 @@ export function deriveOutputs(graph) {
     if (count > 1) key = key + " " + count;
     const t = NODE_TYPES[n.type];
     let ports = t.outputs.map((p) => ({ ...p }));
-    // vframes grows frame1..frameN from fields.frames (mirrors browser dynamic outputs)
+    // vframes grows frame1..frameN from max(fields.frames, wired floor) (mirrors browser)
     if (n.type === "vframes") {
-      const count = Math.max(1, Math.min(12, parseInt(n.fields && n.fields.frames, 10) || 1));
+      const authored = Math.max(1, Math.min(MAX_FRAMES, parseInt(n.fields && n.fields.frames, 10) || 1));
+      const count = Math.max(authored, wiredFramesFloor(graph, n.id));
       ports = [];
       for (let i = 1; i <= count; i++) ports.push({ name: "frame" + i, type: "image" });
     }
@@ -260,7 +261,7 @@ export const SETTING_SPECS = {
   ],
   vframes: [
     { f: "dir", label: "Start from", kind: "select", options: ["end", "start"], def: "end" },
-    { f: "frames", label: "Frames", kind: "number", def: "1" },
+    { f: "frames", label: "Frames", kind: "number", def: "1", min: 1, max: 12 },
     { f: "gap", label: "Gap (s)", kind: "number", def: "0.5" },
   ],
   combine: [
@@ -292,10 +293,16 @@ export function deriveSettings(graph) {
     for (const s of specs) {
       if (graph.links.some((l) => l.to.node === n.id && l.to.port === s.f)) continue; // wired knob is decided upstream
       const cur = n.fields[s.f];
+      // vframes frames is shape-affecting — never offer a floor below the highest wired frameK
+      const min = (n.type === "vframes" && s.f === "frames")
+        ? Math.max(s.min || 1, wiredFramesFloor(graph, n.id))
+        : s.min;
       out.push({
         key: `${n.id}.${s.f}`, nodeId: n.id, field: s.f, kind: s.kind, label: s.label,
         def: cur != null && String(cur) !== "" ? cur : s.def,
         ...(s.options ? { options: [...s.options] } : {}),
+        ...(min != null ? { min } : {}),
+        ...(s.max != null ? { max: s.max } : {}),
         title: displayName(n),
       });
     }
