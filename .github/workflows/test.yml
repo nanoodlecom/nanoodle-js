@@ -15,6 +15,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      # offline unit tests only — zero deps, nothing to install; the mock harness
-      # provides every endpoint. NEVER add live NanoGPT calls here.
+      # Soft runtime dep for local media (resize/vframes/combine/… fallback path).
+      # Pure-JS paths run without it; installing here exercises the full suite.
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # offline unit tests only — zero npm deps; the mock harness provides every
+      # endpoint. NEVER add live NanoGPT calls here.
       - run: npm test

@@ -38,7 +38,8 @@ test("wiredFramesFloor: highest outbound frameK", () => {
 });
 
 test("vframes: frames=1 with frame3 wired still emits frame3 (no starve)", async (t) => {
-  if (!hasFfmpeg) t.skip("ffmpeg not on PATH");
+  // Must return: t.skip() only marks the test; it does not abort the body.
+  if (!hasFfmpeg) return t.skip("ffmpeg not on PATH");
   const vid = await mediaFromFile(media("clipA.mp4"));
   const wf = Workflow.fromJSON({
     nodes: [
@@ -75,14 +76,14 @@ test("deriveSettings: vframes frames min rises to wired floor", () => {
 /* ---------- timeout / abort ---------- */
 
 test("timeoutMs fails a long local-media run", async (t) => {
-  if (!hasFfmpeg) t.skip("ffmpeg not on PATH");
+  if (!hasFfmpeg) return t.skip("ffmpeg not on PATH");
   const dir = await mkdtemp(join(tmpdir(), "nn-hard-"));
   const long = join(dir, "long.mp4");
   const gen = spawnSync("ffmpeg", [
     "-y", "-f", "lavfi", "-i", "color=c=red:s=320x180:d=4",
     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-t", "4", long,
   ], { stdio: "ignore" });
-  if (gen.status !== 0) t.skip("could not generate test video");
+  if (gen.status !== 0) return t.skip("could not generate test video");
   const vid = await mediaFromFile(long);
   const wf = Workflow.fromJSON({
     nodes: [
@@ -102,13 +103,14 @@ test("timeoutMs fails a long local-media run", async (t) => {
 });
 
 test("AbortSignal cancels local-media run", async (t) => {
-  if (!hasFfmpeg) t.skip("ffmpeg not on PATH");
+  if (!hasFfmpeg) return t.skip("ffmpeg not on PATH");
   const dir = await mkdtemp(join(tmpdir(), "nn-hard2-"));
   const long = join(dir, "long.mp4");
-  spawnSync("ffmpeg", [
+  const gen = spawnSync("ffmpeg", [
     "-y", "-f", "lavfi", "-i", "color=c=blue:s=320x180:d=4",
     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-t", "4", long,
   ], { stdio: "ignore" });
+  if (gen.status !== 0) return t.skip("could not generate test video");
   const vid = await mediaFromFile(long);
   const wf = Workflow.fromJSON({
     nodes: [

@@ -21,7 +21,10 @@ const hasFfmpeg = !spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).error
   && spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status === 0;
 
 function skipWithoutFfmpeg(t) {
-  if (!hasFfmpeg) t.skip("ffmpeg not on PATH");
+  // Must return: t.skip() only marks the test; it does not abort the body
+  // (Node 20/22 then report exit 1 with fail=0 if the body later throws).
+  if (!hasFfmpeg) return t.skip("ffmpeg not on PATH");
+  return false;
 }
 
 async function asDataUrl(path, mime) {
@@ -159,7 +162,7 @@ test("trim: start past end is a clear error", async () => {
 /* ---------- extractaudio ---------- */
 
 test("extractaudio: pulls audio track from mp4 → wav", async (t) => {
-  skipWithoutFfmpeg(t);
+  if (skipWithoutFfmpeg(t)) return;
   const vid = await mediaFromFile(media("clipA.mp4"));
   const wf = Workflow.fromJSON({
     nodes: [
@@ -178,7 +181,7 @@ test("extractaudio: pulls audio track from mp4 → wav", async (t) => {
 /* ---------- vframes ---------- */
 
 test("vframes: extracts N jpeg frames from video", async (t) => {
-  skipWithoutFfmpeg(t);
+  if (skipWithoutFfmpeg(t)) return;
   const vid = await mediaFromFile(media("clipA.mp4"));
   const wf = Workflow.fromJSON({
     nodes: [
@@ -245,7 +248,7 @@ test("combine: fewer than two clips errors", async () => {
 /* ---------- soundtrack ---------- */
 
 test("soundtrack: muxes wav onto video", async (t) => {
-  skipWithoutFfmpeg(t);
+  if (skipWithoutFfmpeg(t)) return;
   const vid = await mediaFromFile(media("clipA.mp4"));
   const wav = await mediaFromFile(media("nn-tone.wav"));
   const wf = Workflow.fromJSON({
