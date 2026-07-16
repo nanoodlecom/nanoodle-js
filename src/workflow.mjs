@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import { NanoodleError, RunError, UnsupportedNodeError } from "./errors.mjs";
 import { NODE_TYPES, displayName, isInputPort, materialize, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
 import { deriveInputs, deriveOutputs, deriveSettings, resolveInputKey, resolveSettingKey } from "./io.mjs";
@@ -6,6 +5,25 @@ import { NanoClient } from "./client.mjs";
 import { MediaRef, coerceMediaInput } from "./media.mjs";
 import { RUNNERS } from "./nodes.mjs";
 import { decodeShareUrl, isShareRef } from "./share.mjs";
+
+/** Env / process access — safe when `process` is missing (browsers, some workers). */
+function envApiKey() {
+  try {
+    return typeof process !== "undefined" && process.env ? process.env.NANOGPT_API_KEY : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function warnGraph(msg) {
+  try {
+    if (typeof process !== "undefined" && typeof process.emitWarning === "function") {
+      process.emitWarning(msg, { code: "NANOODLE_GRAPH" });
+      return;
+    }
+  } catch { /* ignore */ }
+  if (typeof console !== "undefined" && console.warn) console.warn("[nanoodle]", msg);
+}
 
 const MEDIA_KINDS = new Set(["image", "audio", "video", "inpaint"]);
 
@@ -65,7 +83,7 @@ export class Workflow {
     /** Load-time warnings (unknown / unsupported node types). load() only warns; run() fails fast. */
     this.warnings = warnings;
     this.client = new NanoClient({
-      apiKey: opts.apiKey !== undefined ? opts.apiKey : process.env.NANOGPT_API_KEY,
+      apiKey: opts.apiKey !== undefined ? opts.apiKey : envApiKey(),
       baseUrl: opts.baseUrl,
       fetch: opts.fetch,
       pollIntervals: opts.pollIntervals,
@@ -79,7 +97,7 @@ export class Workflow {
     /** [{ key, nodeId, field, kind, def, options? }] */
     this.settings = deriveSettings(this.graph);
     if (warnings.length && !opts.quiet) {
-      for (const w of warnings) process.emitWarning(w, { code: "NANOODLE_GRAPH" });
+      for (const w of warnings) warnGraph(w);
     }
   }
 
@@ -89,12 +107,19 @@ export class Workflow {
    * short link) or a bare #g=/#j=/#a= fragment. Direct fragment links decode
    * offline; only fragment-less short links touch the network (redirect-header
    * reads, no credentials attached).
+   *
+   * File paths use Node's `fs` (dynamic import). In browsers, pass a parsed
+   * object / JSON string to `Workflow.fromJSON`, or a share URL/fragment.
    */
   static async load(src, opts = {}) {
     if (isShareRef(src)) {
       const { graph } = await decodeShareUrl(src, { fetch: opts.fetch });
       return new Workflow(graph, opts);
     }
+    if (typeof src === "string" && /^\s*[\[{]/.test(src)) {
+      return Workflow.fromJSON(src, opts);
+    }
+    const { readFile } = await import("node:fs/promises");
     return Workflow.fromJSON(await readFile(src, "utf8"), opts);
   }
 
