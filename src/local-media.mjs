@@ -13,11 +13,7 @@
  *
  * Outputs are data: URLs so they plug into the existing MediaRef / network-inline pipeline.
  */
-import { spawn } from "node:child_process";
-import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { inflateSync, deflateSync } from "node:zlib";
+import { inflate, deflate } from "./zlib.mjs";
 import { NanoodleError } from "./errors.mjs";
 import { bytesToDataUrl, dataUrlBytes, sniffMime, MEDIA_INLINE_MAX } from "./media.mjs";
 import { MP4CAT } from "./mp4cat.mjs";
@@ -31,6 +27,22 @@ const PROC_STDOUT_MAX = 32 * 1024 * 1024;
 
 /* ---------- process helpers ------------------------------------------------ */
 
+// The ffmpeg fallback needs Node builtins; they load lazily so this module
+// imports cleanly in a browser, where only the pure-JS paths ever run.
+let spawn, mkdtemp, readFile, writeFile, rm, tmpdir, join;
+async function ensureNodeDeps() {
+  if (spawn) return;
+  const [cp, fsp, os, path] = await Promise.all([
+    import("node:child_process"),
+    import("node:fs/promises"),
+    import("node:os"),
+    import("node:path"),
+  ]);
+  spawn = cp.spawn;
+  mkdtemp = fsp.mkdtemp; readFile = fsp.readFile; writeFile = fsp.writeFile; rm = fsp.rm;
+  tmpdir = os.tmpdir; join = path.join;
+}
+
 function abortError(signal) {
   const r = signal && signal.reason;
   if (r instanceof Error) return r;
@@ -41,7 +53,8 @@ export function throwIfAborted(signal) {
   if (signal && signal.aborted) throw abortError(signal);
 }
 
-function runProc(bin, args, { timeoutMs = 120000, signal } = {}) {
+async function runProc(bin, args, { timeoutMs = 120000, signal } = {}) {
+  await ensureNodeDeps();
   return new Promise((resolve, reject) => {
     if (signal && signal.aborted) return reject(abortError(signal));
     const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -94,6 +107,7 @@ function isMissingFfmpeg(err) {
 }
 
 async function withTemp(fn) {
+  await ensureNodeDeps();
   const dir = await mkdtemp(join(tmpdir(), "nanoodle-media-"));
   try { return await fn(dir); }
   finally { await rm(dir, { recursive: true, force: true }).catch(() => {}); }
@@ -115,6 +129,7 @@ async function urlBytes(url, fetchFn) {
 }
 
 async function writeInput(dir, name, url, fetchFn) {
+  await ensureNodeDeps();
   const bytes = await urlBytes(url, fetchFn);
   // preserve a sensible extension so ffmpeg picks the demuxer
   let ext = ".bin";
@@ -138,12 +153,12 @@ async function writeInput(dir, name, url, fetchFn) {
   return path;
 }
 
-function dataUrlFromFile(path, mimeHint) {
-  return readFile(path).then((buf) => {
-    const u8 = new Uint8Array(buf);
-    const mime = mimeHint || sniffMime(u8);
-    return bytesToDataUrl(u8, mime);
-  });
+async function dataUrlFromFile(path, mimeHint) {
+  await ensureNodeDeps();
+  const buf = await readFile(path);
+  const u8 = new Uint8Array(buf);
+  const mime = mimeHint || sniffMime(u8);
+  return bytesToDataUrl(u8, mime);
 }
 
 function dataUrlFromBytes(bytes, mime) {
@@ -185,18 +200,27 @@ function crc32(buf) {
   return (~c) >>> 0;
 }
 
+function catBytes(parts) {
+  let total = 0;
+  for (const p of parts) total += p.length;
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+
 function pngChunk(type, data) {
-  const typeB = Buffer.from(type, "ascii");
-  const len = Buffer.alloc(4);
-  len.writeUInt32BE(data.length, 0);
-  const body = Buffer.concat([typeB, data]);
-  const crc = Buffer.alloc(4);
-  crc.writeUInt32BE(crc32(body), 0);
-  return Buffer.concat([len, body, crc]);
+  const out = new Uint8Array(12 + data.length);
+  const dv = new DataView(out.buffer);
+  dv.setUint32(0, data.length);
+  for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+  out.set(data, 8);
+  dv.setUint32(8 + data.length, crc32(out.subarray(4, 8 + data.length)));
+  return out;
 }
 
 /** Decode 8-bit RGB/RGBA/gray/gray+alpha PNG → { w, h, rgba:Uint8ClampedArray }. */
-function decodePng(bytes) {
+async function decodePng(bytes) {
   const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   if (u8.length < 8 || u8[0] !== 0x89 || u8[1] !== 0x50) {
     throw new NanoodleError("couldn't read that image to resize");
@@ -223,7 +247,7 @@ function decodePng(bytes) {
         throw new NanoodleError("couldn't read that image to resize"); // compressed/filter/interlace
       }
     } else if (type === "IDAT") {
-      idats.push(Buffer.from(data));
+      idats.push(data);
     } else if (type === "IEND") break;
   }
   if (!(w > 0) || !(h > 0) || bitDepth !== 8) {
@@ -238,12 +262,12 @@ function decodePng(bytes) {
     throw new NanoodleError("couldn't read that image to resize");
   }
   const cpp = colorType === 0 ? 1 : colorType === 2 ? 3 : colorType === 4 ? 2 : 4;
-  const raw = inflateSync(Buffer.concat(idats));
+  const raw = await inflate(catBytes(idats));
   const stride = w * cpp;
   const expected = h * (1 + stride);
   if (raw.length < expected) throw new NanoodleError("couldn't read that image to resize");
 
-  const unfiltered = Buffer.alloc(h * stride);
+  const unfiltered = new Uint8Array(h * stride);
   for (let y = 0; y < h; y++) {
     const ftype = raw[y * (1 + stride)];
     const row = raw.subarray(y * (1 + stride) + 1, y * (1 + stride) + 1 + stride);
@@ -289,28 +313,28 @@ function decodePng(bytes) {
   return { w, h, rgba };
 }
 
-function encodePngRgba(w, h, rgba) {
+async function encodePngRgba(w, h, rgba) {
   // Filter type 0 (None) per row — simple, correct.
   const stride = w * 4;
-  const raw = Buffer.alloc(h * (1 + stride));
+  const raw = new Uint8Array(h * (1 + stride));
   for (let y = 0; y < h; y++) {
     raw[y * (1 + stride)] = 0;
-    Buffer.from(rgba.buffer, rgba.byteOffset + y * stride, stride)
-      .copy(raw, y * (1 + stride) + 1);
+    raw.set(rgba.subarray(y * stride, (y + 1) * stride), y * (1 + stride) + 1);
   }
-  const compressed = deflateSync(raw, { level: 9 });
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(w, 0);
-  ihdr.writeUInt32BE(h, 4);
+  const compressed = await deflate(raw, { level: 9 });
+  const ihdr = new Uint8Array(13);
+  const dv = new DataView(ihdr.buffer);
+  dv.setUint32(0, w);
+  dv.setUint32(4, h);
   ihdr[8] = 8; // bit depth
   ihdr[9] = 6; // RGBA
   ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
-  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  return Buffer.concat([
+  const sig = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  return catBytes([
     sig,
     pngChunk("IHDR", ihdr),
     pngChunk("IDAT", compressed),
-    pngChunk("IEND", Buffer.alloc(0)),
+    pngChunk("IEND", new Uint8Array(0)),
   ]);
 }
 
@@ -359,7 +383,7 @@ export async function maskToSource(maskUrl, sourceUrl, { fetch: fetchFn, signal 
   const maskMime = sniffMime(maskBytes);
   if (srcMime === "image/png" && maskMime === "image/png") {
     try {
-      return dataUrlFromBytes(maskToSourcePngPure(maskBytes, srcBytes), "image/png");
+      return dataUrlFromBytes(await maskToSourcePngPure(maskBytes, srcBytes), "image/png");
     } catch (e) {
       if (e instanceof NanoodleError) {
         if (/couldn't read the (mask|source)/i.test(e.message || "")) throw e;
@@ -375,11 +399,11 @@ export async function maskToSource(maskUrl, sourceUrl, { fetch: fetchFn, signal 
 }
 
 /** Pure PNG composite matching canvas: black fill + drawImage(mask → source size). */
-function maskToSourcePngPure(maskBytes, srcBytes) {
+async function maskToSourcePngPure(maskBytes, srcBytes) {
   let src, mask;
-  try { src = decodePng(srcBytes); }
+  try { src = await decodePng(srcBytes); }
   catch { throw new NanoodleError("couldn't read the source image"); }
-  try { mask = decodePng(maskBytes); }
+  try { mask = await decodePng(maskBytes); }
   catch { throw new NanoodleError("couldn't read the mask"); }
 
   const sw = src.w, sh = src.h;
@@ -454,8 +478,8 @@ async function maskToSourceFfmpeg(maskUrl, sourceUrl, { fetch: fetchFn, signal }
  * Pure resize matching canvas drawImage(img, dx, dy, dw, dh) onto cw×ch.
  * PNG only (JPEG needs ffmpeg). Output always PNG (preserves alpha like browser PNG path).
  */
-function resizeCropPngPure(bytes, mode, tw, th) {
-  const { w: sw, h: sh, rgba } = decodePng(bytes);
+async function resizeCropPngPure(bytes, mode, tw, th) {
+  const { w: sw, h: sh, rgba } = await decodePng(bytes);
   const p = resizePlan(sw, sh, mode, tw, th);
   if (!p) throw new NanoodleError("set a width or height to resize to");
   // Canvas default: transparent black outside the draw rect.
@@ -645,7 +669,7 @@ export async function resizeCropImage(url, mode, tw, th, { fetch: fetchFn, signa
 
   if (mime === "image/png") {
     try {
-      const out = resizeCropPngPure(bytes, m, w, h);
+      const out = await resizeCropPngPure(bytes, m, w, h);
       const dataUrl = dataUrlFromBytes(out, "image/png");
       if (dataUrl.length > MEDIA_INLINE_MAX) {
         throw new NanoodleError("resized image is still over the ~4 MB inline limit — pick smaller dimensions");

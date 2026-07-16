@@ -27,10 +27,10 @@ for (const g of goldens) {
     }
   });
 
-  test(`golden ${g.name}: bare fragment and tail forms decode too`, () => {
+  test(`golden ${g.name}: bare fragment and tail forms decode too`, async () => {
     const frag = g.url.slice(g.url.indexOf("#"));
-    assert.deepEqual(decodeShareFragment(frag).graph, g.graph);       // "#g=…"
-    assert.deepEqual(decodeShareFragment(frag.slice(1)).graph, g.graph); // "g=…"
+    assert.deepEqual((await decodeShareFragment(frag)).graph, g.graph);       // "#g=…"
+    assert.deepEqual((await decodeShareFragment(frag.slice(1))).graph, g.graph); // "g=…"
   });
 }
 
@@ -58,23 +58,23 @@ test("isShareRef: URLs and fragments yes, file paths no", () => {
   assert.equal(isShareRef("/tmp/g=weird/graph.json"), false);
 });
 
-test("#ga= handoff fragments are refused with guidance", () => {
-  assert.throws(() => decodeShareFragment("#ga=H4sIAAAA"), /handoff.*internal|internal.*handoff/is);
+test("#ga= handoff fragments are refused with guidance", async () => {
+  await assert.rejects(() => decodeShareFragment("#ga=H4sIAAAA"), /handoff.*internal|internal.*handoff/is);
 });
 
 test("corrupt payloads throw NanoodleError, not raw zlib/JSON errors", async () => {
   const g = goldens.find((x) => x.name === "g-starter");
   const frag = g.url.slice(g.url.indexOf("#"));
-  assert.throws(() => decodeShareFragment(frag.slice(0, 40)), NanoodleError);       // truncated gzip
-  assert.throws(() => decodeShareFragment("#g=!!not-base64!!"), NanoodleError);     // bad alphabet
-  assert.throws(() => decodeShareFragment("#z=abcd"), NanoodleError);               // unknown tag
-  await assert.rejects(() => decodeShareUrl("#g="), NanoodleError);                 // empty payload
+  await assert.rejects(() => decodeShareFragment(frag.slice(0, 40)), NanoodleError);   // truncated gzip
+  await assert.rejects(() => decodeShareFragment("#g=!!not-base64!!"), NanoodleError); // bad alphabet
+  await assert.rejects(() => decodeShareFragment("#z=abcd"), NanoodleError);           // unknown tag
+  await assert.rejects(() => decodeShareUrl("#g="), NanoodleError);                    // empty payload
 });
 
-test("#a= payload without a graph is refused", () => {
+test("#a= payload without a graph is refused", async () => {
   const json = JSON.stringify({ v: 1, name: "no graph here" });
   const b64u = Buffer.from(json, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  assert.throws(() => decodeShareFragment("#a=u" + b64u), /no graph/);
+  await assert.rejects(() => decodeShareFragment("#a=u" + b64u), /no graph/);
 });
 
 /* ---- short links: fragments ride the Location header, so redirects are followed by hand ---- */

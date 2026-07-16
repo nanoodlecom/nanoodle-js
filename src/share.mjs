@@ -1,4 +1,5 @@
-import { gunzipSync } from "node:zlib";
+import { gunzip } from "./zlib.mjs";
+import { base64ToBytes } from "./media.mjs";
 import { NanoodleError } from "./errors.mjs";
 
 /**
@@ -23,28 +24,33 @@ export function isShareRef(s) {
   return typeof s === "string" && (URL_RE.test(s) || FRAG_RE.test(s));
 }
 
-function b64urlToBuf(s, what) {
+function b64urlToBytes(s, what) {
   if (!/^[A-Za-z0-9_-]+$/.test(s)) {
     throw new NanoodleError(`share link: ${what} payload is not base64url data — is the URL complete?`);
   }
-  return Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+  try { return base64ToBytes(s.replace(/-/g, "+").replace(/_/g, "/")); }
+  catch { throw new NanoodleError(`share link: ${what} payload is not base64url data — is the URL complete?`); }
 }
+
+const utf8 = new TextDecoder();
 
 function parseJson(text, what) {
   try { return JSON.parse(text); }
   catch { throw new NanoodleError(`share link: ${what} payload decoded but is not valid JSON — the link may be truncated`); }
 }
 
-function gunzipText(buf, what) {
-  try { return gunzipSync(buf).toString("utf8"); }
+async function gunzipText(buf, what) {
+  try { return utf8.decode(await gunzip(buf)); }
   catch { throw new NanoodleError(`share link: ${what} payload is not valid gzip data — the link may be truncated`); }
 }
 
 /**
  * Decode a share fragment ("#g=…", "g=…", "#a=…", …) to its graph.
- * @returns {{ graph: object, kind: "g"|"j"|"a", app: { name?, lang?, hasFiles: boolean }|null }}
+ * Async since v0.4: gzip decoding goes through DecompressionStream in the
+ * browser, which has no synchronous form.
+ * @returns {Promise<{ graph: object, kind: "g"|"j"|"a", app: { name?, lang?, hasFiles: boolean }|null }>}
  */
-export function decodeShareFragment(fragment) {
+export async function decodeShareFragment(fragment) {
   let f = String(fragment);
   if (f.startsWith("#")) f = f.slice(1);
   if (f.startsWith("ga=")) {
@@ -53,16 +59,16 @@ export function decodeShareFragment(fragment) {
       "Open the link in a browser and use 🔗 Share to mint a #g= workflow link instead.");
   }
   if (f.startsWith("g=")) {
-    return { graph: parseJson(gunzipText(b64urlToBuf(f.slice(2), "#g="), "#g="), "#g="), kind: "g", app: null };
+    return { graph: parseJson(await gunzipText(b64urlToBytes(f.slice(2), "#g="), "#g="), "#g="), kind: "g", app: null };
   }
   if (f.startsWith("j=")) {
-    return { graph: parseJson(b64urlToBuf(f.slice(2), "#j=").toString("utf8"), "#j="), kind: "j", app: null };
+    return { graph: parseJson(utf8.decode(b64urlToBytes(f.slice(2), "#j=")), "#j="), kind: "j", app: null };
   }
   if (f.startsWith("a=")) {
     const tag = f.slice(2);
     const json = tag[0] === "u"
-      ? b64urlToBuf(tag.slice(1), "#a=u").toString("utf8")
-      : gunzipText(b64urlToBuf(tag, "#a="), "#a=");
+      ? utf8.decode(b64urlToBytes(tag.slice(1), "#a=u"))
+      : await gunzipText(b64urlToBytes(tag, "#a="), "#a=");
     const payload = parseJson(json, "#a=");
     if (!payload || typeof payload !== "object" || !payload.graph) {
       throw new NanoodleError("share link: #a= app payload has no graph in it");
@@ -100,11 +106,11 @@ function fragmentOf(url) {
  */
 export async function decodeShareUrl(input, opts = {}) {
   const s = String(input).trim();
-  if (!URL_RE.test(s)) return { ...decodeShareFragment(s), url: s };
+  if (!URL_RE.test(s)) return { ...(await decodeShareFragment(s)), url: s };
 
   let url = s;
   const frag = fragmentOf(url);
-  if (frag && FRAG_RE.test(frag)) return { ...decodeShareFragment(frag), url };
+  if (frag && FRAG_RE.test(frag)) return { ...(await decodeShareFragment(frag)), url };
 
   // No fragment on the URL itself → treat it as a short link and follow
   // redirects by hand: fragments ride in the Location header, which automatic
@@ -123,7 +129,7 @@ export async function decodeShareUrl(input, opts = {}) {
     }
     url = new URL(loc, url).href;
     const hopFrag = fragmentOf(url);
-    if (hopFrag && FRAG_RE.test(hopFrag)) return { ...decodeShareFragment(hopFrag), url };
+    if (hopFrag && FRAG_RE.test(hopFrag)) return { ...(await decodeShareFragment(hopFrag)), url };
   }
   throw new NanoodleError(`share link: gave up after ${maxHops} redirects without finding a share fragment`);
 }

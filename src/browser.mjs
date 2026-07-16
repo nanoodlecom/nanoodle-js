@@ -1,11 +1,13 @@
 /**
  * Browser-oriented package entry (`import … from "nanoodle/browser"`).
  *
- * Goal: one engine for play/export/CLI. This surface is the migration on-ramp:
- * pure graph/IO/media/transport code has no top-level Node imports. Full
- * `Workflow.run` still reaches `local-media.mjs` (ffmpeg soft-dep + node zlib)
- * when a graph contains local media nodes — network-only runs are the ready
- * path today. See docs/DESIGN.md § "Replacing the browser executor".
+ * Goal: one engine for play/export/CLI. No module on this surface top-level
+ * imports Node builtins (Phase D): the pure local-media paths (MP4CAT remux,
+ * PCM-WAV trim, PNG resize/mask composite) and share-link decoding run in a
+ * browser as-is — zlib work goes through Compression/DecompressionStream
+ * there. Only the ffmpeg fallback and file-path helpers dynamically import
+ * Node builtins when those code paths actually run.
+ * See docs/DESIGN.md § "Replacing the browser executor".
  *
  * Prefer `Workflow.fromJSON(obj, { apiKey, fetch, payment })` in the browser;
  * `Workflow.load(path)` and `mediaFromFile` remain Node-only (dynamic `node:fs`).
@@ -29,5 +31,6 @@ export { NanoClient, httpError, costFromJson, costFromHeaders, costWithHeaders, 
 export { NODE_TYPES, displayName, materialize, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
 export { deriveInputs, deriveOutputs, deriveSettings, INPUT_SPECS, SETTING_SPECS } from "./io.mjs";
 export { decodeShareUrl, decodeShareFragment, isShareRef } from "./share.mjs";
+export { resizePlan, maskToSource, resizeCropImage, encodeWavMono } from "./local-media.mjs";
 export { parseNanoInvoice } from "./x402.mjs";
 export { qrTerminal, qrModules } from "./qr.mjs";

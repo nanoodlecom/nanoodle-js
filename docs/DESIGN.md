@@ -76,11 +76,11 @@ Long-term goal: **one engine** — browser UI shells call into `nanoodle-js` (or
 | Phase | Goal | Status |
 |---|---|---|
 | **0** | Local media pure-JS path matching the browser (MP4CAT / PCM-WAV / PNG); ffmpeg soft fallback | Done (v0.3) |
-| **A** | Browser-ready **core surface**: no top-level `node:fs` in media; env-safe Workflow; `nanoodle/browser` export | This work |
-| **B** | **Payload parity harness**: same fixtures through play `RUNTIME_JS` and `Workflow.run` → identical NanoGPT bodies | Next |
-| **C** | Close remaining fidelity gaps (inpaint mask composite onto black @ source size; catalog clamps as opt-in) | Next |
-| **D** | Split local-media so pure paths need no `node:child_process` / hard zlib at import time | Later |
-| **E** | play export / `NoodleApp.runGraph` delegates network+local runs to the package (UI stays in play) | Later |
+| **A** | Browser-ready **core surface**: no top-level `node:fs` in media; env-safe Workflow; `nanoodle/browser` export | Done (v0.3) |
+| **B** | **Payload parity harness**: same fixtures through play `RUNTIME_JS` and `Workflow.run` → identical NanoGPT bodies | Done (13 scenarios, literal compare — nanoodle `scripts/check-js-parity.mjs`) |
+| **C** | Close remaining fidelity gaps (inpaint mask composite onto black @ source size; `run({}, { defaults: false })` = play's fields-authoritative contract) | Done (v0.3–0.4) |
+| **D** | Split local-media so pure paths need no `node:child_process` / hard zlib at import time (env-adaptive zlib.mjs; PNG codec + share decode async & Buffer-free) | Done (v0.4) |
+| **E** | play export / `NoodleApp.runGraph` delegates network+local runs to the package (UI stays in play) | Next |
 | **F** | Editor `runGroup` optional path through the same engine (seed-cache / partial-run as library options) | Later |
 
 ### Browser entry (Phase A)
@@ -94,7 +94,7 @@ await wf.run({ Text: "hi" });
 
 - `media.mjs` base64/data-URL helpers work without `Buffer` (uses `btoa`/`atob` when needed).
 - `MediaRef.save` / `mediaFromFile` / `Workflow.load(path)` dynamic-import `node:fs` (Node only).
-- `local-media.mjs` and `share.mjs` (gzip) still pull Node builtins when those code paths run — network-only graphs are the safe browser target until Phase D.
+- Phase D: `local-media.mjs` / `share.mjs` no longer top-level-import Node builtins. zlib goes through env-adaptive `zlib.mjs` (node:zlib in Node, Compression/DecompressionStream in the browser) — so the PNG codec and `decodeShareFragment` are **async** as of v0.4. Only the ffmpeg fallback dynamic-imports `node:child_process`/fs when it actually runs; in the browser those graphs use the pure paths or fail with the clear ffmpeg error.
 - App shell (auth, DOM results, demo, seed skip-cache) stays in play/index until E/F.
 
 ## Repo layout (each)

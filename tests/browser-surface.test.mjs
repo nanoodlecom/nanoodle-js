@@ -36,6 +36,38 @@ test("errors/graph/io/client/x402 have no top-level node: imports", () => {
   }
 });
 
+test("local-media/share/zlib/nodes have no top-level node: imports (Phase D: local graphs run in-browser)", () => {
+  for (const f of ["local-media.mjs", "share.mjs", "zlib.mjs", "nodes.mjs"]) {
+    assert.deepEqual(topLevelNodeImports(src(f)), [], f);
+  }
+});
+
+test("browser zlib path (Compression/DecompressionStream) interoperates with node:zlib", async () => {
+  const { streamZlib } = await import("../src/zlib.mjs");
+  const { deflateSync, gzipSync } = await import("node:zlib");
+  const raw = new Uint8Array(2048).map((_, i) => (i * 7) & 255);
+
+  // browser-deflate → browser-inflate round trip
+  assert.deepEqual([...await streamZlib.inflate(await streamZlib.deflate(raw))], [...raw]);
+  // node-deflate → browser-inflate (what a browser sees decoding an editor-minted PNG/link)
+  assert.deepEqual([...await streamZlib.inflate(new Uint8Array(deflateSync(raw)))], [...raw]);
+  // node-gzip → browser-gunzip (share links are gzip)
+  assert.deepEqual([...await streamZlib.gunzip(new Uint8Array(gzipSync(raw)))], [...raw]);
+});
+
+test("pure PNG codec round-trips without Buffer (browser pixels contract)", async () => {
+  const { decodePng, encodePngRgba } = await import("../src/local-media.mjs");
+  const w = 3, h = 2;
+  const rgba = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < w * h; i++) { rgba[i * 4] = i * 40; rgba[i * 4 + 1] = 7; rgba[i * 4 + 2] = 200; rgba[i * 4 + 3] = 255; }
+  const png = await encodePngRgba(w, h, rgba);
+  assert.ok(png instanceof Uint8Array);
+  const back = await decodePng(png);
+  assert.equal(back.w, w);
+  assert.equal(back.h, h);
+  assert.deepEqual([...back.rgba], [...rgba]);
+});
+
 test("nanoodle/browser entry imports and re-exports Workflow + pure helpers", async () => {
   const browser = await import("../src/browser.mjs");
   assert.equal(typeof browser.Workflow, "function");
