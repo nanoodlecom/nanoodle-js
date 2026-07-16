@@ -80,7 +80,7 @@ Long-term goal: **one engine** — browser UI shells call into `nanoodle-js` (or
 | **B** | **Payload parity harness**: same fixtures through play `RUNTIME_JS` and `Workflow.run` → identical NanoGPT bodies | Done (13 scenarios, literal compare — nanoodle `scripts/check-js-parity.mjs`) |
 | **C** | Close remaining fidelity gaps (inpaint mask composite onto black @ source size; `run({}, { defaults: false })` = play's fields-authoritative contract) | Done (v0.3–0.4) |
 | **D** | Split local-media so pure paths need no `node:child_process` / hard zlib at import time (env-adaptive zlib.mjs; PNG codec + share decode async & Buffer-free) | Done (v0.4) |
-| **E** | play export / `NoodleApp.runGraph` delegates network+local runs to the package (UI stays in play) | Next |
+| **E** | play export / `NoodleApp.runGraph` delegates network runs to the package (UI + orchestration stay in play; flag-gated: `?engine=js` / `njs_engine=1`, default off; bundle via nanoodle `scripts/gen-js-engine.mjs`) | Landed (flag off) |
 | **F** | Editor `runGroup` optional path through the same engine (seed-cache / partial-run as library options) | Later |
 
 ### Browser entry (Phase A)
