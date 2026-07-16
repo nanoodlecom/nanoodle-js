@@ -51,7 +51,7 @@ if mask          body.maskDataUrl = <mask data URL; white = repaint>
 ```
 - image node: `variations` → n (multi output = j.data list).
 - edit: sources from wired `image, image2, ...` ports; single → string, multiple → array. Prompt may be empty for upscaler models — do not hard-require.
-- inpaint: source+mask from ports or fields. (Browser composites mask onto black at source size via canvas; library v1: pass mask through verbatim and document the caveat.)
+- inpaint: source+mask from ports or fields. Before send, composite the mask onto opaque black at the **source image's** exact pixel size (`maskToSource` — same as play.html / index.html canvas path) so `maskDataUrl` dimensions always match.
 Parse: `j.data[]` → `d.b64_json ? "data:<sniffed mime>;base64,"+b64 : d.url`. Sniff mime from magic bytes (PNG \x89PNG, JPEG \xFF\xD8, GIF, WEBP RIFF....WEBP; default image/png). Throw "no image in response" if empty.
 
 ### draw → CHAT_ENDPOINT (genChatImage 1508-1523)

@@ -3,7 +3,7 @@ import { IMG_PORT_RE, EDIT_IMG_RE, REF_PORT_RE, CLIP_PORT_RE, VID_PORT_RE } from
 import { MEDIA_INLINE_MAX } from "./media.mjs";
 import {
   resizeCropImage, trimAudioToWav, extractAudioToWav,
-  extractVideoFrames, concatVideos, muxSoundtrack,
+  extractVideoFrames, concatVideos, muxSoundtrack, maskToSource,
 } from "./local-media.mjs";
 
 function mdl(n) {
@@ -441,11 +441,12 @@ export const RUNNERS = {
 
   async inpaint(n, inp, ctx) {
     const source = inp.image != null ? inp.image : n.fields.image;
-    const mask = inp.mask != null ? inp.mask : n.fields.mask;
+    const rawMask = inp.mask != null ? inp.mask : n.fields.mask;
     if (!source) throw new NanoodleError("no image — supply the image to repaint");
-    if (!mask) throw new NanoodleError("no mask — supply a B/W mask (white = repaint)");
+    if (!rawMask) throw new NanoodleError("no mask — supply a B/W mask (white = repaint)");
     const prompt = promptOf(n, inp, "no prompt — say what to paint into the masked area");
-    // v1 caveat: the browser app composites the mask onto black at source size; here it passes through verbatim
+    // Match play.html maskToSource: composite mask onto black at the source's pixel size.
+    const mask = await maskToSource(rawMask, source, mediaOpts(ctx));
     return { image: await ctx.image({ prompt, model: mdl(n), size: n.fields.size || "1024x1024", imageDataUrl: source, maskDataUrl: mask, extra: imgExtra(n) }) };
   },
 

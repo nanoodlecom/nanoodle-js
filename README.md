@@ -148,9 +148,9 @@ all fail **before** anything is spent.
 
 † **local media** prefers a pure-JS path that matches the browser (lossless mp4 remux, PCM-WAV trim, PNG resize). **ffmpeg** on `PATH` is the fallback for everything else (soft dependency — not an npm package); clear error if it’s required and missing.
 
-\* **inpaint:** the browser app composites the mask onto black at the source
-pixel size; this library passes your mask through verbatim. Supply a
-black/white mask matching the source dimensions.
+\* **inpaint:** the mask is composited onto black at the source image’s pixel
+size before send (same as the browser app) — white = repaint, black = keep.
+Brush-style white-on-transparent masks and plain B/W masks both work.
 
 ## Use it as an agent skill
 

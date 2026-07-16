@@ -334,6 +334,123 @@ function sampleBilinear(src, sw, sh, x, y) {
 }
 
 /**
+ * Inpaint mask prep (play.html `maskToSource` / index.html canvas path):
+ * composite the mask onto opaque black at the **source image's** exact pixel size
+ * so maskDataUrl dimensions always match imageDataUrl. White (or opaque white-on-
+ * transparent brush strokes) = repaint; black = keep.
+ *
+ * Pure PNG path first; ffmpeg soft-fallback for JPEG/WebP/etc.
+ *
+ * @param {string} maskUrl data: or http(s)
+ * @param {string} sourceUrl data: or http(s) — dimensions only (pixels not sent as mask)
+ * @returns {Promise<string>} data:image/png;base64,…
+ */
+export async function maskToSource(maskUrl, sourceUrl, { fetch: fetchFn, signal } = {}) {
+  throwIfAborted(signal);
+  if (!maskUrl) throw new NanoodleError("couldn't read the mask");
+  if (!sourceUrl) throw new NanoodleError("couldn't read the source image");
+
+  const srcBytes = await urlBytes(sourceUrl, fetchFn);
+  throwIfAborted(signal);
+  const maskBytes = await urlBytes(maskUrl, fetchFn);
+  throwIfAborted(signal);
+
+  const srcMime = sniffMime(srcBytes);
+  const maskMime = sniffMime(maskBytes);
+  if (srcMime === "image/png" && maskMime === "image/png") {
+    try {
+      return dataUrlFromBytes(maskToSourcePngPure(maskBytes, srcBytes), "image/png");
+    } catch (e) {
+      if (e instanceof NanoodleError) {
+        if (/couldn't read the (mask|source)/i.test(e.message || "")) throw e;
+        if (/too large/i.test(e.message || "")) throw e;
+        // exotic PNG → try ffmpeg
+      } else {
+        throw e;
+      }
+    }
+  }
+
+  return maskToSourceFfmpeg(maskUrl, sourceUrl, { fetch: fetchFn, signal });
+}
+
+/** Pure PNG composite matching canvas: black fill + drawImage(mask → source size). */
+function maskToSourcePngPure(maskBytes, srcBytes) {
+  let src, mask;
+  try { src = decodePng(srcBytes); }
+  catch { throw new NanoodleError("couldn't read the source image"); }
+  try { mask = decodePng(maskBytes); }
+  catch { throw new NanoodleError("couldn't read the mask"); }
+
+  const sw = src.w, sh = src.h;
+  if (!(sw > 0) || !(sh > 0)) throw new NanoodleError("couldn't read the source image");
+  if (sw > MAX_IMAGE_DIM || sh > MAX_IMAGE_DIM) {
+    throw new NanoodleError(
+      `image is too large to composite mask in-process (${sw}×${sh}; max ${MAX_IMAGE_DIM}px)`);
+  }
+
+  // Opaque black canvas (keep = black), same size as source.
+  const out = new Uint8ClampedArray(sw * sh * 4);
+  for (let i = 0; i < sw * sh; i++) {
+    const o = i * 4;
+    out[o] = 0; out[o + 1] = 0; out[o + 2] = 0; out[o + 3] = 255;
+  }
+
+  // drawImage(mask, 0, 0, sw, sh) with source-over (browser default).
+  const mw = mask.w, mh = mask.h;
+  const mrgba = mask.rgba;
+  for (let y = 0; y < sh; y++) {
+    for (let x = 0; x < sw; x++) {
+      const u = (x + 0.5) / sw * mw - 0.5;
+      const v = (y + 0.5) / sh * mh - 0.5;
+      const sx = Math.max(0, Math.min(mw - 1, u));
+      const sy = Math.max(0, Math.min(mh - 1, v));
+      const pix = sampleBilinear(mrgba, mw, mh, sx, sy);
+      const a = pix[3] / 255;
+      const o = (y * sw + x) * 4;
+      // source-over onto opaque black dst
+      out[o] = Math.round(pix[0] * a + out[o] * (1 - a));
+      out[o + 1] = Math.round(pix[1] * a + out[o + 1] * (1 - a));
+      out[o + 2] = Math.round(pix[2] * a + out[o + 2] * (1 - a));
+      out[o + 3] = 255;
+    }
+  }
+  return encodePngRgba(sw, sh, out);
+}
+
+async function maskToSourceFfmpeg(maskUrl, sourceUrl, { fetch: fetchFn, signal } = {}) {
+  return withTemp(async (dir) => {
+    throwIfAborted(signal);
+    const srcPath = await writeInput(dir, "src", sourceUrl, fetchFn);
+    const maskPath = await writeInput(dir, "mask", maskUrl, fetchFn);
+    const probe = await runProc("ffprobe", [
+      "-v", "error", "-select_streams", "v:0",
+      "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", srcPath,
+    ], { signal }).catch(() => {
+      throw new NanoodleError("couldn't read the source image");
+    });
+    const dims = String(probe.stdout).trim().split("x").map(Number);
+    const sw = dims[0], sh = dims[1];
+    if (!(sw > 0) || !(sh > 0)) throw new NanoodleError("couldn't read the source image");
+    const outPath = join(dir, "mask-out.png");
+    // black base of source size + scaled mask overlaid (matches canvas path)
+    try {
+      await runProc("ffmpeg", [
+        "-y",
+        "-f", "lavfi", "-i", `color=c=black:s=${sw}x${sh}:d=1`,
+        "-i", maskPath,
+        "-filter_complex",
+        `[1:v]scale=${sw}:${sh}:flags=bilinear,format=rgba[m];[0:v][m]overlay=0:0:format=auto`,
+        "-frames:v", "1", outPath,
+      ], { signal });
+    } catch {
+      throw new NanoodleError("couldn't read the mask");
+    }
+    return dataUrlFromFile(outPath, "image/png");
+  });
+}
+
+/**
  * Pure resize matching canvas drawImage(img, dx, dy, dw, dh) onto cw×ch.
  * PNG only (JPEG needs ffmpeg). Output always PNG (preserves alpha like browser PNG path).
  */

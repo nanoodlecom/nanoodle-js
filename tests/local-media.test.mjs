@@ -286,3 +286,30 @@ test("materialize no longer warns on resize/vframes/combine/…", async () => {
   });
   assert.equal(warnings.length, 0);
 });
+
+/* ---------- inpaint maskToSource (play.html parity) ------------------------ */
+
+test("maskToSource: scales a small mask onto black at source size", async () => {
+  const { maskToSource } = await import("../src/local-media.mjs");
+  const { dataUrlBytes } = await import("../src/media.mjs");
+  // 1×1 transparent PNG source and a 1×1 white mask — output is source-sized PNG
+  const src = await asDataUrl(media("nn-red.png"), "image/png");
+  const WHITE =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==";
+  const out = await maskToSource(WHITE, src);
+  assert.match(out, /^data:image\/png;base64,/);
+  // decode IHDR width/height from the pure PNG we just built
+  const bytes = dataUrlBytes(out).bytes;
+  const w = (bytes[16] << 24) | (bytes[17] << 16) | (bytes[18] << 8) | bytes[19];
+  const h = (bytes[20] << 24) | (bytes[21] << 16) | (bytes[22] << 8) | bytes[23];
+  // nn-red.png is 64×48
+  assert.equal(w, 64);
+  assert.equal(h, 48);
+});
+
+test("maskToSource: missing mask/source names the failure", async () => {
+  const { maskToSource } = await import("../src/local-media.mjs");
+  const src = await asDataUrl(media("nn-red.png"), "image/png");
+  await assert.rejects(maskToSource(null, src), /couldn't read the mask/i);
+  await assert.rejects(maskToSource(src, null), /couldn't read the source/i);
+});

@@ -126,13 +126,17 @@ test("edit single image: imageDataUrl is a STRING", async (t) => {
   assert.equal(result.get("Edit").url, "https://cdn.example/edited.png"); // d.url branch
 });
 
-test("inpaint: source + mask pass through, prompt required", async (t) => {
+test("inpaint: source passes through; mask is composited onto black at source size", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());
   srv.script("POST /v1/images/generations", { json: { data: [{ b64_json: PNG_B64 }], cost: 0.02 } });
 
+  // 1×1 white opaque PNG (repaint-everywhere mask) — different from the 1×1 source only in color.
+  const WHITE_PNG =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==";
+
   const wf = Workflow.fromJSON({
-    nodes: [{ id: "n1", type: "inpaint", fields: { model: "flux-fill", image: PNG_DATA_URL, mask: "data:image/png;base64,MASK" } }],
+    nodes: [{ id: "n1", type: "inpaint", fields: { model: "flux-fill", image: PNG_DATA_URL, mask: WHITE_PNG } }],
     links: [],
   }, mockOpts(srv));
   await wf.run({ "What to paint in": "a hat" });
@@ -140,7 +144,9 @@ test("inpaint: source + mask pass through, prompt required", async (t) => {
   const body = srv.requests[0].json;
   assert.equal(body.prompt, "a hat");
   assert.equal(body.imageDataUrl, PNG_DATA_URL);
-  assert.equal(body.maskDataUrl, "data:image/png;base64,MASK");
+  // mask is re-encoded as PNG after composite (not the raw input string)
+  assert.match(body.maskDataUrl, /^data:image\/png;base64,/);
+  assert.notEqual(body.maskDataUrl, WHITE_PNG);
 });
 
 test("image variations: n rides the request; all urls returned; b64 mime sniffed", async (t) => {

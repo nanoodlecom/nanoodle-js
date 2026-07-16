@@ -115,7 +115,9 @@ test("inpaint with nothing wired derives image AND mask; run supplies both, payl
   await wf.run({ "What to paint in": "a hat", "n1.image": PNG_DATA_URL, "n1.mask": PNG_DATA_URL });
   const body = srv.requests[0].json;
   assert.equal(body.imageDataUrl, PNG_DATA_URL);
-  assert.equal(body.maskDataUrl, PNG_DATA_URL);
+  // mask is composited onto black at source size (play.html maskToSource) — PNG data URL, not a pass-through of the raw input string
+  assert.match(body.maskDataUrl, /^data:image\/png;base64,/);
+  assert.ok(body.maskDataUrl.length > 40);
 });
 
 test("inpaint missing mask errors upfront (missing required input) — upstream lanes never spend", async (t) => {
