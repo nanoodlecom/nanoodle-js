@@ -6,7 +6,11 @@
   "main": "./src/index.mjs",
   "exports": {
     ".": "./src/index.mjs",
+    "./browser": "./src/browser.mjs",
     "./package.json": "./package.json"
+  },
+  "browser": {
+    "./src/index.mjs": "./src/browser.mjs"
   },
   "sideEffects": false,
   "bin": {

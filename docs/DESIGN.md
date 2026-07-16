@@ -59,6 +59,44 @@ result.outputs, result.cost_usd, result.cost_exact, result.remaining_balance, re
 - No locale suffix, no catalog fetch, no seed skip-cache, no telemetry/analytics of ANY kind. Never log the API key. Media over 4.4MB inline → clear local error when the graph has network nodes (or at send time); local-only graphs may load larger files.
 - Version: 0.1.0.
 
+## Replacing the browser executor (roadmap)
+
+The nanoodle.com app still runs graphs with a custom inlined processor:
+
+| Surface | Role today |
+|---|---|
+| `index.html` | Editor run loop (groups, seed reuse, demo, DOM) |
+| `play.html` `RUNTIME_JS` / `NoodleApp` | Play + **exported apps** (SPEC blueprint) |
+| `nanoodle-js` | Headless reimplementation of that blueprint (Node CLI + library) |
+
+Long-term goal: **one engine** — browser UI shells call into `nanoodle-js` (or a browser build of it); play export ships the same code. Do **not** big-bang replace; land capability in the library first, then dual-run, then swap surfaces.
+
+### Phases
+
+| Phase | Goal | Status |
+|---|---|---|
+| **0** | Local media pure-JS path matching the browser (MP4CAT / PCM-WAV / PNG); ffmpeg soft fallback | Done (v0.3) |
+| **A** | Browser-ready **core surface**: no top-level `node:fs` in media; env-safe Workflow; `nanoodle/browser` export | This work |
+| **B** | **Payload parity harness**: same fixtures through play `RUNTIME_JS` and `Workflow.run` → identical NanoGPT bodies | Next |
+| **C** | Close remaining fidelity gaps (inpaint mask composite onto black @ source size; catalog clamps as opt-in) | Next |
+| **D** | Split local-media so pure paths need no `node:child_process` / hard zlib at import time | Later |
+| **E** | play export / `NoodleApp.runGraph` delegates network+local runs to the package (UI stays in play) | Later |
+| **F** | Editor `runGroup` optional path through the same engine (seed-cache / partial-run as library options) | Later |
+
+### Browser entry (Phase A)
+
+```js
+import { Workflow, NanoClient, materialize, deriveInputs } from "nanoodle/browser";
+
+const wf = Workflow.fromJSON(graphObj, { apiKey, fetch, payment });
+await wf.run({ Text: "hi" });
+```
+
+- `media.mjs` base64/data-URL helpers work without `Buffer` (uses `btoa`/`atob` when needed).
+- `MediaRef.save` / `mediaFromFile` / `Workflow.load(path)` dynamic-import `node:fs` (Node only).
+- `local-media.mjs` and `share.mjs` (gzip) still pull Node builtins when those code paths run — network-only graphs are the safe browser target until Phase D.
+- App shell (auth, DOM results, demo, seed skip-cache) stays in play/index until E/F.
+
 ## Repo layout (each)
 README.md (quickstart: download the save from https://nanoodle.com → 3-line usage; the starter-graph example; supported node matrix; cost note; link to nanoodle app)
 LICENSE (MIT, "Copyright (c) 2026 nanoodle contributors")

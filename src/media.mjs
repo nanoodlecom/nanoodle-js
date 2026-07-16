@@ -1,9 +1,31 @@
-import { readFile, writeFile } from "node:fs/promises";
-import { extname } from "node:path";
 import { NanoodleError } from "./errors.mjs";
 
 /** NanoGPT's edge rejects request bodies over ~4.5 MB; media rides inline as base64 (no upload endpoint). */
 export const MEDIA_INLINE_MAX = 4.4 * 1024 * 1024;
+
+/* ---------- base64 (browser + Node; no hard Buffer dependency) ------------ */
+
+/** @param {Uint8Array|ArrayBuffer|number[]} bytes */
+export function bytesToBase64(bytes) {
+  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  if (typeof Buffer !== "undefined") return Buffer.from(u8).toString("base64");
+  // chunked to avoid call-stack / arg limits on large media
+  const CH = 0x8000;
+  let bin = "";
+  for (let i = 0; i < u8.length; i += CH) {
+    bin += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+  }
+  return btoa(bin);
+}
+
+/** @param {string} b64 @returns {Uint8Array} */
+export function base64ToBytes(b64) {
+  if (typeof Buffer !== "undefined") return new Uint8Array(Buffer.from(b64, "base64"));
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
 
 /** Sniff an image's format from its base64 magic bytes (mirrors the nanoodle app runtime). */
 export function b64ImageMime(b64) {
@@ -36,6 +58,11 @@ export function extForMime(mime) {
   return MIME_EXT[String(mime || "").split(";")[0].trim().toLowerCase()] || "bin";
 }
 
+/** Extension → MIME (for mediaFromFile and friends). */
+export function mimeFromExt(ext) {
+  return EXT_MIME[String(ext || "").toLowerCase()] || null;
+}
+
 /** Sniff a MIME type from magic bytes of common media containers. */
 export function sniffMime(bytes) {
   const b = bytes;
@@ -59,7 +86,7 @@ export function sniffMime(bytes) {
 /** Encode bytes as a data: URL, sniffing the MIME when not given. */
 export function bytesToDataUrl(bytes, mime) {
   const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  return "data:" + (mime || sniffMime(u8)) + ";base64," + Buffer.from(u8).toString("base64");
+  return "data:" + (mime || sniffMime(u8)) + ";base64," + bytesToBase64(u8);
 }
 
 /** Decode a data: URL into { bytes, mime }. */
@@ -70,14 +97,16 @@ export function dataUrlBytes(url) {
   const mime = (head.split(";")[0] || "application/octet-stream") || "application/octet-stream";
   const body = url.slice(comma + 1);
   const bytes = /;base64$/i.test(head) || /;base64;/i.test(head + ";")
-    ? new Uint8Array(Buffer.from(body, "base64"))
-    : new Uint8Array(Buffer.from(decodeURIComponent(body), "utf8"));
+    ? base64ToBytes(body)
+    : new TextEncoder().encode(decodeURIComponent(body));
   return { bytes, mime };
 }
 
 /**
  * A media output value: a data: or https URL plus lazy byte access.
  * String-coerces to the URL so it drops into templates / JSON naturally.
+ *
+ * `.save(path)` is Node-only (dynamic `node:fs`); browsers should use `.bytes()` + download.
  */
 export class MediaRef {
   /**
@@ -111,20 +140,24 @@ export class MediaRef {
     return new Uint8Array(await r.arrayBuffer());
   }
 
-  /** Write the media bytes to `path`; resolves to the path. */
+  /** Write the media bytes to `path` (Node only); resolves to the path. */
   async save(path) {
+    const { writeFile } = await import("node:fs/promises");
     await writeFile(path, await this.bytes());
     return path;
   }
 }
 
 /**
- * Read a local file as a media input value: `{ data, mime }`.
+ * Read a local file as a media input value: `{ data, mime }` (Node only).
  * MIME comes from the extension, else magic-byte sniffing.
  */
 export async function mediaFromFile(path, mime) {
+  const { readFile } = await import("node:fs/promises");
+  const { extname } = await import("node:path");
   const data = await readFile(path);
-  return { data: new Uint8Array(data), mime: mime || EXT_MIME[extname(path).toLowerCase()] || sniffMime(data) };
+  const u8 = new Uint8Array(data);
+  return { data: u8, mime: mime || mimeFromExt(extname(path)) || sniffMime(u8) };
 }
 
 /**
@@ -161,8 +194,12 @@ export function coerceMediaInput(value, what, opts = {}) {
         "For a local file use mediaFromFile(\"" + value.slice(0, 60) + "\").");
     }
   } else if (value instanceof Uint8Array) url = bytesToDataUrl(value);
-  else if (value && typeof value === "object" && value.data != null) {
-    const data = typeof value.data === "string" ? new Uint8Array(Buffer.from(value.data, "base64")) : new Uint8Array(value.data);
+  else if (typeof Buffer !== "undefined" && Buffer.isBuffer && Buffer.isBuffer(value)) {
+    url = bytesToDataUrl(new Uint8Array(value));
+  } else if (value && typeof value === "object" && value.data != null) {
+    const data = typeof value.data === "string"
+      ? base64ToBytes(value.data)
+      : new Uint8Array(value.data);
     url = bytesToDataUrl(data, value.mime);
   } else {
     throw new NanoodleError(what + ": unsupported media value (" + typeof value + ")");
