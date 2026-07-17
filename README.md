@@ -46,10 +46,6 @@ npm install nanoodle     # library + CLI
 npx nanoodle --help      # or run the CLI without installing
 ```
 
-Latest on npm is **0.2.0**; accountless `--pay` (x402) and the local-media
-nodes below need 0.4 — until it ships, install from this repo
-(`npm install github:nanoodlecom/nanoodle-js`).
-
 ## Quickstart (library)
 
 ```js
@@ -164,7 +160,7 @@ all fail **before** anything is spent.
 | local media† | resize, vframes, combine, soundtrack, trim, extractaudio |
 | NanoGPT | llm (incl. vision + audio input), image, draw, edit, inpaint*, vision, tvideo, ivideo, vedit, lipsync, music, remix, tts, transcribe |
 
-† **local media** (0.4, unreleased — see [Install](#install)) prefers a pure-JS path that matches the browser (lossless mp4 remux, PCM-WAV trim, PNG resize). **ffmpeg** on `PATH` is the fallback for everything else (soft dependency — not an npm package); clear error if it’s required and missing.
+† **local media** prefers a pure-JS path that matches the browser (lossless mp4 remux, PCM-WAV trim, PNG resize). **ffmpeg** on `PATH` is the fallback for everything else (soft dependency — not an npm package); clear error if it’s required and missing.
 
 \* **inpaint:** the mask is composited onto black at the source image’s pixel
 size before send (same as the browser app) — white = repaint, black = keep.
@@ -202,7 +198,7 @@ A price of `0` means known-included (subscription), not unknown. `inspect`
 and loading/validating workflows never call the API. No telemetry, no
 analytics; the API key is never logged.
 
-## No account at all: pay per run in Nano (x402) — 0.4, unreleased
+## No account at all: pay per run in Nano (x402)
 
 NanoGPT supports [x402](https://nano-gpt.com) accountless payments: call the
 API with no key, get an HTTP 402 invoice, settle it in Nano (XNO — instant,
