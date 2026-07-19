@@ -173,6 +173,37 @@ test("RunError carries partial results: independent lane succeeds, failed lane r
   assert.equal(call, 2); // Downstream never submitted
 });
 
+test("RunError names the root cause, not just the sink's upstream neighbor", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /api/v1/chat/completions", (req) =>
+    req.json.model === "bad-model"
+      ? { status: 500, body: "model exploded" }
+      : { json: { choices: [{ message: { content: "fine" } }], cost: 0.001 } });
+
+  // Bad → Mid → Sink: the sink only sees "upstream failed: Mid" — the message must dig deeper
+  const wf = Workflow.fromJSON({
+    nodes: [
+      { id: "n1", type: "text", fields: { text: "seed" } },
+      { id: "n2", type: "llm", name: "Bad", fields: { model: "bad-model" } },
+      { id: "n3", type: "llm", name: "Mid", fields: { model: "good-model" } },
+      { id: "n4", type: "llm", name: "Sink", fields: { model: "good-model" } },
+    ],
+    links: [
+      { id: "l1", from: { node: "n1", port: "text" }, to: { node: "n2", port: "prompt" } },
+      { id: "l2", from: { node: "n2", port: "text" }, to: { node: "n3", port: "prompt" } },
+      { id: "l3", from: { node: "n3", port: "text" }, to: { node: "n4", port: "prompt" } },
+    ],
+  }, mockOpts(srv));
+
+  await assert.rejects(wf.run({}), (e) => {
+    assert.match(e.result.nodes.n4.error, /upstream failed: Mid/);
+    assert.match(e.message, /"Sink": upstream failed: Mid/);
+    assert.match(e.message, /root cause — "Bad": 500: model exploded/);
+    return true;
+  });
+});
+
 test("comment nodes never run and never surface as IO", async () => {
   const wf = Workflow.fromJSON({
     nodes: [

@@ -360,7 +360,13 @@ export class Workflow {
 
     const failedSinks = this.outputs.filter((o) => nodesRec[o.nodeId] && nodesRec[o.nodeId].status === "error");
     if (failedSinks.length) {
-      const detail = failedSinks.map((o) => `"${o.key}": ${nodesRec[o.nodeId].error}`).join("; ");
+      let detail = failedSinks.map((o) => `"${o.key}": ${nodesRec[o.nodeId].error}`).join("; ");
+      // "upstream failed: X" only names the sink's neighbor — name the node(s) that actually broke
+      const sinkIds = new Set(failedSinks.map((o) => o.nodeId));
+      const roots = errors.filter((e) => !sinkIds.has(e.nodeId) && !/^upstream failed: /.test(e.message));
+      if (roots.length) {
+        detail += ` (root cause — ${roots.map((e) => `"${e.name}": ${e.message}`).join("; ")})`;
+      }
       throw new RunError("run failed — " + detail, result);
     }
     return result;
