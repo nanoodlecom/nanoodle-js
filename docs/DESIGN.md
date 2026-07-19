@@ -57,7 +57,7 @@ result.outputs, result.cost_usd, result.cost_exact, result.remaining_balance, re
 - Unknown node types that must RUN → UnsupportedNodeError at run start (fail fast, before spending), naming node + type. Workflow.load only warns.
 - Local media ops (resize/vframes/combine/soundtrack/trim/extractaudio): pure-JS first (MP4CAT remux, PCM-WAV trim, PNG resize — same as the browser), then ffmpeg on PATH as the heavy fallback (soft dependency; not an npm package). Clear error if ffmpeg is required and missing. `timeoutMs`/`signal` kill ffmpeg; custom `fetch` is honoured. vframes raises `frames` to the highest wired `frameK` (wiredFramesFloor).
 - No locale suffix, no catalog fetch, no seed skip-cache, no telemetry/analytics of ANY kind. Never log the API key. Media over 4.4MB inline → clear local error when the graph has network nodes (or at send time); local-only graphs may load larger files.
-- Version: 0.4.0.
+- Version: 0.5.0.
 
 ## Replacing the browser executor (roadmap)
 
