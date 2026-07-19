@@ -93,6 +93,11 @@ test("custom-civitai: AIR rides the payload; missing AIR errors before spend", a
   assert.equal(srv.requests[0].json.negative_prompt, undefined, "FLUX-family AIRs must not carry a negative prompt");
 
   srv.requests.length = 0;
+  await one(srv, { id: "n1", type: "image", fields: { model: "persona:376130@2456367", prompt: "x", negativePrompt: "lowres" } }).run({});
+  assert.equal(srv.requests[0].json.negative_prompt, "lowres", "direct AIR-style catalog models carry the negative prompt");
+  assert.equal(srv.requests[0].json.customCivitaiAir, undefined);
+
+  srv.requests.length = 0;
   const bad = one(srv, { id: "n1", type: "image", fields: { model: "custom-civitai", prompt: "x" } });
   await assert.rejects(bad.run({}), /select a CivitAI model/);
   assert.equal(srv.requests.length, 0);
