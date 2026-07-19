@@ -84,6 +84,15 @@ test("custom-civitai: AIR rides the payload; missing AIR errors before spend", a
   assert.equal(srv.requests[0].json.customCivitaiAir, "civitai:123@456");
 
   srv.requests.length = 0;
+  await one(srv, { id: "n1", type: "image", fields: { model: "custom-civitai", prompt: "x", customCivitaiAir: "persona:376130@2456367", negativePrompt: " lowres, blurry " } }).run({});
+  assert.equal(srv.requests[0].json.negative_prompt, "lowres, blurry");
+  assert.equal(srv.requests[0].json.negativePrompt, undefined);
+
+  srv.requests.length = 0;
+  await one(srv, { id: "n1", type: "image", fields: { model: "custom-civitai", prompt: "x", customCivitaiAir: "runware:101@1", negativePrompt: "lowres" } }).run({});
+  assert.equal(srv.requests[0].json.negative_prompt, undefined, "FLUX-family AIRs must not carry a negative prompt");
+
+  srv.requests.length = 0;
   const bad = one(srv, { id: "n1", type: "image", fields: { model: "custom-civitai", prompt: "x" } });
   await assert.rejects(bad.run({}), /select a CivitAI model/);
   assert.equal(srv.requests.length, 0);
