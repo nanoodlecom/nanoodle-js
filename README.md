@@ -119,6 +119,12 @@ keys are the sink node’s custom name (or its type name). A workflow with
 exactly one required input also accepts a bare value: `wf.run("hello")`.
 Settings use `nodeId.field` keys (`"n3.model"`).
 
+An input is `optional` when its node-type spec says so (LLM system prompts),
+or when the author checked **optional** on the node in the editor (saved as
+`fields.optional`). Optional inputs can be omitted: the run proceeds and the
+node yields an empty value (an omitted optional image/audio/video input is
+simply dropped by downstream reference-style consumers).
+
 ### Media inputs
 
 ```js

@@ -181,3 +181,48 @@ test("size and duration settings ship the app's option lists (play.html SIZES/DU
     assert.deepEqual(duration.options, ["5", "10"], nid + ".duration");
   }
 });
+
+test("author-marked optional input (fields.optional): derived, skippable, keeps custom-name key", async () => {
+  // join is local-only, so the whole graph runs without a network mock
+  const wf = Workflow.fromJSON({
+    nodes: [
+      { id: "n1", type: "text", fields: {} },
+      { id: "n2", type: "text", name: "Extra notes", fields: { optional: true } },
+      { id: "n3", type: "join", fields: { sep: "+" } },
+    ],
+    links: [
+      { from: { node: "n1", port: "text" }, to: { node: "n3", port: "text1" } },
+      { from: { node: "n2", port: "text" }, to: { node: "n3", port: "text2" } },
+    ],
+  }, noNet);
+  const extra = wf.inputs.find((i) => i.nodeId === "n2");
+  assert.equal(extra.optional, true);
+  assert.equal(extra.key, "Extra notes");        // single optional input still takes the node's name
+  assert.equal(wf.inputs.find((i) => i.nodeId === "n1").optional, false);
+  const result = await wf.run({ Text: "hi" });   // optional input omitted → runs, empty value
+  assert.equal(result.nodes.n2.out.text, "");
+  assert.equal(result.nodes.n2.status, "done");
+});
+
+test("optional upload: omitted media yields empty output instead of failing; required still errors", async () => {
+  const graph = (optional) => ({
+    nodes: [{ id: "u1", type: "upload", name: "Style reference", fields: optional ? { optional: true } : {} }],
+    links: [],
+  });
+  const wf = Workflow.fromJSON(graph(true), noNet);
+  assert.equal(wf.inputs[0].optional, true);
+  assert.equal(wf.inputs[0].key, "Style reference");
+  const result = await wf.run({});
+  assert.equal(result.nodes.u1.status, "done");
+  assert.equal(result.nodes.u1.out.image, "");
+  const req = Workflow.fromJSON(graph(false), noNet);
+  await assert.rejects(req.run({}), /missing required input "Style reference"/);
+});
+
+test("fields.optional tolerates the string form a checkbox round-trip might save", () => {
+  const wf = Workflow.fromJSON({
+    nodes: [{ id: "n1", type: "text", fields: { optional: "true" } }],
+    links: [],
+  }, noNet);
+  assert.equal(wf.inputs[0].optional, true);
+});

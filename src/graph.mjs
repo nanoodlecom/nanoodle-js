@@ -73,6 +73,17 @@ export function displayName(node) {
   return (t && t.title) || node.type || "?";
 }
 
+/**
+ * Author-marked optional node: fields.optional (the editor's "optional" checkbox on
+ * input nodes) makes every input this node surfaces skippable — the run proceeds and
+ * the node yields an empty value instead of failing. Serialized inside fields so it
+ * survives save/share/materialize with zero format changes.
+ */
+export function optionalNode(node) {
+  const v = node && node.fields && node.fields.optional;
+  return v === true || v === "true";
+}
+
 /** Is a wire landing on `port` of `node` a data input (vs a field override)? */
 export function isInputPort(node, port) {
   const t = NODE_TYPES[node.type];

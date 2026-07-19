@@ -1,6 +1,6 @@
 import { NanoodleError } from "./errors.mjs";
 import { catItem, chatModelCan } from "./catalog.mjs";
-import { IMG_PORT_RE, EDIT_IMG_RE, REF_PORT_RE, CLIP_PORT_RE, VID_PORT_RE } from "./graph.mjs";
+import { IMG_PORT_RE, EDIT_IMG_RE, REF_PORT_RE, CLIP_PORT_RE, VID_PORT_RE, optionalNode } from "./graph.mjs";
 import { MEDIA_INLINE_MAX } from "./media.mjs";
 import {
   resizeCropImage, trimAudioToWav, extractAudioToWav,
@@ -385,15 +385,24 @@ export const RUNNERS = {
   async text(n) { return { text: n.fields.text || "" }; },
 
   async upload(n) {
-    if (!n.fields.image) throw new NanoodleError("no image — this Image input has no image");
+    if (!n.fields.image) {
+      if (optionalNode(n)) return { image: "" }; // skipped optional input — consumers drop empty media (collectPorts)
+      throw new NanoodleError("no image — this Image input has no image");
+    }
     return { image: n.fields.image };
   },
   async aupload(n) {
-    if (!n.fields.audio) throw new NanoodleError("no audio — this Audio input has no clip");
+    if (!n.fields.audio) {
+      if (optionalNode(n)) return { audio: "" };
+      throw new NanoodleError("no audio — this Audio input has no clip");
+    }
     return { audio: n.fields.audio };
   },
   async vupload(n) {
-    if (!n.fields.video) throw new NanoodleError("no video — this Video input has no clip");
+    if (!n.fields.video) {
+      if (optionalNode(n)) return { video: "" };
+      throw new NanoodleError("no video — this Video input has no clip");
+    }
     return { video: n.fields.video };
   },
 

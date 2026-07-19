@@ -1,5 +1,5 @@
 import { NanoodleError } from "./errors.mjs";
-import { NODE_TYPES, displayName, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
+import { NODE_TYPES, displayName, optionalNode, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
 
 /* ============================== INPUTS ============================== */
 
@@ -31,7 +31,7 @@ export function deriveInputs(graph) {
   const mk = (n, field, label, kind, optional, specDef) => {
     const cur = n.fields[field];
     return {
-      nodeId: n.id, field, label, kind, optional: !!optional,
+      nodeId: n.id, field, label, kind, optional: !!optional || optionalNode(n),
       def: cur != null && String(cur) !== "" ? cur : specDef,
       title: displayName(n), _node: n,
     };
@@ -67,13 +67,17 @@ export function deriveInputs(graph) {
     }
   }
   // Friendly keys: a node's custom name labels its input when it contributes exactly one
-  // REQUIRED input (app PR #138); otherwise the generic spec label. Dedupe with " 2", " 3".
+  // REQUIRED input (app PR #138) — or exactly one input at all, so an author-optional
+  // renamed node (e.g. an optional "Style reference" upload) keeps its name as the key.
+  // Otherwise the generic spec label. Dedupe with " 2", " 3".
   const used = new Map();
   for (const e of entries) {
     const nodeEntries = entries.filter((x) => x.nodeId === e.nodeId);
     const required = nodeEntries.filter((x) => !x.optional);
     const custom = (e._node.name || "").trim();
-    let key = custom && required.length === 1 && required[0] === e ? custom : e.label;
+    const names = (required.length === 1 && required[0] === e) ||
+                  (required.length === 0 && nodeEntries.length === 1);
+    let key = custom && names ? custom : e.label;
     const lower = key.toLowerCase();
     const count = (used.get(lower) || 0) + 1;
     used.set(lower, count);
