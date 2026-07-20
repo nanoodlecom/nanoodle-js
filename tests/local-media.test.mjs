@@ -200,6 +200,39 @@ test("vframes: extracts N jpeg frames from video", async (t) => {
   assert.match(result.nodes.n2.out.frame2, /^data:image\//);
 });
 
+test("vframes end-mode: 24fps clip with audio outlasting video still yields a frame", async (t) => {
+  // Regression: EPS smaller than one frame interval + format duration (which tracks the
+  // longer AUDIO stream) seeked past the last video frame's PTS → ffmpeg decoded zero
+  // frames and "extend a video"-style graphs died before their paid node.
+  if (skipWithoutFfmpeg(t)) return;
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const dir = await mkdtemp(join(tmpdir(), "nn-vframes-"));
+  try {
+    const path = join(dir, "in.mp4");
+    const r = spawnSync("ffmpeg", [
+      "-y", "-f", "lavfi", "-i", "testsrc2=size=192x108:rate=24:duration=2",
+      "-f", "lavfi", "-i", "sine=frequency=440:duration=2.3",
+      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", path,
+    ], { stdio: "ignore" });
+    assert.equal(r.status, 0);
+    const vid = await mediaFromFile(path);
+    const wf = Workflow.fromJSON({
+      nodes: [
+        { id: "n1", type: "vupload", fields: {} },
+        { id: "n2", type: "vframes", name: "Frames", fields: { frames: "1", dir: "end" } },
+      ],
+      links: [{ id: "l1", from: { node: "n1", port: "video" }, to: { node: "n2", port: "video" } }],
+    }, { apiKey: null });
+    const result = await wf.run({ Video: vid });
+    const f1 = result.get("Frames");
+    assert.ok(f1 instanceof MediaRef);
+    assert.match(f1.url, /^data:image\//);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 /* ---------- combine (pure MP4CAT path — no ffmpeg for matching mp4s) ---------- */
 
 test("combine: concatenates two clips into one video", async () => {

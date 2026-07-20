@@ -824,17 +824,37 @@ export async function extractVideoFrames(url, { count = 1, gap = 0.5, dir = "end
   const n = Math.max(1, Math.min(MAX_FRAMES, parseInt(count, 10) || 1));
   const stepSec = Number.isFinite(Number(gap)) ? Math.max(0, Number(gap)) : 0.5;
   const fromEnd = (dir || "end") === "end";
-  const EPS = 0.04;
 
   return withTemp(async (dir) => {
     const inPath = await writeInput(dir, "in", url, fetchFn);
     throwIfAborted(signal);
     const pr = await runProc("ffprobe", [
-      "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", inPath,
+      "-v", "error", "-select_streams", "v:0",
+      "-show_entries", "stream=duration,avg_frame_rate", "-show_entries", "format=duration",
+      "-of", "json", inPath,
     ], { signal });
-    const dur = parseFloat(String(pr.stdout).trim());
-    if (!isFinite(dur) || dur <= 0) throw new NanoodleError("video has no readable duration");
+    let probed = {};
+    try { probed = JSON.parse(String(pr.stdout)); } catch { /* handled by the finite checks below */ }
+    const v0 = (probed.streams && probed.streams[0]) || {};
+    // Prefer the VIDEO stream's duration: the container's format duration includes the
+    // audio track, which routinely outlasts the last video frame (-shortest muxes,
+    // padded AAC) — seeking near THAT end decodes zero frames.
+    const vdur = parseFloat(v0.duration);
+    const fdur = parseFloat((probed.format || {}).duration);
+    const dur = [vdur, fdur].filter((d) => isFinite(d) && d > 0).reduce((a, b) => Math.min(a, b), Infinity);
+    if (!isFinite(dur)) throw new NanoodleError("video has no readable duration");
+    // The last frame's PTS sits a full frame interval before the stream end, so the
+    // back-off from the end must exceed one frame or ffmpeg outputs nothing (pts >= t
+    // selection). 1.5 frames at the probed rate; 0.1s when the rate is unreadable.
+    const rate = String(v0.avg_frame_rate || "").split("/").map(Number);
+    const fps = rate.length === 2 && rate[0] > 0 && rate[1] > 0 ? rate[0] / rate[1] : 0;
+    const EPS = fps > 0 ? Math.max(0.04, 1.5 / fps) : 0.1;
 
+    const grab = async (t, framePath) => {
+      await runProc("ffmpeg", [
+        "-y", "-ss", String(t), "-i", inPath, "-frames:v", "1", "-q:v", "2", framePath,
+      ], { signal });
+    };
     const out = {};
     for (let i = 0; i < n; i++) {
       throwIfAborted(signal);
@@ -842,9 +862,14 @@ export async function extractVideoFrames(url, { count = 1, gap = 0.5, dir = "end
       let t = fromEnd ? (dur - EPS - i * stepSec) : (i * stepSec);
       t = Math.max(0, Math.min(Math.max(0, dur - EPS), t));
       const framePath = join(dir, `f${i + 1}.jpg`);
-      await runProc("ffmpeg", [
-        "-y", "-ss", String(t), "-i", inPath, "-frames:v", "1", "-q:v", "2", framePath,
-      ], { signal });
+      try {
+        await grab(t, framePath);
+      } catch (e) {
+        // Reported durations can still overshoot the last decodable frame (VFR, sloppy
+        // muxes) — step back once before giving up.
+        if (t <= 0) throw e;
+        await grab(Math.max(0, t - 0.5), framePath);
+      }
       out["frame" + (i + 1)] = await dataUrlFromFile(framePath, "image/jpeg");
     }
     return out;
