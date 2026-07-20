@@ -1,4 +1,4 @@
-import { gunzip } from "./zlib.mjs";
+import { gunzip, gunzipLax } from "./zlib.mjs";
 import { base64ToBytes } from "./media.mjs";
 import { NanoodleError } from "./errors.mjs";
 
@@ -44,11 +44,69 @@ async function gunzipText(buf, what) {
   catch { throw new NanoodleError(`share link: ${what} payload is not valid gzip data — the link may be truncated`); }
 }
 
+/* ---- best-effort salvage for damaged links ----------------------------------
+   Links get mangled in transit all the time — chat apps, line wraps, and manual
+   copy/paste flip or drop a character, which breaks the gzip CRC (and often a
+   few JSON characters) while leaving most of the payload intact. Executors only
+   need `nodes` and `links`, so when strict decoding fails we lax-decompress
+   (trailer ignored, partial output kept) and pull those two arrays out of the
+   damaged text. Cosmetic editor state (view, nid/lid) is sacrificed; damage
+   inside the graph itself still fails with the original error. Results carry
+   `recovered: true` so callers can warn. */
+
+/** Index of the bracket closing text[i] (a "[" or "{"), string-aware; -1 when unbalanced. */
+function matchBracket(text, i) {
+  const open = text[i];
+  if (open !== "[" && open !== "{") return -1;
+  let depth = 0, inStr = false;
+  for (let j = i; j < text.length; j++) {
+    const c = text[j];
+    if (inStr) {
+      if (c === "\\") j++;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') inStr = true;
+    else if (c === "[" || c === "{") depth++;
+    else if (c === "]" || c === "}") { depth--; if (!depth) return j; }
+  }
+  return -1;
+}
+
+/** Parse the value of `"key": …` out of possibly-damaged JSON text; null when no occurrence parses. */
+function extractJsonValue(text, key) {
+  const needle = `"${key}"`;
+  for (let from = 0; ;) {
+    const at = text.indexOf(needle, from);
+    if (at === -1) return null;
+    from = at + 1;
+    let j = at + needle.length;
+    while (j < text.length && /\s/.test(text[j])) j++;
+    if (text[j] !== ":") continue;
+    j++;
+    while (j < text.length && /\s/.test(text[j])) j++;
+    const end = matchBracket(text, j);
+    if (end === -1) continue;
+    try { return JSON.parse(text.slice(j, end + 1)); } catch { /* damaged here — try the next occurrence */ }
+  }
+}
+
+function salvageGraph(text) {
+  if (!text) return null;
+  const nodes = extractJsonValue(text, "nodes");
+  if (!Array.isArray(nodes) || !nodes.length || !nodes.every((n) => n && typeof n === "object" && typeof n.type === "string")) return null;
+  const links = extractJsonValue(text, "links");
+  return { v: 1, nodes, links: Array.isArray(links) ? links : [] };
+}
+
+const laxText = (bytes) => (bytes && bytes.length ? utf8.decode(bytes) : null);
+
 /**
  * Decode a share fragment ("#g=…", "g=…", "#a=…", …) to its graph.
  * Async since v0.4: gzip decoding goes through DecompressionStream in the
  * browser, which has no synchronous form.
- * @returns {Promise<{ graph: object, kind: "g"|"j"|"a", app: { name?, lang?, hasFiles: boolean }|null }>}
+ * @returns {Promise<{ graph: object, kind: "g"|"j"|"a", app: { name?, lang?, hasFiles: boolean }|null, recovered?: true }>}
+ *   `recovered: true` marks a damaged link whose graph was salvaged best-effort
+ *   (nodes + links only — cosmetic editor state is dropped); warn the user and
+ *   suggest re-copying the link.
  */
 export async function decodeShareFragment(fragment) {
   let f = String(fragment);
@@ -59,30 +117,62 @@ export async function decodeShareFragment(fragment) {
       "Open the link in a browser and use 🔗 Share to mint a #g= workflow link instead.");
   }
   if (f.startsWith("g=")) {
-    return { graph: parseJson(await gunzipText(b64urlToBytes(f.slice(2), "#g="), "#g="), "#g="), kind: "g", app: null };
+    const buf = b64urlToBytes(f.slice(2), "#g=");
+    let text = null, strictErr;
+    try { text = await gunzipText(buf, "#g="); } catch (e) { strictErr = e; }
+    if (text !== null) {
+      try { return { graph: parseJson(text, "#g="), kind: "g", app: null }; }
+      catch (e) { strictErr = e; }
+    } else {
+      text = laxText(await gunzipLax(buf));
+    }
+    const graph = salvageGraph(text);
+    if (!graph) throw strictErr;
+    return { graph, kind: "g", app: null, recovered: true };
   }
   if (f.startsWith("j=")) {
-    return { graph: parseJson(utf8.decode(b64urlToBytes(f.slice(2), "#j=")), "#j="), kind: "j", app: null };
+    const text = utf8.decode(b64urlToBytes(f.slice(2), "#j="));
+    try { return { graph: parseJson(text, "#j="), kind: "j", app: null }; }
+    catch (e) {
+      const graph = salvageGraph(text);
+      if (!graph) throw e;
+      return { graph, kind: "j", app: null, recovered: true };
+    }
   }
   if (f.startsWith("a=")) {
     const tag = f.slice(2);
-    const json = tag[0] === "u"
-      ? utf8.decode(b64urlToBytes(tag.slice(1), "#a=u"))
-      : await gunzipText(b64urlToBytes(tag, "#a="), "#a=");
-    const payload = parseJson(json, "#a=");
-    if (!payload || typeof payload !== "object" || !payload.graph) {
-      throw new NanoodleError("share link: #a= app payload has no graph in it");
+    let json = null, strictErr;
+    if (tag[0] === "u") {
+      json = utf8.decode(b64urlToBytes(tag.slice(1), "#a=u"));
+    } else {
+      const buf = b64urlToBytes(tag, "#a=");
+      try { json = await gunzipText(buf, "#a="); }
+      catch (e) { strictErr = e; json = laxText(await gunzipLax(buf)); }
     }
-    // files/samples/lang are play.html presentation — executors run graphs, not apps.
-    return {
-      graph: payload.graph,
-      kind: "a",
-      app: {
-        ...(typeof payload.name === "string" && payload.name ? { name: payload.name } : {}),
-        ...(typeof payload.lang === "string" && payload.lang ? { lang: payload.lang } : {}),
-        hasFiles: !!payload.files,
-      },
-    };
+    if (!strictErr) {
+      let payload;
+      try { payload = parseJson(json, "#a="); } catch (e) { strictErr = e; payload = null; }
+      if (payload) {
+        if (typeof payload !== "object" || !payload.graph) {
+          throw new NanoodleError("share link: #a= app payload has no graph in it");
+        }
+        // files/samples/lang are play.html presentation — executors run graphs, not apps.
+        return {
+          graph: payload.graph,
+          kind: "a",
+          app: {
+            ...(typeof payload.name === "string" && payload.name ? { name: payload.name } : {}),
+            ...(typeof payload.lang === "string" && payload.lang ? { lang: payload.lang } : {}),
+            hasFiles: !!payload.files,
+          },
+        };
+      }
+    }
+    // salvage: the app payload nests its graph — prefer the intact "graph" object, else its nodes/links
+    const nested = json != null ? extractJsonValue(json, "graph") : null;
+    const graph = nested && typeof nested === "object" && Array.isArray(nested.nodes) ? nested : salvageGraph(json);
+    if (!graph) throw strictErr;
+    return { graph, kind: "a", app: { hasFiles: false }, recovered: true };
   }
   throw new NanoodleError(`share link: no #g=/#j=/#a= fragment found in "${fragment}"`);
 }
@@ -102,7 +192,7 @@ function fragmentOf(url) {
  *
  * @param {string} input
  * @param {{ fetch?: typeof fetch, maxHops?: number }} [opts]
- * @returns {Promise<{ graph: object, kind: "g"|"j"|"a", app: object|null, url: string }>}
+ * @returns {Promise<{ graph: object, kind: "g"|"j"|"a", app: object|null, url: string, recovered?: true }>}
  */
 export async function decodeShareUrl(input, opts = {}) {
   const s = String(input).trim();

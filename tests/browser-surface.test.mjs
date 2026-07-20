@@ -55,6 +55,18 @@ test("browser zlib path (Compression/DecompressionStream) interoperates with nod
   assert.deepEqual([...await streamZlib.gunzip(new Uint8Array(gzipSync(raw)))], [...raw]);
 });
 
+test("browser lax-gunzip recovers a member with a corrupted CRC trailer", async () => {
+  const { streamZlib, gunzipLax } = await import("../src/zlib.mjs");
+  const { gzipSync } = await import("node:zlib");
+  const raw = new TextEncoder().encode(JSON.stringify({ v: 1, nodes: [{ id: "n1", type: "text" }], links: [] }));
+  const gz = new Uint8Array(gzipSync(raw));
+  gz[gz.length - 5] ^= 0xff; // stomp the CRC32/ISIZE trailer, body untouched
+  await assert.rejects(() => streamZlib.gunzip(gz));                 // strict path refuses…
+  assert.deepEqual([...await streamZlib.gunzipLax(gz)], [...raw]);   // …lax path recovers, byte-for-byte
+  assert.deepEqual([...await gunzipLax(gz)], [...raw]);              // node path agrees
+  assert.equal(await gunzipLax(new TextEncoder().encode("not gzip at all")), null);
+});
+
 test("pure PNG codec round-trips without Buffer (browser pixels contract)", async () => {
   const { decodePng, encodePngRgba } = await import("../src/local-media.mjs");
   const w = 3, h = 2;

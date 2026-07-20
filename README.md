@@ -105,6 +105,11 @@ stays in the browser) both work, as do da.gd/TinyURL short links (resolved by
 reading redirect headers; no credentials are ever sent). Direct links decode
 fully offline. Quote the URL — `#` starts a comment in most shells.
 
+Links mangled in transit (a character flipped or dropped by a chat app or a
+copy/paste) are recovered best-effort: the graph's nodes and wires are salvaged
+and a warning is printed. Only damage inside the graph itself makes a link
+unrecoverable.
+
 ## Inputs, outputs, settings
 
 ```js

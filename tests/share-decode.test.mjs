@@ -71,6 +71,65 @@ test("corrupt payloads throw NanoodleError, not raw zlib/JSON errors", async () 
   await assert.rejects(() => decodeShareUrl("#g="), NanoodleError);                    // empty payload
 });
 
+/* ---- damaged links: salvage nodes+links instead of failing outright ---- */
+
+const toB64u = (s) => Buffer.from(s, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+// Corrupt a char 6 from the end: inside the 8-byte CRC32/ISIZE trailer, and far
+// enough from the end that the change never lands in base64 padding bits.
+const corruptTrailer = (url) => {
+  const i = url.length - 6;
+  return url.slice(0, i) + (url[i] === "A" ? "B" : "A") + url.slice(i + 1);
+};
+
+test("g link with a corrupted gzip trailer still decodes, flagged recovered", async () => {
+  const g = goldens.find((x) => x.name === "g-starter");
+  const r = await decodeShareUrl(corruptTrailer(g.url));
+  assert.equal(r.recovered, true);
+  assert.deepEqual(r.graph.nodes, g.graph.nodes);
+  assert.deepEqual(r.graph.links, g.graph.links);
+});
+
+test("damage in cosmetic keys (view) is survivable; pristine links carry no recovered flag", async () => {
+  const g = goldens.find((x) => x.name === "g-starter");
+  assert.equal((await decodeShareUrl(g.url)).recovered, undefined);
+  const json = JSON.stringify({ ...g.graph, view: { panX: 1, panY: 2 } })
+    .replace('"view":{', '"view"{'); // the kind of one-character mangling copy/paste produces
+  const r = await decodeShareFragment("#j=" + toB64u(json));
+  assert.equal(r.recovered, true);
+  assert.deepEqual(r.graph.nodes, g.graph.nodes);
+  assert.deepEqual(r.graph.links, g.graph.links);
+});
+
+test("damage inside the nodes array stays a hard error", async () => {
+  const g = goldens.find((x) => x.name === "g-starter");
+  const json = JSON.stringify(g.graph).replace('"nodes":[{"', '"nodes":[{');
+  await assert.rejects(() => decodeShareFragment("#j=" + toB64u(json)), NanoodleError);
+});
+
+test("damaged #a= app link salvages its nested graph", async () => {
+  const a = goldens.find((x) => x.name.startsWith("a-") && !x.url.includes("#a=u"));
+  const r = await decodeShareUrl(corruptTrailer(a.url));
+  assert.equal(r.recovered, true);
+  assert.deepEqual(r.graph.nodes, a.graph.nodes);
+});
+
+// Real-world regression: a #g= link mangled in a chat paste — one character flipped
+// inside the compressed stream, garbling the trailing view metadata and the CRC.
+// Strict decoding refused the whole link; salvage must recover all 3 nodes + 1 wire.
+const MANGLED_REAL_LINK = "https://nanoodle.com/#g=H4sIAAAAAAAAA22RS47bMBBEr9LoNa2RxI8tXiBXSBBkwbF6bCIUKYgdf2Lo7gHpMTSLbLhoVlc9Fh94QdsJjGmkjPbnA_2IFo87H5kio0C-z1QmaZqegxvaQyvwjnZnWoEfnsKY0T6Q6cZo8RtFWhxTBgeZfQjgJ3ci-FjSBA7mJU0zC-AzRXDRT1XqGXzkVFbOaWG4-JESHIOfG1wFXtFK1a7iEy92G1hNrVTmSdX1_6NywD7eITsf3pNjSBEcnEK6-niCd5_Cn8lHykeKDJmcgOhPZxaQ2S0Z1y2636Lru17ZqtFKq67ttOl1BZGyMdJI3Ws5tHW4UWX_tzh0ba9u5UCBUxopoMWFLvTWN91bId9x2j1jVlGX6vazQ7Ttuv4SGHz8_eXvQimnlF2U5V9fhc1p4Vdhq0BOXwX9Jvh0r96xWKqSMaKVAi-erpXAxe9oldaNNNKovTLtIPdalIsfaOVwaPb9vt8Pxsj2oAelMB9dILTduv4DA-VefHUCAAA";
+
+test("real mangled link from the field recovers its graph", async () => {
+  const r = await decodeShareUrl(MANGLED_REAL_LINK);
+  assert.equal(r.recovered, true);
+  assert.equal(r.graph.nodes.length, 3);
+  assert.equal(r.graph.links.length, 1);
+  assert.equal(r.graph.nodes.find((n) => n.type === "image").fields.model, "reve/2.1/text-to-image");
+});
+
+test("garbage that salvage cannot save still throws NanoodleError", async () => {
+  await assert.rejects(() => decodeShareFragment("#g=H4sIAAAAAAAAAwXB"), NanoodleError);
+});
+
 test("#a= payload without a graph is refused", async () => {
   const json = JSON.stringify({ v: 1, name: "no graph here" });
   const b64u = Buffer.from(json, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");

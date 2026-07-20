@@ -117,7 +117,10 @@ export class Workflow {
    */
   static async load(src, opts = {}) {
     if (isShareRef(src)) {
-      const { graph } = await decodeShareUrl(src, { fetch: opts.fetch });
+      const { graph, recovered } = await decodeShareUrl(src, { fetch: opts.fetch });
+      if (recovered && !opts.quiet) {
+        warnGraph("share link was damaged (usually a copy/paste artifact) — recovered the graph's nodes and wires best-effort; re-copy the link from the editor for a pristine version");
+      }
       return new Workflow(graph, opts);
     }
     if (typeof src === "string" && /^\s*[\[{]/.test(src)) {
