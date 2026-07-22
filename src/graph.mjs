@@ -3,7 +3,7 @@ import { NanoodleError } from "./errors.mjs";
 /* Dynamic input-port families (mirrors the nanoodle app's runGraph). A wire landing on one of
    these ports — or on a port declared in NODE_TYPES[type].inputs — is a data input; a wire
    landing on ANY other port is a field override (wired prompt/system/lyrics/q/...). */
-export const IMG_PORT_RE = /^img\d+$/;      // llm / draw vision references
+export const IMG_PORT_RE = /^img\d+$/;      // llm vision references
 export const EDIT_IMG_RE = /^image\d*$/;    // edit multi-reference: image, image2, ...
 export const VID_PORT_RE = /^vid\d+$/;
 export const CLIP_PORT_RE = /^clip\d+$/;    // combine clips
@@ -44,7 +44,6 @@ export const NODE_TYPES = {
   join:    { title: "Join",            inputs: ["a", "b"], outputs: [{ name: "text", type: "text" }], local: true },
   llm:     { title: "LLM",             inputs: [], outputs: [{ name: "text", type: "text" }], network: true },
   image:   { title: "Image",           inputs: [], outputs: [{ name: "image", type: "image" }], network: true },
-  draw:    { title: "Draw",            inputs: [], outputs: [{ name: "image", type: "image" }, { name: "text", type: "text" }], network: true },
   edit:    { title: "Edit",            inputs: [], outputs: [{ name: "image", type: "image" }], network: true },
   inpaint: { title: "Inpaint",         inputs: ["image", "mask"], outputs: [{ name: "image", type: "image" }], network: true },
   resize:  { title: "Resize / crop",   inputs: ["image"], outputs: [{ name: "image", type: "image" }], local: true },

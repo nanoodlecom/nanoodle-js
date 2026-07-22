@@ -12,8 +12,6 @@ export const INPUT_SPECS = {
   llm:     [{ f: "prompt", label: "Prompt", kind: "textarea" },
             { f: "system", label: "System prompt", kind: "textarea", optional: true, def: "You are a helpful, concise assistant." }],
   image:   [{ f: "prompt", label: "Image prompt", kind: "textarea" }],
-  draw:    [{ f: "prompt", label: "Prompt", kind: "textarea" },
-            { f: "system", label: "System prompt", kind: "textarea", optional: true }],
   tvideo:  [{ f: "prompt", label: "Video prompt", kind: "textarea" }],
   music:   [{ f: "prompt", label: "Style / prompt", kind: "textarea" }],
   remix:   [{ f: "prompt", label: "Style / direction", kind: "textarea" }],
@@ -200,10 +198,6 @@ export const SETTING_SPECS = {
     { f: "prompt", label: "Edit instruction", kind: "textarea" },
     { f: "size", label: "Image size", kind: "select", options: SIZES, def: "1024x1024" },
     { f: "seed", label: "Seed", kind: "number" },
-  ],
-  draw: [
-    { f: "model", label: "Model", kind: "model" },
-    { f: "showThinking", label: "Show thinking", kind: "boolean", def: true },
   ],
   tvideo: [
     { f: "model", label: "Model", kind: "model" },

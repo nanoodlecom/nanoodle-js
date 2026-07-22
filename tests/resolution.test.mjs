@@ -157,17 +157,6 @@ test("diamond graph: deps run before dependents, sink last", async (t) => {
   assert.equal(result.get("Join"), "branch branch");
 });
 
-test("draw sink exposes BOTH ports (image primary, text secondary)", () => {
-  const wf = Workflow.fromJSON({
-    nodes: [{ id: "n1", type: "draw", fields: { model: "m", prompt: "x" } }],
-    links: [],
-  }, noNet);
-  assert.deepEqual(wf.outputs[0].ports, [
-    { name: "image", type: "image" },
-    { name: "text", type: "text" },
-  ]);
-});
-
 test("result.get with an unknown key throws listing the available outputs", async () => {
   const wf = Workflow.fromJSON({
     nodes: [{ id: "n1", type: "text", name: "Greeting", fields: { text: "hello" } }],
