@@ -196,26 +196,6 @@ export class NanoClient {
     return out;
   }
 
-  /** Draw-node twin of chat(): the model answers with images in message.images[]. */
-  async chatImage(messages, model, opts = {}, { onCost, signal } = {}) {
-    const body = { model, messages };
-    body.temperature = opts.temperature != null && opts.temperature !== "" ? +opts.temperature : 0.8;
-    const r = await this._postJson("/api/v1/chat/completions", body, signal);
-    if (!r.ok) throw httpError(r.status, await r.text());
-    const j = await r.json();
-    if (onCost) onCost(costWithHeaders(j, r));
-    const msg = (j.choices && j.choices[0] && j.choices[0].message) || {};
-    const images = (msg.images || [])
-      .map((im) => (im && im.image_url && im.image_url.url) || (im && im.url) || (typeof im === "string" ? im : null))
-      .filter(Boolean);
-    const text = typeof msg.content === "string" ? msg.content
-      : Array.isArray(msg.content) ? msg.content.map((p) => p.text || "").join("") : "";
-    if (!images.length) {
-      throw new NanoodleError(text ? "this model replied with text, not an image — pick an image-output model" : "no image in response");
-    }
-    return { images, text, reasoning: msg.reasoning || "" };
-  }
-
   /** POST /v1/images/generations (NOTE: not /api/v1). Returns data: / https URL(s). */
   async image({ prompt, model, size, imageDataUrl, maskDataUrl, extra, n = 1, multi = false }, { onCost, signal } = {}) {
     const body = { model, size: size || "1024x1024", n, response_format: "b64_json" };

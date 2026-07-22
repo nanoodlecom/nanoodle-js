@@ -59,46 +59,6 @@ test("image parse: empty data list → 'no image in response'", async (t) => {
   await assert.rejects(wf.run({}), /no image in response/);
 });
 
-test("draw parse: text-only reply and empty reply get distinct errors", async (t) => {
-  const srv = await startMockServer();
-  t.after(() => srv.close());
-  const drawWf = () => Workflow.fromJSON({
-    nodes: [{ id: "n1", type: "draw", fields: { model: "gemini-3-pro-image-preview", prompt: "a moon" } }],
-    links: [],
-  }, mockOpts(srv));
-
-  srv.script("POST /api/v1/chat/completions", { json: { choices: [{ message: { content: "I cannot draw that." } }] } });
-  await assert.rejects(drawWf().run({}), /replied with text, not an image/);
-
-  srv.script("POST /api/v1/chat/completions", { json: { choices: [{ message: { content: null } }] } });
-  await assert.rejects(drawWf().run({}), /no image in response/);
-});
-
-test("draw parse: image entries as plain strings and {url} objects both work; reasoning fenced by default", async (t) => {
-  const srv = await startMockServer();
-  t.after(() => srv.close());
-  srv.script("POST /api/v1/chat/completions", {
-    json: {
-      choices: [{
-        message: {
-          content: "done",
-          reasoning: "sketching…",
-          images: ["data:image/png;base64,S1", { url: "https://cdn.example/x.png" }, null],
-        },
-      }],
-      cost: 0.01,
-    },
-  });
-  const wf = Workflow.fromJSON({
-    nodes: [{ id: "n1", type: "draw", fields: { model: "gemini-3-pro-image-preview", prompt: "a moon" } }],
-    links: [],
-  }, mockOpts(srv));
-  const result = await wf.run({});
-  assert.deepEqual(result.nodes.n1.out.images, ["data:image/png;base64,S1", "https://cdn.example/x.png"]);
-  // draw's showThinking defaults ON (SETTING_SPECS def true) → the trace is fenced onto the text port
-  assert.equal(result.nodes.n1.out.text, "```thinking\nsketching…\n```\n\ndone");
-});
-
 test("transcribe parse priority: transcription → text → data.transcription/text", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());

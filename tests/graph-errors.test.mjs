@@ -51,6 +51,25 @@ test("unknown node type: load warns, run fails fast with UnsupportedNodeError", 
   });
 });
 
+// The `draw` (chat-image) node was retired: NanoGPT dropped the gemini-omni chat-image
+// contract, and the `image` node covers image generation. A graph carrying it must now be
+// refused as an unknown type — naming 'draw' — before any network call is made.
+test("retired 'draw' node: warns on load, fails fast as unknown type with no API spend", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  const wf = Workflow.fromJSON({
+    nodes: [{ id: "n1", type: "draw", fields: { model: "gemini-3-pro-image-preview", prompt: "a moon" } }],
+    links: [],
+  }, mockOpts(srv));
+  assert.match(wf.warnings[0], /unknown node type "draw"/);
+  await assert.rejects(wf.run({}), (e) => {
+    assert.ok(e instanceof UnsupportedNodeError);
+    assert.match(e.message, /unknown node type 'draw'/);
+    return true;
+  });
+  assert.equal(srv.requests.length, 0); // failed before any spend
+});
+
 test("local-media resize is executable (no longer UnsupportedNodeError); load does not warn", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());

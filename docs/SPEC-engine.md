@@ -54,10 +54,6 @@ if mask          body.maskDataUrl = <mask data URL; white = repaint>
 - inpaint: source+mask from ports or fields. Before send, composite the mask onto opaque black at the **source image's** exact pixel size (`maskToSource` — same as play.html / index.html canvas path) so `maskDataUrl` dimensions always match.
 Parse: `j.data[]` → `d.b64_json ? "data:<sniffed mime>;base64,"+b64 : d.url`. Sniff mime from magic bytes (PNG \x89PNG, JPEG \xFF\xD8, GIF, WEBP RIFF....WEBP; default image/png). Throw "no image in response" if empty.
 
-### draw → CHAT_ENDPOINT (genChatImage 1508-1523)
-body = {model, messages, temperature:0.8} (no response_format). Wired images like llm.
-Parse: images from `j.choices[0].message.images[]` → `im.image_url.url || im.url || im`; text from message.content (may be null — fine).
-
 ### tvideo / ivideo / vedit / lipsync → submit + poll (genVideo 1527-1588)
 ```
 body = { model, prompt }

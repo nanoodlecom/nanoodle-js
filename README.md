@@ -176,7 +176,7 @@ all fail **before** anything is spent.
 |---|---|
 | local | text, upload (image/audio/video), choice, join, comment |
 | local media† | resize, vframes, combine, soundtrack, trim, extractaudio |
-| NanoGPT | llm (incl. vision + audio input), image, draw, edit, inpaint*, vision, tvideo, ivideo, vedit, lipsync, music, remix, tts, transcribe |
+| NanoGPT | llm (incl. vision + audio input), image, edit, inpaint*, vision, tvideo, ivideo, vedit, lipsync, music, remix, tts, transcribe |
 
 † **local media** prefers a pure-JS path that matches the browser (lossless mp4 remux, PCM-WAV trim, PNG resize). **ffmpeg** on `PATH` is the fallback for everything else (soft dependency — not an npm package); clear error if it’s required and missing.
 

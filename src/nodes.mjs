@@ -396,7 +396,7 @@ function guardRefsSize(imgs) {
 /**
  * Per-node executors. Each: async run(node, inp, ctx) → out map keyed by output port name.
  * `node.fields` already carries wired field overrides + user inputs + settings.
- * ctx = { chat, chatImage, image, video, audio, transcribe, progress } (cost/poll wired by the engine).
+ * ctx = { chat, image, video, audio, transcribe, progress } (cost/poll wired by the engine).
  */
 export const RUNNERS = {
   async text(n) { return { text: n.fields.text || "" }; },
@@ -568,20 +568,6 @@ export const RUNNERS = {
     guardRefsSize(imgs);
     const src = imgs.length > 1 ? imgs : imgs[0]; // array → multi-image composite; string → single edit
     return { image: await ctx.image({ prompt, model: mdl(n), size: n.fields.size || "1024x1024", imageDataUrl: src, extra: imgExtra(n) }) };
-  },
-
-  async draw(n, inp, ctx) {
-    const prompt = promptOf(n, inp, "no prompt");
-    const imgs = await Promise.all(collectPorts(inp, IMG_PORT_RE).map((u) => fitImage(u, ctx, "wired image")));
-    guardRefsSize(imgs);
-    const messages = chatMessages(n, prompt, imgs, null);
-    const res = await ctx.chatImage(messages, mdl(n), {});
-    const sel = Math.min(Math.max(0, parseInt(n.fields.sel, 10) || 0), res.images.length - 1);
-    const showThinking = n.fields.showThinking !== false && n.fields.showThinking !== "false";
-    const text = showThinking && res.reasoning
-      ? "```thinking\n" + res.reasoning + "\n```\n\n" + (res.text || "")
-      : res.text;
-    return { image: res.images[sel], images: res.images, text };
   },
 
   async inpaint(n, inp, ctx) {

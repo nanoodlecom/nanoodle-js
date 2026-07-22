@@ -168,32 +168,6 @@ test("image variations: n rides the request; all urls returned; b64 mime sniffed
   assert.ok(result.nodes.n1.out.images[1].startsWith("data:image/png;base64,"));
 });
 
-test("draw: chat payload without response_format; images parsed from message.images", async (t) => {
-  const srv = await startMockServer();
-  t.after(() => srv.close());
-  srv.script("POST /api/v1/chat/completions", {
-    json: {
-      choices: [{ message: { content: "here you go", images: [{ image_url: { url: "data:image/png;base64,DRAWN" } }] } }],
-      x_nanogpt_pricing: { cost: 0.01 },
-    },
-  });
-
-  const wf = Workflow.fromJSON({
-    nodes: [
-      { id: "n1", type: "upload", fields: { image: PNG_DATA_URL } },
-      { id: "n2", type: "draw", fields: { model: "gemini-3-pro-image-preview", prompt: "add a moon", system: "" } },
-    ],
-    links: [{ id: "l1", from: { node: "n1", port: "image" }, to: { node: "n2", port: "img1" } }],
-  }, mockOpts(srv));
-  const result = await wf.run({});
-
-  const body = srv.requests[0].json;
-  assert.ok(!("response_format" in body));
-  assert.deepEqual(body.messages[0].content[1], { type: "image_url", image_url: { url: PNG_DATA_URL } });
-  assert.equal(result.get("Draw").url, "data:image/png;base64,DRAWN");
-  assert.equal(result.nodes.n2.out.text, "here you go"); // secondary port exposed on the node record
-});
-
 test("tvideo: submit payload + poll loop pending→completed + reference images", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());
