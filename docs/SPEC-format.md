@@ -25,6 +25,7 @@ Verified against /home/ntc/dev/nanoodlecom/nanoodle/index.html (editor). The ðŸ’
 - Links kept only if BOTH endpoints exist after node filtering.
 - Migration: links into a `music`/`tts` node with `to.port === "text"` are rewritten to `"prompt"`.
 - Media fields are `data:` URLs inline in `fields` (image/audio/video/mask). Share links may have them blanked to "".
+- Library extension: a media field value that is NOT a `data:`/`http(s)` URL (a prose placeholder, a bare file path, an object) is blanked at load with a warning â€” the input then surfaces as genuinely required instead of posting garbage to the API. Authors/agents: leave media fields `""` and supply the file at run time.
 
 ## Node type registry (NODE_TYPES, index.html:5015-5679)
 Port kinds: text | image | audio | video. Only matching kinds connect.
