@@ -144,6 +144,13 @@ Media is sent inline as base64 (NanoGPT has no upload endpoint). Files over
 ~4.4 MB (~3.5 MB for transcription) are refused locally with a clear error
 before any paid call.
 
+When authoring a graph by hand, leave media fields **empty** (`"image": ""` or
+omit them) — the input then shows up as *required* in `inspect`/`wf.inputs` and
+you supply the file at run time. Don’t write prose placeholders like
+`"[image provided separately]"` into `fields.image`: anything that isn’t a
+`data:` or `http(s)` URL is treated as empty at load (with a warning), never
+sent to the API.
+
 ### Progress and errors
 
 ```js

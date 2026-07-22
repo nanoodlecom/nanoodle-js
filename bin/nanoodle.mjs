@@ -178,10 +178,27 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
 
   if (cmd === "inspect") {
     const pad = (s, n) => String(s).padEnd(n);
+    // Media defaults are data: URLs (megabytes of base64) — summarize instead of dumping,
+    // and tell the caller HOW to supply an unfilled media input, right in the listing.
+    const MEDIA_INPUT_KINDS = new Set(["image", "audio", "video"]);
+    const fmtSize = (chars) => chars >= 1024 * 1024
+      ? (chars / 1024 / 1024).toFixed(1) + " MB" : Math.max(1, Math.round(chars / 1024)) + " KB";
+    const describeDefault = (i) => {
+      if (i.def == null) return null;
+      const s = String(i.def);
+      if (!MEDIA_INPUT_KINDS.has(i.kind)) return `default: ${JSON.stringify(i.def)}`;
+      if (/^data:/i.test(s)) {
+        const mime = (s.match(/^data:([^;,]+)/) || [])[1] || i.kind;
+        return `prefilled: inline ${mime} (${fmtSize(s.length)})`;
+      }
+      return `prefilled: ${s.length > 60 ? s.slice(0, 57) + "…" : s}`;
+    };
     console.log("Inputs:");
     for (const i of wf.inputs) {
-      const extras = [i.optional ? "optional" : "required", i.def != null ? `default: ${JSON.stringify(i.def)}` : null,
-        i.options ? `options: ${i.options.join(" | ")}` : null].filter(Boolean).join(", ");
+      const extras = [i.optional ? "optional" : "required", describeDefault(i),
+        i.options ? `options: ${i.options.join(" | ")}` : null,
+        MEDIA_INPUT_KINDS.has(i.kind) && i.def == null ? `supply: --input "${i.key}=@file"` : null,
+      ].filter(Boolean).join(", ");
       console.log(`  ${pad('"' + i.key + '"', 26)} ${pad(i.nodeId + "." + i.field, 16)} ${pad(i.kind, 9)} ${extras}`);
     }
     if (!wf.inputs.length) console.log("  (none)");
