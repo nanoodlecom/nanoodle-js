@@ -170,6 +170,36 @@ Failures in lanes no output depends on only appear in `result.errors`.
 Unknown node types, missing required inputs, bad keys, and a missing API key
 all fail **before** anything is spent.
 
+### Prompt length caps
+
+Many image and video models reject an over-long prompt at NanoGPT's route
+(`400 prompt_too_long`) — `qwen-image-3` stops at 800 characters,
+`step-image-edit-2` at 512, 45 of 183 probed image models cap somewhere. The
+catalogs don't advertise any of it, and in a graph the prompt is written by an
+upstream LLM, so there's nothing for a caller to shorten. So `run()`:
+
+1. **trims** a prompt over the cap, at a sentence boundary (never mid-word,
+   never below 70% of the cap), rather than sending a request certain to fail;
+2. **reports** every trim — a `prompt-trimmed` progress event
+   (`{ nodeId, name, from, to, cap }`) and a process warning. Never silent;
+3. **learns** a cap from a live 400 and keeps it on the `Workflow` instance, so
+   a retry of an unknown or newly-added model trims up front instead of failing
+   again.
+
+It does **not** rewrite the graph's own prompts to avoid a trim: an `llm` node's
+system prompt goes to the model exactly as its author wrote it. Expect the trim
+to fire routinely on tight models — measured against five chat models writing an
+image prompt, all five overshot an 800-char cap and the trim kept 29–62%. Handle
+`prompt-trimmed` if that matters to you.
+
+Audio caps come from `supported_parameters.max_chars` when you pass a
+[catalog](#supported-nodes); image/video caps come from a probed table. A model
+with no known cap is left completely alone.
+
+The pieces are exported if you orchestrate graphs yourself:
+`promptCap`, `fitPromptText`, `isPromptTooLong`, `promptCapFromError`,
+`PROMPT_CAPS`.
+
 ## Supported nodes
 
 | runs | node types |
