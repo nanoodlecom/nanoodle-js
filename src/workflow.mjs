@@ -4,6 +4,7 @@ import { deriveInputs, deriveOutputs, deriveSettings, resolveInputKey, resolveSe
 import { NanoClient } from "./client.mjs";
 import { MediaRef, coerceMediaInput } from "./media.mjs";
 import { RUNNERS } from "./nodes.mjs";
+import { learnPromptCap, withFittedPrompt } from "./prompt-caps.mjs";
 import { decodeShareUrl, isShareRef } from "./share.mjs";
 
 /** Env / process access — safe when `process` is missing (browsers, some workers). */
@@ -84,6 +85,12 @@ export class Workflow {
     const { nodes, links, warnings } = materialize(graphData);
     this.graph = { nodes, links };
     this.catalog = opts.catalog || null;
+    /**
+     * Prompt character caps learned from live 400s ("kind:id" → cap), on top of the probed table in
+     * prompt-caps.mjs. Per-instance and in-memory: a run that hits an unknown model's limit teaches
+     * the next run of the same Workflow, which is where a retry actually happens.
+     */
+    this._promptCaps = new Map();
     /** Load-time warnings (unknown / unsupported node types). load() only warns; run() fails fast. */
     this.warnings = warnings;
     this.client = new NanoClient({
@@ -292,7 +299,19 @@ export class Workflow {
         }
         if (upstreamFail) throw new NanoodleError("upstream failed: " + upstreamFail);
         throwIfAborted(ac.signal);
+        // Prompt length caps (see prompt-caps.mjs). Many image/video models reject an over-long
+        // prompt at the route, and in a graph the prompt is WRITTEN by an upstream LLM — so a
+        // caller has nothing to shorten. Trim it to fit rather than send a request certain to 400,
+        // and report it below. The graph's own prompts are never rewritten to avoid this.
+        const fit = withFittedPrompt(n, fields, { catalog: this.catalog, learned: this._promptCaps });
+        fields = fit.fields;
         emit({ type: "node-start", nodeId: n.id, name: displayName(n) });
+        // A fitted prompt changed what this run pays for — never silent, even headless.
+        if (fit.trimmed) {
+          emit({ type: "prompt-trimmed", nodeId: n.id, name: displayName(n), ...fit.trimmed });
+          warnGraph(`node ${n.id}: prompt trimmed ${fit.trimmed.from} → ${fit.trimmed.to} characters — ` +
+            `${fields.model} rejects prompts over ${fit.trimmed.cap}`);
+        }
         const t0 = Date.now();
         const out = await RUNNERS[n.type]({ ...n, fields }, inp, ctxFor(n, rec));
         throwIfAborted(ac.signal);
@@ -302,6 +321,12 @@ export class Workflow {
         emit({ type: "node-done", nodeId: n.id, name: displayName(n), ms: rec.ms, costUsd: rec.costUsd });
         return out;
       } catch (e) {
+        // A prompt-length rejection is free (nothing generated) and, once banked, preventable: the
+        // next run budgets the LLM above this node and fits whatever is left. Say that, rather than
+        // relaying "please shorten it" about a prompt the caller never wrote.
+        if (learnPromptCap(this._promptCaps, n, e.message)) {
+          e.message = e.message + " — noted: nanoodle keeps this model's prompt inside that limit from now on, so running again should succeed";
+        }
         rec.status = "error";
         rec.error = e.message;
         errors.push({ nodeId: n.id, name: displayName(n), message: e.message });
