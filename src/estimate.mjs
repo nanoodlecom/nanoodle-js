@@ -21,8 +21,16 @@ import { REF_PORT_RE } from "./graph.mjs";
 // node type → pricing "kind" == which catalog it's priced from + which unit fn.
 // Mirrors the app's SETTING_MODEL_KIND. This set is exactly the billable
 // (network) node types; a type absent here is a free local node and costs $0.
+//
+// The retired `draw` type is deliberately absent. It priced as "chat" until
+// 2026-07-22, when NanoGPT dropped the gemini-omni chat-image contract. The
+// loader now treats `draw` as an unknown type: it warns on load and throws
+// UnsupportedNodeError at run(), before any network call. So a `draw` node in a
+// legacy graph never spends, and pricing it would quote a caller for a call
+// that cannot happen. It contributes $0 and is not counted as `unpriced`,
+// because "we could not price it" is the wrong report — it is not billable.
 const PRICE_KIND = {
-  llm: "chat", vision: "chat", draw: "chat",
+  llm: "chat", vision: "chat",
   image: "image", edit: "image", inpaint: "image",
   tvideo: "video", ivideo: "video", vedit: "video", lipsync: "video",
   music: "audio", remix: "audio", tts: "audio", transcribe: "audio",

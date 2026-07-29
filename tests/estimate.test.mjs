@@ -116,3 +116,24 @@ test("materialized real graph estimates without throwing", () => {
   assert.equal(r.priced, 2);
   assert.equal(r.exact, false);
 });
+
+// The `draw` type retired on 2026-07-22. The loader treats it as an unknown type, so it
+// throws UnsupportedNodeError before any network call. A legacy graph that still carries
+// one must therefore forecast $0 for it, and must NOT report it as `unpriced` — `unpriced`
+// means "billable but we could not price it", and a draw node is not billable at all.
+test("retired 'draw' node is not billable: no cost, no unpriced count, no chat catalog fetch", () => {
+  const draw = { id: "1", type: "draw", fields: { model: "glm-5.2", prompt: "a moon" } };
+  const r = estimateGraphCost(g(draw), catalogs);
+  assert.equal(r.usd, 0);
+  assert.equal(r.priced, 0);
+  assert.equal(r.unpriced, 0);
+  assert.deepEqual([...graphModelKinds(g(draw))], []);
+
+  // A billable sibling still prices normally — the draw node adds nothing to the quote.
+  const mixed = estimateGraphCost(
+    g(draw, { id: "2", type: "image", fields: { model: "flux", size: "square", variations: 1 } }),
+    catalogs);
+  assert.equal(mixed.usd, 0.02);
+  assert.equal(mixed.priced, 1);
+  assert.equal(mixed.unpriced, 0);
+});
