@@ -51,6 +51,10 @@ if mask          body.maskDataUrl = <mask data URL; white = repaint>
 ```
 - image node: `variations` → n (multi output = j.data list).
 - edit: sources from wired `image, image2, ...` ports; single → string, multiple → array. Prompt may be empty for upscaler models — do not hard-require.
+- edit role models (`IMG_INPUT_ROLES`, nodes.mjs): a few models need a fixed ORDERED set of images — `flux-pro/v1/vto` = `[person, garment]`. The catalog declares no minimum (215-model scan 2026-07-31), so refuse before the send when a slot is unwired, reading the RAW port keys (port collection compacts, so an empty slot 1 would silently promote slot 2's image into the person role — a paid wrong result). Sending 1 image is a plain 400, uncharged; reversed order is charged and drifts identity toward the garment photo.
+- edit/inpaint returns: request `multi` and keep `urls[0]`, warning `model returned N images, kept the first` — always-N models (`fixed_image_count: 4`: `midjourney/text-to-image`, `higgsfield-soul`) bill for the whole batch. No probed model dishonors `n: 1`.
+- Trap: a data-URL whose MIME doesn't match its bytes comes back as a 413 `IMAGE_INPUT_TOO_LARGE` with nonsense dimensions, not a format error.
+- Upstream-broken, not client-fixable (2026-07-31): `riverflow-2-fast` / `riverflow-2-standard` 400 "invalid AIR identifier" (use `riverflow-2.0-pro`); `gpt-image-1-mini`, `cogview-4`, `lucid-origin`, `reve-text-to-image`, `imagen-3.0-generate-002` fail fast, uncharged, with or without `size`.
 - inpaint: source+mask from ports or fields. Before send, composite the mask onto opaque black at the **source image's** exact pixel size (`maskToSource` — same as play.html / index.html canvas path) so `maskDataUrl` dimensions always match.
 Parse: `j.data[]` → `d.b64_json ? "data:<sniffed mime>;base64,"+b64 : d.url`. Sniff mime from magic bytes (PNG \x89PNG, JPEG \xFF\xD8, GIF, WEBP RIFF....WEBP; default image/png). Throw "no image in response" if empty.
 

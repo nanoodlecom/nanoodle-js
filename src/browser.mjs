@@ -29,7 +29,7 @@ export {
 } from "./media.mjs";
 export { NanoClient, httpError, costFromJson, costFromHeaders, costWithHeaders, sleep } from "./client.mjs";
 export { NODE_TYPES, displayName, materialize, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
-export { RUNNERS } from "./nodes.mjs"; // per-node executors — the play delegation shim drives these directly
+export { RUNNERS, IMG_INPUT_ROLES } from "./nodes.mjs"; // per-node executors — the play delegation shim drives these directly
 export { catItem, chatModelCan } from "./catalog.mjs";
 export { deriveInputs, deriveOutputs, deriveSettings, INPUT_SPECS, SETTING_SPECS } from "./io.mjs";
 export { decodeShareUrl, decodeShareFragment, isShareRef } from "./share.mjs";

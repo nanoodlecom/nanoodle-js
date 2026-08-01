@@ -217,3 +217,60 @@ test("oversize JSON body (~4.4MB) refused locally with a clear error, zero reque
   await assert.rejects(wf.run({}), /too large/);
   assert.equal(srv.requests.length, 0);
 });
+
+test("edit role model (vto): refuses any unwired slot before spending, passes with both", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /v1/images/generations", { json: { data: [{ b64_json: PNG_B64 }], cost: 0.04 } });
+
+  const mk = (ports) => Workflow.fromJSON({
+    nodes: [
+      { id: "u1", type: "upload", fields: { image: "data:image/png;base64,AAA1" } },
+      { id: "u2", type: "upload", fields: { image: "data:image/png;base64,AAA2" } },
+      { id: "e1", type: "edit", fields: { model: "flux-pro/v1/vto", prompt: "try it on" } },
+    ],
+    links: ports.map((p, i) => ({ id: "l" + i, from: { node: "u" + (i + 1), port: "image" }, to: { node: "e1", port: p } })),
+  }, mockOpts(srv));
+
+  await assert.rejects(mk(["image"]).run({}),
+    /flux-pro\/v1\/vto needs 2 images: person \(image\), garment \(image2\) — 1 wired \(missing: garment\)/);
+  // only image2 wired: collectPorts would compact the garment into the person slot — must refuse
+  await assert.rejects(mk(["image2"]).run({}),
+    /flux-pro\/v1\/vto needs 2 images: person \(image\), garment \(image2\) — 1 wired \(missing: person\)/);
+  assert.equal(srv.requests.length, 0, "no paid call for either hole");
+
+  await mk(["image", "image2"]).run({});
+  assert.deepEqual(srv.requests[0].json.imageDataUrl,
+    ["data:image/png;base64,AAA1", "data:image/png;base64,AAA2"], "person first, garment second");
+});
+
+test("edit/inpaint: a model that returns more images than asked says it kept the first", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  const four = { json: { data: Array.from({ length: 4 }, () => ({ b64_json: PNG_B64 })), cost: 0.08 } };
+  srv.script("POST /v1/images/generations", four);
+
+  const wf = Workflow.fromJSON({
+    nodes: [
+      { id: "u1", type: "upload", fields: { image: PNG_DATA_URL } },
+      { id: "e1", type: "edit", fields: { model: "higgsfield-soul", prompt: "restyle" } },
+    ],
+    links: [{ id: "l1", from: { node: "u1", port: "image" }, to: { node: "e1", port: "image" } }],
+  }, mockOpts(srv));
+  const notes = [];
+  const result = await wf.run({}, { onProgress: (e) => { if (e.type === "node-progress") notes.push(e.message); } });
+
+  assert.equal(srv.requests[0].json.n, 1, "still asks for one");
+  assert.ok(notes.some((m) => /model returned 4 images, kept the first/.test(m)));
+  assert.equal(result.get("Edit").url, PNG_DATA_URL); // output shape unchanged: one image
+
+  // same warning from the inpaint runner (1×1 white opaque PNG = repaint-everywhere mask)
+  const WHITE_PNG =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==";
+  const inNotes = [];
+  await Workflow.fromJSON({
+    nodes: [{ id: "p1", type: "inpaint", fields: { model: "higgsfield-soul", image: PNG_DATA_URL, mask: WHITE_PNG } }],
+    links: [],
+  }, mockOpts(srv)).run({ "What to paint in": "a hat" }, { onProgress: (e) => { if (e.type === "node-progress") inNotes.push(e.message); } });
+  assert.ok(inNotes.some((m) => /model returned 4 images, kept the first/.test(m)));
+});

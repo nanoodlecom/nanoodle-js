@@ -52,6 +52,46 @@ function collectPorts(inp, re) {
     .filter(Boolean);
 }
 
+/**
+ * Edit models that demand a FIXED, ORDERED set of input images. Nothing in the live catalog
+ * declares a minimum — a full 215-model scan (2026-07-31) found no min_items/min_input_images
+ * field, only free text — so the roles live here. The order IS the slot order: role 1 = the
+ * `image` port, role 2 = `image2`, … (flux vto auto-detects the wearer either way, but a
+ * garment-first send drifts the identity toward the garment photo's model).
+ */
+export const IMG_INPUT_ROLES = {
+  "flux-pro/v1/vto": ["person", "garment"],
+};
+
+const imgSlot = (i) => (i === 1 ? "image" : "image" + i); // slot index → EDIT_IMG_RE port name
+
+/**
+ * Refuse a role-model edit BEFORE the paid call unless every slot is wired. Read the RAW inp
+ * keys, never collectPorts: that compacts (.filter(Boolean)), so wiring only `image2` promotes
+ * the garment into the person slot and buys a silently wrong result.
+ */
+function guardInputRoles(model, inp) {
+  const roles = IMG_INPUT_ROLES[String(model || "").trim()];
+  if (!roles) return;
+  const missing = roles.filter((r, i) => !inp[imgSlot(i + 1)]);
+  if (!missing.length) return;
+  const slots = roles.map((r, i) => `${r} (${imgSlot(i + 1)})`).join(", ");
+  throw new NanoodleError(
+    `${model} needs ${roles.length} images: ${slots} — ${roles.length - missing.length} wired (missing: ${missing.join(", ")})`,
+  );
+}
+
+/**
+ * edit/inpaint have a single image output, but some models always bill (and return) a fixed
+ * batch — midjourney/text-to-image and higgsfield-soul declare fixed_image_count: 4. Ask with
+ * multi so we can SEE the extras and say we dropped them; the return shape stays one url.
+ */
+function keptFirst(urls, ctx) {
+  if (!Array.isArray(urls)) return urls; // host-injected ctx.image that ignores multi → already one url
+  if (urls.length > 1 && ctx && ctx.progress) ctx.progress(`model returned ${urls.length} images, kept the first`);
+  return urls[0];
+}
+
 function promptOf(n, inp, errMsg) {
   const raw = inp.prompt != null ? inp.prompt : n.fields.prompt != null ? n.fields.prompt : "";
   const p = String(raw).trim();
@@ -552,6 +592,7 @@ export const RUNNERS = {
   },
 
   async edit(n, inp, ctx) {
+    guardInputRoles(n.fields.model, inp); // role models: refuse holes before spending
     let imgs = collectPorts(inp, EDIT_IMG_RE);
     if (!imgs.length) throw new NanoodleError("no image input");
     // cap to the model's max_input_images (item present but silent → 1; absent → no cap):
@@ -570,7 +611,8 @@ export const RUNNERS = {
     imgs = await Promise.all(imgs.map((u) => fitImage(u, ctx, "source image")));
     guardRefsSize(imgs);
     const src = imgs.length > 1 ? imgs : imgs[0]; // array → multi-image composite; string → single edit
-    return { image: await ctx.image({ prompt, model: mdl(n), size: n.fields.size || "1024x1024", imageDataUrl: src, extra: imgExtra(n) }) };
+    const urls = await ctx.image({ prompt, model: mdl(n), size: n.fields.size || "1024x1024", imageDataUrl: src, extra: imgExtra(n), multi: true });
+    return { image: keptFirst(urls, ctx) };
   },
 
   async inpaint(n, inp, ctx) {
@@ -583,7 +625,8 @@ export const RUNNERS = {
     // ctx.maskToSource lets a browser host inject its canvas compositor (handles JPEG/WebP
     // sources the pure-PNG path can't, where ffmpeg isn't an option).
     const mask = await (ctx.maskToSource || maskToSource)(rawMask, source, mediaOpts(ctx));
-    return { image: await ctx.image({ prompt, model: mdl(n), size: n.fields.size || "1024x1024", imageDataUrl: source, maskDataUrl: mask, extra: imgExtra(n) }) };
+    const urls = await ctx.image({ prompt, model: mdl(n), size: n.fields.size || "1024x1024", imageDataUrl: source, maskDataUrl: mask, extra: imgExtra(n), multi: true });
+    return { image: keptFirst(urls, ctx) };
   },
 
   async tvideo(n, inp, ctx) {
