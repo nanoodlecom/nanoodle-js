@@ -213,7 +213,7 @@ function nodeUnitUsd(node, catItem, graph) {
   const pricing = m.pricing, f = node.fields || {};
   if (kind === "image") {
     const sp = m.supported_parameters || {}, maxOut = sp.max_output_images || 1, fixed = sp.fixed_image_count || 0;
-    const count = fixed > 0 ? fixed : Math.min(maxOut, Math.max(1, parseInt(f.variations, 10) || 1));
+    const count = fixed > 1 ? fixed : Math.min(maxOut, Math.max(1, parseInt(f.variations, 10) || 1));   // fixed>1 = the model dictates the count; fixed 1 falls through to the variations clamp
     return imageUsd(pricing, f.size, count);
   }
   if (kind === "video") {
