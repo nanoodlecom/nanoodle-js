@@ -176,6 +176,42 @@ test("video refs: catalog resolves the model's real wire key + cap; a known no-r
   assert.deepEqual(b3.reference_images, [PNG_DATA_URL], "vedit forwards wired refs");
 });
 
+test("video refs: pricing evidence stands in for the missing param (minimax-h3), cap 9 by family", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  const done = { json: { data: { status: "COMPLETED", output: { video: { url: "https://cdn.example/v.mp4" } } } } };
+  for (let i = 0; i < 3; i++) srv.script("POST /api/generate-video", { json: { runId: "vid_" + i, cost: 0 } });
+  srv.script("GET /api/video/status", [done, done, done]);
+
+  // Six wired refs: h3 takes 9 (6-9 bill extra), so none are dropped.
+  const nodes = [
+    ...Array.from({ length: 6 }, (_, i) => ({ id: "u" + i, type: "upload", fields: { image: PNG_DATA_URL } })),
+    { id: "v1", type: "tvideo", fields: { model: "minimax-h3", prompt: "two subjects" } },
+  ];
+  const links = Array.from({ length: 6 }, (_, i) => ({ id: "l" + i, from: { node: "u" + i, port: "image" }, to: { node: "v1", port: "ref" + (i + 1) } }));
+
+  // day-one h3 catalog entry: duration/aspect only, refs visible ONLY in pricing
+  const h3 = { id: "minimax-h3", supported_parameters: { parameters: { duration: {}, aspect_ratio: {} } },
+    pricing: { output_per_second: 0.13, included_reference_images: 5, extra_reference_image: 0.04 } };
+  const notes = [];
+  await one(srv, nodes, links, { catalog: { video: [h3] } })
+    .run({}, { onProgress: (e) => { if (e.type === "node-progress") notes.push(e.message); } });
+  const b1 = srv.of("POST /api/generate-video")[0].json;
+  assert.equal(b1.reference_images.length, 6, "pricing evidence opens the ref port; family cap 9 keeps all 6");
+  assert.equal(notes.some((m) => /ignored|dropped/.test(m)), false, "nothing dropped, nothing ignored");
+
+  // pricing evidence with no family entry → the included count is the cap
+  const other = { id: "someone-else-v1", supported_parameters: { parameters: { duration: {} } },
+    pricing: { output_per_second: 0.1, included_reference_images: 2 } };
+  await one(srv, nodes.map((n) => n.id === "v1" ? { ...n, fields: { ...n.fields, model: "someone-else-v1" } } : n), links, { catalog: { video: [other] } }).run({});
+  assert.equal(srv.of("POST /api/generate-video")[1].json.reference_images.length, 2);
+
+  // no param key AND no ref pricing → still "no refs" (an ignored-but-sent array is charged)
+  const plain = { id: "plain-v1", supported_parameters: { parameters: { duration: {} } }, pricing: { output_per_second: 0.1 } };
+  await one(srv, nodes.map((n) => n.id === "v1" ? { ...n, fields: { ...n.fields, model: "plain-v1" } } : n), links, { catalog: { video: [plain] } }).run({});
+  assert.equal(srv.of("POST /api/generate-video")[2].json.reference_images, undefined);
+});
+
 test("video dims: catalog wire-name mapping (orientation/seconds) + default backfill", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());

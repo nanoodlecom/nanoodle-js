@@ -17,6 +17,7 @@
 // very first request, instead of a flat guess.
 
 import { REF_PORT_RE } from "./graph.mjs";
+import { pricingAdvertisesRefs } from "./catalog.mjs";
 
 // node type → pricing "kind" == which catalog it's priced from + which unit fn.
 // Mirrors the app's SETTING_MODEL_KIND. This set is exactly the billable
@@ -217,7 +218,8 @@ function nodeUnitUsd(node, catItem, graph) {
   }
   if (kind === "video") {
     const sp = m.supported_parameters || {}, pp = sp.parameters || sp;
-    const modelHasRefs = ["reference_images", "reference_image_urls", "referenceImages"].some((k) => k in pp);
+    const modelHasRefs = ["reference_images", "reference_image_urls", "referenceImages"].some((k) => k in pp) ||
+      pricingAdvertisesRefs(pricing); // twin of modelRefSpec: refs the run WILL send must forecast at the ref tier
     const refWired = !!(modelHasRefs && graph && Array.isArray(graph.links) &&
       graph.links.some((l) => l.to && l.to.node === node.id && REF_PORT_RE.test(l.to.port)));
     const u = videoUnitUsd(pricing, f, refWired);
