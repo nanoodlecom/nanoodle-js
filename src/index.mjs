@@ -6,6 +6,8 @@ export {
 } from "./media.mjs";
 export { NanoClient } from "./client.mjs";
 export { NODE_TYPES, displayName, materialize, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
+// edit models whose image ports are ORDERED roles — a caller building graphs needs the slot order
+export { IMG_INPUT_ROLES } from "./nodes.mjs";
 export { deriveInputs, deriveOutputs, deriveSettings, INPUT_SPECS, SETTING_SPECS } from "./io.mjs";
 export { estimateGraphCost, graphModelKinds } from "./estimate.mjs";
 // prompt length caps — a caller doing its own orchestration needs the same trim-and-say-so
