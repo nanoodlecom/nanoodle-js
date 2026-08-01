@@ -15,6 +15,17 @@ export function catItem(catalog, kind, id) {
   return (Array.isArray(raw) && raw.find((m) => m && m.id === id)) || null;
 }
 
+/**
+ * True when a video model's PRICING block prices reference images even though its
+ * supported_parameters never names the param (minimax-h3 ships that way). A billing
+ * line for refs is the catalog stating the model takes them, so the ref gates accept
+ * it as evidence; models with neither the param nor the pricing stay "no refs",
+ * because an ignored-but-sent ref array is still charged.
+ */
+export function pricingAdvertisesRefs(pricing) {
+  return !!(pricing && (pricing.included_reference_images != null || pricing.extra_reference_image != null));
+}
+
 /** Permissive capability probe: true unless the model is in the catalog AND lacks the flag. */
 export function chatModelCan(catalog, model, flag) {
   const m = catItem(catalog, "chat", model);

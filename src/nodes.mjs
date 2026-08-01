@@ -1,5 +1,5 @@
 import { NanoodleError } from "./errors.mjs";
-import { catItem, chatModelCan } from "./catalog.mjs";
+import { catItem, chatModelCan, pricingAdvertisesRefs } from "./catalog.mjs";
 import { IMG_PORT_RE, EDIT_IMG_RE, REF_PORT_RE, CLIP_PORT_RE, VID_PORT_RE, optionalNode } from "./graph.mjs";
 import { MEDIA_INLINE_MAX } from "./media.mjs";
 import {
@@ -268,10 +268,13 @@ function videoDims(n, ctx) {
    Video models disagree on the ref-array param name AND its size limit; sending the wrong
    key silently degrades to a plain video, sending too many can over-bill. Resolve the
    model's REAL key from the catalog and clamp to its declared max. */
-function refMaxFor(model) {
+function refMaxFor(model, pricing) {
   const id = String(model || "");
   if (/seedance/i.test(id)) return 9;
+  if (/minimax-h3/i.test(id)) return 9; // upstream cap; the first 5 are included, 6-9 bill extra_reference_image each
   if (/luma|ray/i.test(id)) return 4;
+  const inc = pricing && +pricing.included_reference_images;
+  if (inc > 0) return inc; // no family entry: the included count is the only number the catalog gives us
   return 4;
 }
 
@@ -285,15 +288,15 @@ function modelRefSpec(model, ctx) {
   const m = catItem(ctx && ctx.catalog, "video", model);
   if (!m) return { key: "reference_images", cap: refMaxFor(model) };
   const sp = m.supported_parameters || {}, pp = sp.parameters || sp;
-  const key = keys.find((k) => k in pp);
-  if (!key) return null; // known model with no ref-image param
+  const key = keys.find((k) => k in pp) || (pricingAdvertisesRefs(m.pricing) ? "reference_images" : null);
+  if (!key) return null; // known model with no ref-image param and no ref pricing
   const d = pp[key];
   let cap = null;
   if (d && typeof d === "object") {
     const mx = d.max != null ? d.max : d.maxItems != null ? d.maxItems : d.max_items;
     if (mx != null && +mx > 0) cap = +mx;
   }
-  return { key, cap: cap != null ? cap : refMaxFor(model) };
+  return { key, cap: cap != null ? cap : refMaxFor(model, m.pricing) };
 }
 
 /** Attach wired refs to video opts under the model's real key, clamped to its cap (twin of the app runtimes: say so, never silently discard). */

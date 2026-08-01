@@ -52,6 +52,24 @@ test("video node prices per-second × duration", () => {
   assert.equal(r.exact, false);
 });
 
+test("video ref tier: a wired ref flips the mode price, by param OR by pricing evidence alone", () => {
+  const modes = { per_second_by_mode: { text_to_video: 0.1, reference_to_video_image: 0.2 }, default_duration: 5 };
+  const cats = { video: [
+    { id: "vid-param", pricing: modes, supported_parameters: { parameters: { reference_images: {} } } },
+    // minimax-h3 shape: refs priced but never named in supported_parameters
+    { id: "vid-evidence", pricing: { ...modes, included_reference_images: 5, extra_reference_image: 0.04 }, supported_parameters: { parameters: { duration: {} } } },
+    { id: "vid-norefs", pricing: modes, supported_parameters: { parameters: { duration: {} } } },
+  ] };
+  const wired = (model) => ({
+    nodes: [{ id: "u1", type: "upload", fields: {} }, { id: "1", type: "tvideo", fields: { model } }],
+    links: [{ id: "l1", from: { node: "u1", port: "image" }, to: { node: "1", port: "ref1" } }],
+  });
+
+  assert.equal(estimateGraphCost(wired("vid-param"), cats).usd, 1);      // 0.2 × 5
+  assert.equal(estimateGraphCost(wired("vid-evidence"), cats).usd, 1);   // same tier: the run WILL send the refs
+  assert.equal(estimateGraphCost(wired("vid-norefs"), cats).usd, 0.5);   // 0.1 × 5 — wires are dropped, so is the tier
+});
+
 test("audio node prices per-thousand-chars off the prompt length", () => {
   const r = estimateGraphCost(g({ id: "1", type: "tts", fields: { model: "tts1", prompt: "x".repeat(2000) } }), catalogs);
   assert.equal(Math.round(r.usd * 1000) / 1000, 0.03); // 0.015 × 2
