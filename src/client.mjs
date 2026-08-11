@@ -85,7 +85,10 @@ export class NanoClient {
     this.baseUrl = String(baseUrl).replace(/\/+$/, "");
     this.fetch = fetch;
     this.pollIntervals = { video: 5000, audio: 3000, x402: 3000, ...pollIntervals };
-    this.timeouts = { video: 600000, audio: 300000, ...timeouts };
+    // video: no default deadline — NanoGPT jobs keep running server-side and long renders
+    // routinely exceed 10 min. Pass timeouts.video (ms) to cap a headless/CI run. Audio keeps
+    // a 5-min default (shorter jobs; still overridable).
+    this.timeouts = { video: Infinity, audio: 300000, ...timeouts };
   }
 
   _auth() {
@@ -256,14 +259,16 @@ export class NanoClient {
     }
 
     const t0 = Date.now();
-    while (Date.now() - t0 < this.timeouts.video) {
+    const videoCap = this.timeouts.video;
+    // Infinity/non-finite = wait forever (default). Finite ms = headless/CI cap.
+    while (!Number.isFinite(videoCap) || Date.now() - t0 < videoCap) {
       await sleep(this.pollIntervals.video, signal);
       let s;
       try {
         s = await (await this._get("/api/video/status?requestId=" + encodeURIComponent(runId), signal)).json();
       } catch (e) {
         if (signal && signal.aborted) throw abortError(signal.reason);
-        continue; // transient poll failure — keep polling until timeout
+        continue; // transient poll failure — keep polling until complete or optional cap
       }
       const st = String((s.data && s.data.status) || s.status || "").toUpperCase();
       if (onPoll) onPoll({ status: st, elapsedMs: Date.now() - t0, runId });
@@ -277,7 +282,7 @@ export class NanoClient {
         throw new NanoodleError("video failed: " + ((s.data && s.data.error) || st));
       }
     }
-    throw new NanoodleError(`video timed out (${Math.round(this.timeouts.video / 1000)}s) — the job may still be running on NanoGPT's side`, { code: "timeout" });
+    throw new NanoodleError(`video timed out (${Math.round(videoCap / 1000)}s) — the job may still be running on NanoGPT's side`, { code: "timeout" });
   }
 
   /**
