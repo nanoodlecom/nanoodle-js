@@ -1,1 +1,1 @@
-PLACEHOLDER_PAYLOADS
+SEE_FILE_/tmp/nanoodle-js/tests/payloads.test.mjs

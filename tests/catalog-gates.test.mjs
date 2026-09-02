@@ -1,1 +1,1 @@
-PLACEHOLDER_CATALOG
+SEE_FILE_/tmp/nanoodle-js/tests/catalog-gates.test.mjs
