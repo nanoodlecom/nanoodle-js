@@ -75,6 +75,28 @@ test("invalid extraJson refuses before any network call", async (t) => {
   assert.equal(srv.requests.length, 0);
 });
 
+test("FIBO 1.5: aspect_ratio rides the payload; leftover aspect omitted on Recraft/Muse", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /v1/images/generations", { json: { data: [{ b64_json: PNG_B64 }], cost: 0.04 } });
+  const FIBO = "bria/fibo-generate-1.5/text-to-image";
+
+  await one(srv, { id: "n1", type: "image", fields: { model: FIBO, prompt: "studio still", size: "1mp", aspect: "16:9" } }).run({});
+  assert.equal(srv.requests[0].json.aspect_ratio, "16:9");
+
+  srv.requests.length = 0;
+  await one(srv, { id: "n1", type: "image", fields: { model: FIBO, prompt: "studio still", size: "1mp" } }).run({});
+  assert.equal(srv.requests[0].json.aspect_ratio, "1:1", "empty aspect defaults to catalog 1:1");
+
+  srv.requests.length = 0;
+  await one(srv, { id: "n1", type: "image", fields: { model: "recraft-v4", prompt: "logo", size: "1024x1024", aspect: "16:9" } }).run({});
+  assert.equal(srv.requests[0].json.aspect_ratio, undefined, "leftover aspect must not leak onto Recraft V4");
+
+  srv.requests.length = 0;
+  await one(srv, { id: "n1", type: "image", fields: { model: "meta/muse-image/text-to-image", prompt: "portrait", aspect: "9:16" } }).run({});
+  assert.equal(srv.requests[0].json.aspect_ratio, undefined, "leftover aspect must not leak onto Muse");
+});
+
 test("custom-civitai: AIR rides the payload; missing AIR errors before spend", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());

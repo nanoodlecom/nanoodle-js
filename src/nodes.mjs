@@ -277,6 +277,13 @@ function imgExtra(n) {
     const np = String(n.fields.negativePrompt || "").trim();
     if (np) e.negative_prompt = np;
   }
+  // FIBO 1.5: size is 1mp/4mp; shape rides as aspect_ratio. Only this advertised id —
+  // leftover fields.aspect after a model swap must not go out on Muse/Recraft/etc.
+  // Marketing /api/models additionalParams.aspect_ratio (v1 image-models still omits it).
+  if (n.fields.model === "bria/fibo-generate-1.5/text-to-image") {
+    const av = (n.fields.aspect != null && n.fields.aspect !== "") ? n.fields.aspect : "1:1";
+    if (av !== "") e.aspect_ratio = String(av);
+  }
   return e;
 }
 
