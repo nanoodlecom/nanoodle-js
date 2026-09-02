@@ -302,12 +302,17 @@ function videoDims(n, ctx) {
   const aWire = p.aspect_ratio ? "aspect_ratio" : p.orientation ? "orientation" : p.resolution_ratio ? "resolution_ratio" : "aspect_ratio";
   const dP = p.duration || p.seconds;
   const dWire = p.duration ? "duration" : p.seconds ? "seconds" : "duration";
+  // tvideo/ivideo soft-send aspect+duration (those nodes always show the knobs).
+  // vedit/lipsync and resolution never forward a leftover the model did not list.
+  // Gallery: Omni v1 has duration+aspect only; leftover 720p/4k from v1.1 must not POST.
+  // Model absent from the catalog keeps the leftover — same send-everything fallback as audioParams.
+  const soft = n.type !== "vedit" && n.type !== "lipsync";
   let asp = f.aspect, dur = f.duration;
   if ((asp == null || asp === "") && aP && aP.default != null) asp = aP.default;
   if ((dur == null || dur === "") && dP && dP.default != null) dur = dP.default;
-  if (f.resolution != null && f.resolution !== "") out.resolution = f.resolution;
-  if (asp != null && asp !== "") out[aWire] = asp;
-  if (dur != null && dur !== "") out[dWire] = dur;
+  if ((p.resolution || !m) && f.resolution != null && f.resolution !== "") out.resolution = f.resolution;
+  if ((aP || soft || !m) && asp != null && asp !== "") out[aWire] = asp;
+  if ((dP || soft || !m) && dur != null && dur !== "") out[dWire] = dur;
   return out;
 }
 

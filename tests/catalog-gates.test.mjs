@@ -241,3 +241,51 @@ test("video dims: catalog wire-name mapping (orientation/seconds) + default back
   assert.equal(b2.aspect_ratio, "9:16");
   assert.equal(b2.duration, undefined);
 });
+
+test("video dims: leftover Omni v1.1 resolution omitted on v1; listed 4k still posts", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  const done = { json: { data: { status: "COMPLETED", output: { video: { url: "https://cdn.example/v.mp4" } } } } };
+  for (let i = 0; i < 5; i++) srv.script("POST /api/generate-video", { json: { runId: "vid_omni_" + i, cost: 0 } });
+  srv.script("GET /api/video/status", [done, done, done, done, done]);
+
+  const omniV1 = { id: "google/gemini-omni-flash", supported_parameters: { parameters: {
+    duration: { type: "select", default: "8", options: [{ value: "8" }] },
+    aspect_ratio: { type: "select", default: "16:9", options: [{ value: "16:9" }, { value: "9:16" }] },
+  } } };
+  const omni11 = { id: "google/gemini-omni-flash/v1.1", supported_parameters: { parameters: {
+    duration: { type: "select", default: "8", options: [{ value: "8" }] },
+    resolution: { type: "select", default: "720p", options: [{ value: "720p" }, { value: "4k" }] },
+    aspect_ratio: { type: "select", default: "16:9", options: [{ value: "16:9" }, { value: "9:16" }] },
+  } } };
+  const catalog = { video: [omniV1, omni11] };
+  const fields = { prompt: "turntable", duration: "8", aspect: "16:9", resolution: "4k" };
+  const tvideo = (model) => [{ id: "v1", type: "tvideo", fields: { ...fields, model } }];
+
+  await one(srv, tvideo("google/gemini-omni-flash"), [], { catalog }).run({});
+  const v1 = srv.of("POST /api/generate-video")[0].json;
+  assert.equal(v1.resolution, undefined, "leftover 4k from Omni 1.1 must not POST on v1");
+  assert.equal(v1.aspect_ratio, "16:9");
+  assert.equal(v1.duration, "8");
+
+  await one(srv, tvideo("google/gemini-omni-flash/v1.1"), [], { catalog }).run({});
+  const v11 = srv.of("POST /api/generate-video")[1].json;
+  assert.equal(v11.resolution, "4k", "listed Omni 1.1 4k still posts");
+
+  await one(srv, [{ id: "s1", type: "vupload", fields: { video: "https://cdn.example/src.mp4" } },
+    { id: "v1", type: "vedit", fields: { model: "google/gemini-omni-flash", ...fields } }],
+    [{ id: "l1", from: { node: "s1", port: "video" }, to: { node: "v1", port: "video" } }],
+    { catalog }).run({});
+  const ved = srv.of("POST /api/generate-video")[2].json;
+  assert.equal(ved.resolution, undefined, "vedit omits leftover resolution when the catalog does not list it");
+
+  // no catalog → send-everything fallback (offline export)
+  await one(srv, tvideo("google/gemini-omni-flash")).run({});
+  const offline = srv.of("POST /api/generate-video")[3].json;
+  assert.equal(offline.resolution, "4k", "absent catalog keeps leftover resolution");
+
+  // model absent from a populated catalog is also permissive
+  await one(srv, tvideo("unknown-video-model"), [], { catalog }).run({});
+  const miss = srv.of("POST /api/generate-video")[4].json;
+  assert.equal(miss.resolution, "4k", "uncatalogued model keeps leftover resolution");
+});
