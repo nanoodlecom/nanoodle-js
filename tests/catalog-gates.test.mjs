@@ -279,13 +279,13 @@ test("video dims: leftover Omni v1.1 resolution omitted on v1; listed 4k still p
   const ved = srv.of("POST /api/generate-video")[2].json;
   assert.equal(ved.resolution, undefined, "vedit omits leftover resolution when the catalog does not list it");
 
-  // no catalog → send-everything fallback (offline export)
+  // no catalog / uncatalogued model — same omit as play videoDimParams (pack.resolution empty)
   await one(srv, tvideo("google/gemini-omni-flash")).run({});
   const offline = srv.of("POST /api/generate-video")[3].json;
-  assert.equal(offline.resolution, "4k", "absent catalog keeps leftover resolution");
+  assert.equal(offline.resolution, undefined, "absent catalog omits leftover resolution");
+  assert.equal(offline.aspect_ratio, "16:9", "tvideo still soft-sends aspect without a catalog");
 
-  // model absent from a populated catalog is also permissive
   await one(srv, tvideo("unknown-video-model"), [], { catalog }).run({});
   const miss = srv.of("POST /api/generate-video")[4].json;
-  assert.equal(miss.resolution, "4k", "uncatalogued model keeps leftover resolution");
+  assert.equal(miss.resolution, undefined, "uncatalogued model omits leftover resolution");
 });

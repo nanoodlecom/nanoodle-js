@@ -188,7 +188,7 @@ test("tvideo: submit payload + poll loop pending→completed + reference images"
     prompt: "a fox running through snow",
     duration: "5",
     aspect_ratio: "16:9", // aspect field rides under the standard wire name
-    resolution: "720p",
+    // resolution omitted without a catalog listing — leftover 720p must not POST
     seed: 7, // fields.modelOpts merged
   });
   const pollReqs = srv.of("GET /api/video/status");
