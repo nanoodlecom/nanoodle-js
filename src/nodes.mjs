@@ -12,3 +12,17 @@ function mdl(n) {
   if (!m) throw new NanoodleError(`pick a model first (node ${n.id})`);
   return m; // model strings pass through VERBATIM — endpoint choice is by node TYPE
 }
+
+/** Local-media opts from the workflow ctx (custom fetch + AbortSignal). */
+function mediaOpts(ctx) {
+  if (!ctx) return {};
+  return {
+    ...(ctx.fetch ? { fetch: ctx.fetch } : {}),
+    ...(ctx.signal ? { signal: ctx.signal } : {}),
+  };
+}
+
+function portIdx(name) {
+  const m = /(\d+)$/.exec(name);
+  return m ? +m[1] : 1;
+}
