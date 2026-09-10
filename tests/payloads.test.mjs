@@ -453,6 +453,72 @@ test("music JSON direct url branch (no poll)", async (t) => {
   assert.equal(result.get("Music").url, "https://cdn.example/song.mp3");
 });
 
+test("music style reaches native prompt endpoints with wired lyrics intact", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /api/v1/audio/speech", { json: { url: "https://cdn.example/song.mp3" } });
+  for (const model of [
+    "minimax/music-3",
+    "mureka-ai/mureka-v9.5/generate-song",
+    "mureka-ai/mureka-o2/generate-song",
+    "provider/mureka-ai/mureka-v9/generate-song",
+    "mureka-ai/mureka-v9.5/generate-bgm",
+    "mureka-ai/mureka-v9.5/prompt-to-song",
+    "other-lab/generate-bgm",
+    "other-lab/prompt-to-song",
+  ]) {
+    const wf = Workflow.fromJSON({
+      nodes: [
+        { id: "style", type: "text", fields: { text: "75 BPM trip-hop, dusty breaks" } },
+        { id: "lyrics", type: "text", fields: { text: "[Verse]\nThe lights go low" } },
+        { id: "song", type: "music", fields: { model } },
+      ],
+      links: [
+        { id: "s", from: { node: "style", port: "text" }, to: { node: "song", port: "prompt" } },
+        { id: "l", from: { node: "lyrics", port: "text" }, to: { node: "song", port: "lyrics" } },
+      ],
+    }, mockOpts(srv));
+    await wf.run({});
+    assert.deepEqual(srv.of("POST /api/v1/audio/speech").at(-1).json, {
+      model, prompt: "75 BPM trip-hop, dusty breaks", lyrics: "[Verse]\nThe lights go low",
+    }, model);
+  }
+});
+
+test("native music prompt keeps explicit overrides and falls back from blank ones", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /api/v1/audio/speech", { json: { url: "https://cdn.example/song.mp3" } });
+  for (const model of ["minimax/music-3", "mureka-ai/mureka-v9.5/generate-song"]) {
+    for (const prompt of ["  noir piano  ", "   ", null]) {
+      const wf = Workflow.fromJSON({ nodes: [{ id: "song", type: "music", fields: {
+        model, prompt: "wired arrangement", lyrics: "[Verse]\nThe lights go low",
+        extraJson: JSON.stringify({ prompt, input: "stale extra input" }),
+      } }], links: [] }, mockOpts(srv));
+      await wf.run({});
+      assert.deepEqual(srv.of("POST /api/v1/audio/speech").at(-1).json, {
+        model, prompt: prompt && prompt.trim() ? prompt : "wired arrangement",
+        lyrics: "[Verse]\nThe lights go low",
+      }, `${model}: ${JSON.stringify(prompt)}`);
+    }
+  }
+});
+
+test("unrelated music models retain their input contract", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /api/v1/audio/speech", { json: { url: "https://cdn.example/song.mp3" } });
+  for (const model of ["other-lab/generate-song", "minimax/music-3-cover", "Minimax-Music-2.6"]) {
+    const wf = Workflow.fromJSON({ nodes: [{ id: "song", type: "music", fields: {
+      model, prompt: "quiet piano", lyrics: "[Verse]\nThe lights go low",
+    } }], links: [] }, mockOpts(srv));
+    await wf.run({});
+    assert.deepEqual(srv.of("POST /api/v1/audio/speech").at(-1).json, {
+      model, input: "quiet piano", lyrics: "[Verse]\nThe lights go low",
+    }, model);
+  }
+});
+
 test("audio poll failure status raises 'audio failed'", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());
