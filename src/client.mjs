@@ -3,6 +3,8 @@ import { b64ImageMime, bytesToDataUrl, dataUrlBytes, MEDIA_INLINE_MAX } from "./
 import { assertPaymentOption, parseNanoInvoice, looksLikeResult } from "./x402.mjs";
 
 const AUDIO_MIME = { mp3: "audio/mpeg", opus: "audio/ogg", aac: "audio/aac", flac: "audio/flac", wav: "audio/wav", pcm: "audio/wav" };
+// Native music endpoints use prompt for musical direction; lyrics remain separate.
+const AUDIO_PROMPT_MODEL_RE = /(?:^|\/)(?:prompt-to-song|generate-bgm)$|(?:^|\/)mureka-ai\/[^/]+\/generate-song$|^minimax\/music-3$/i;
 
 /** Map an HTTP failure to an actionable error (mirrors the app's httpRunError). Never leaks the key. */
 export function httpError(status, bodyText) {
@@ -298,6 +300,10 @@ export class NanoClient {
       return url;
     }
     const body = Object.assign({ model, input }, extra);
+    if (AUDIO_PROMPT_MODEL_RE.test(String(model || "").trim())) {
+      if (body.prompt == null || String(body.prompt).trim() === "") body.prompt = input;
+      delete body.input;
+    }
     const r = await this._postJson("/api/v1/audio/speech", body, signal);
     if (!r.ok) throw httpError(r.status, await r.text());
     const ct = (r.headers && r.headers.get && r.headers.get("content-type")) || "";
