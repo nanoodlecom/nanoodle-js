@@ -5,6 +5,8 @@ import { assertPaymentOption, parseNanoInvoice, looksLikeResult } from "./x402.m
 const AUDIO_MIME = { mp3: "audio/mpeg", opus: "audio/ogg", aac: "audio/aac", flac: "audio/flac", wav: "audio/wav", pcm: "audio/wav" };
 // Native music endpoints use prompt for musical direction; lyrics remain separate.
 const AUDIO_PROMPT_MODEL_RE = /(?:^|\/)(?:prompt-to-song|generate-bgm)$|(?:^|\/)mureka-ai\/[^/]+\/generate-song$|^minimax\/music-3$/i;
+// Yue2 catalogs take `style` + `lyrics` (+ `audio` for music-to-music), not OpenAI-style `input`.
+const AUDIO_STYLE_MODEL_RE = /yue2-3b\/(?:text|music)-to-music$/i;
 
 /** Map an HTTP failure to an actionable error (mirrors the app's httpRunError). Never leaks the key. */
 export function httpError(status, bodyText) {
@@ -303,6 +305,10 @@ export class NanoClient {
     if (AUDIO_PROMPT_MODEL_RE.test(String(model || "").trim())) {
       if (body.prompt == null || String(body.prompt).trim() === "") body.prompt = input;
       delete body.input;
+    } else if (AUDIO_STYLE_MODEL_RE.test(String(model || "").trim())) {
+      if (body.style == null || String(body.style).trim() === "") body.style = input;
+      delete body.input;
+      delete body.prompt;
     }
     const r = await this._postJson("/api/v1/audio/speech", body, signal);
     if (!r.ok) throw httpError(r.status, await r.text());
