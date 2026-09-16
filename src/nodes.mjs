@@ -559,7 +559,16 @@ export const RUNNERS = {
 
   async llm(n, inp, ctx) {
     const prompt = promptOf(n, inp, "no prompt");
-    const imgs = await Promise.all(collectPorts(inp, IMG_PORT_RE).map((u) => fitImage(u, ctx, "wired image")));
+    // Wired image ports: a text-only chat model can't see the pictures and NanoGPT still
+    // bills the image tokens, so drop them for a KNOWN text-only model and note it —
+    // mirrors play's chatModelCan("vision") / editor modelSupportsImages gate (permissive
+    // for catalog-absent models; twin of the audio gate below).
+    const allImgs = collectPorts(inp, IMG_PORT_RE);
+    const seesImages = chatModelCan(ctx.catalog, mdl(n), "vision");
+    const imgs = seesImages
+      ? await Promise.all(allImgs.map((u) => fitImage(u, ctx, "wired image")))
+      : [];
+    if (allImgs.length && !seesImages) ctx.progress("image(s) ignored — this model is text-only");
     // hosted audio (music/tts nodes return https CDN URLs verbatim) → download + inline as base64:
     // the chat input_audio part carries bytes, never a URL
     let audioPart = null;

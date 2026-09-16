@@ -34,6 +34,40 @@ test("llm audio_input gate: KNOWN text-only model drops the input_audio part; ab
   assert.equal(content2.at(-1).type, "input_audio");
 });
 
+test("llm vision gate: KNOWN text-only model drops wired image_url parts; absent model keeps them", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /api/v1/chat/completions", chatJson("ok"));
+  srv.script("POST /api/v1/chat/completions", chatJson("ok"));
+  srv.script("POST /api/v1/chat/completions", chatJson("ok"));
+
+  const nodes = [
+    { id: "u1", type: "upload", fields: { image: PNG_DATA_URL } },
+    { id: "m1", type: "llm", fields: { model: "text-only", prompt: "look", system: "" } },
+  ];
+  const links = [{ id: "l1", from: { node: "u1", port: "image" }, to: { node: "m1", port: "img1" } }];
+
+  // known text-only → drop image_url (no billed tokens the model cannot see)
+  const notes = [];
+  await one(srv, nodes, links, { catalog: { chat: [{ id: "text-only", capabilities: {} }] } })
+    .run({}, { onProgress: (e) => { if (e.type === "node-progress") notes.push(e.message); } });
+  const content1 = srv.requests[0].json.messages.at(-1).content;
+  assert.equal(typeof content1, "string", "image part dropped → plain string prompt");
+  assert.ok(notes.some((m) => /image.*ignored.*text-only/i.test(m)), "progress note emitted");
+
+  // known vision → keep image_url
+  await one(srv, nodes.map((n) => n.id === "m1" ? { ...n, fields: { ...n.fields, model: "vision-yes" } } : n), links, {
+    catalog: { chat: [{ id: "vision-yes", capabilities: { vision: true } }] },
+  }).run({});
+  const content2 = srv.requests[1].json.messages.at(-1).content;
+  assert.ok(Array.isArray(content2) && content2.some((p) => p.type === "image_url"), "vision model keeps image_url");
+
+  // no catalog → permissive, part rides
+  await one(srv, nodes, links).run({});
+  const content3 = srv.requests[2].json.messages.at(-1).content;
+  assert.ok(Array.isArray(content3) && content3.some((p) => p.type === "image_url"), "absent catalog keeps image");
+});
+
 test("llm structured_output gate: response_format stripped only for a KNOWN-incapable model", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());
