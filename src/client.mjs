@@ -329,7 +329,7 @@ export class NanoClient {
     const bytes = new Uint8Array(await r.arrayBuffer());
     let mime = ct.split(";")[0].trim().toLowerCase();
     if (!mime || mime === "application/octet-stream" || mime === "binary/octet-stream") {
-      mime = AUDIO_MIME[extra.response_format || "mp3"] || "audio/mpeg";
+      mime = AUDIO_MIME[(extra && (extra.output_format || extra.response_format)) || "mp3"] || "audio/mpeg";
     }
     return bytesToDataUrl(bytes, mime);
   }
