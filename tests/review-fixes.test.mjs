@@ -104,6 +104,32 @@ test("image LoRA: Anima *-lora uses numbered slots (lora_url_1..3), not flux sin
   assert.ok(!("lora_url" in body), "must not fall back to flux single-slot");
 });
 
+test("image LoRA: Qwen Image 2.1 *-lora uses numbered slots (lora_url_1..3), not flux single-slot", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /v1/images/generations", { json: { data: [{ b64_json: PNG_B64 }], cost: 0.02 } });
+
+  await one(srv, {
+    id: "n1", type: "image",
+    fields: {
+      model: "wavespeed-ai/qwen-image-2.1/text-to-image-lora", prompt: "fox",
+      loras: [
+        { url: "https://host.example/a.safetensors", strength: "1" },
+        { url: "https://host.example/b.safetensors", strength: "0.8" },
+        { url: "https://host.example/c.safetensors", strength: "0.5" },
+      ],
+    },
+  }).run({});
+  const body = srv.requests[0].json;
+  assert.equal(body.lora_url_1, "https://host.example/a.safetensors");
+  assert.equal(body.lora_scale_1, 1);
+  assert.equal(body.lora_url_2, "https://host.example/b.safetensors");
+  assert.equal(body.lora_scale_2, 0.8);
+  assert.equal(body.lora_url_3, "https://host.example/c.safetensors");
+  assert.equal(body.lora_scale_3, 0.5);
+  assert.ok(!("lora_url" in body), "must not fall back to flux single-slot");
+});
+
 test("image LoRA: MiniMax H3 (ids lack 'lora') still emits numbered slots", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());
