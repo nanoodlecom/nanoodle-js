@@ -155,3 +155,53 @@ test("retired 'draw' node is not billable: no cost, no unpriced count, no chat c
   assert.equal(mixed.priced, 1);
   assert.equal(mixed.unpriced, 0);
 });
+
+// MiniMax H3 LoRA tier. genericScanUsd used to read output_per_second for every
+// case (5s → $0.65) and ignore both the LoRA table and the per-ref surcharge.
+// x402 pre-charge matches the quote with no headroom; this forecast must too.
+// The MCP deposit margin (1.2× × 2× for video) is applied by the caller, not here.
+test("minimax-h3 LoRA tier matches the client quote at 480p / 5s", () => {
+  const LORA = "https://huggingface.co/x/y/resolve/main/a.safetensors";
+  const pricing = {
+    currency: "USD",
+    output_per_second: 0.13,
+    reference_video_input_per_second: 0.13,
+    extra_reference_image: 0.04,
+    included_reference_images: 5,
+    default_duration: 5,
+    min_duration: 5,
+    max_duration: 15,
+    supported_durations: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    lora: {
+      text_or_image_per_second: { "480p": 0.05, "540p": 0.075, "768p": 0.1, "1080p": 0.2 },
+      reference_per_second: { "480p": 0.06, "540p": 0.09, "768p": 0.135, "1080p": 0.27 },
+      reference_image_or_audio: 0.02,
+      min_duration: 3,
+      max_duration: 15,
+    },
+  };
+  const cats = { video: [{ id: "minimax-h3", pricing, supported_parameters: { parameters: { duration: {}, resolution: {} } } }] };
+  const graphFor = (refs, lora) => {
+    const fields = { model: "minimax-h3", duration: "5", resolution: "480p" };
+    if (lora) fields.loras = [{ url: LORA, strength: "1" }];
+    const nodes = [{ id: "v1", type: "tvideo", fields }];
+    const links = [];
+    for (let i = 1; i <= refs; i++) {
+      nodes.push({ id: "img" + i, type: "upload", fields: {} });
+      links.push({ id: "l" + i, from: { node: "img" + i, port: "image" }, to: { node: "v1", port: "ref" + i } });
+    }
+    return { nodes, links };
+  };
+  const usd = (refs, lora) => estimateGraphCost(graphFor(refs, lora), cats).usd;
+  const near = (got, want, label) => assert.ok(Math.abs(got - want) < 1e-9, `${label}: ${got} !== ${want}`);
+  near(usd(0, false), 0.65, "non-LoRA 0 refs");
+  near(usd(1, false), 0.65, "non-LoRA 1 ref");
+  near(usd(2, false), 0.65, "non-LoRA 2 refs");
+  near(usd(0, true), 0.25, "LoRA 0 refs");
+  near(usd(1, true), 0.32, "LoRA 1 ref");
+  near(usd(2, true), 0.34, "LoRA 2 refs");
+  // A blank LoRA row must not leave the non-LoRA tier.
+  const blank = graphFor(0, false);
+  blank.nodes[0].fields.loras = [{ url: "  ", strength: "1" }];
+  near(estimateGraphCost(blank, cats).usd, 0.65, "blank LoRA url");
+});
