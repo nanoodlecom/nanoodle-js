@@ -47,8 +47,9 @@ wf = Workflow.load("noodle-graph.json", api_key=None)   # env NANOGPT_API_KEY fa
 wf.inputs / wf.outputs / wf.settings                     # lists of dataclasses, same fields as JS
 result = wf.run({"Text": "a cozy ramen shop"}, settings=None, timeout=None, on_progress=None)
 result["Image"]              # __getitem__ = outputs lookup (friendly key or node id)
-result.outputs, result.cost_usd, result.cost_exact, result.remaining_balance, result.nodes, result.errors
+result.outputs, result.cost_usd, result.cost_exact, result.remaining_balance, result.nodes, result.errors, result.gated
 ```
+- Gates: NodeRun.status "gated" (+ .gate {yes, message}) / "skipped" (+ .gated_by); result.gated [{node_id, name, message, yes, skipped}]; result[key] for a gated-off output raises GatedOutputError (a KeyError).
 - Sync API (urllib + concurrent.futures ThreadPoolExecutor for node concurrency). Same RunError semantics.
 - MediaRef: .url, .mime, .bytes(), .save(path), __str__ → url.
 - Injectable transport: Workflow(..., base_url=..., http=callable) for the harness (default small urllib wrapper).
