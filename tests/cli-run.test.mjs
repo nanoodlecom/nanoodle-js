@@ -187,3 +187,38 @@ test("CLI: hosted media outputs are named from the download's Content-Type, not 
   assert.equal(JSON.parse(r.stdout).outputs.Image, join("noodle-out", "Image.png"));
   await stat(join(cwd, "noodle-out", "Image.png")); // throws if missing (e.g. saved as Image.bin)
 });
+
+test("CLI contract: a closed ⚖️ Decide gate exits 0 and reports gated, not failed", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /api/v1/decisions", { json: { answers: { answer: { type: "noul", noul: 0.12 } }, usage: { input_tokens: 30, output_tokens: 0, cost: 0.000003 } } });
+  const cwd = await mkdtemp(join(tmpdir(), "nanoodle-cli-"));
+  const graph = join(cwd, "gate.json");
+  await writeFile(graph, JSON.stringify({
+    nodes: [
+      { id: "t", type: "text", fields: { text: "a dog" } },
+      { id: "g", type: "decide", fields: { model: "liquid/d1", mode: "yesno", gate: true, question: "Is it a cat?" } },
+      { id: "l", type: "llm", fields: { model: "gpt-x", prompt: "x" } },
+    ],
+    links: [
+      { id: "l1", from: { node: "t", port: "text" }, to: { node: "g", port: "text" } },
+      { id: "l2", from: { node: "g", port: "text" }, to: { node: "l", port: "prompt" } },
+    ],
+  }));
+  const r = await runCli(["run", graph], { cwd, env: { NANOGPT_BASE_URL: srv.url } });
+  assert.equal(r.status, 0, r.stderr);
+  const s = JSON.parse(r.stdout);
+  assert.deepEqual(s.errors, []);
+  assert.equal(s.gated.length, 1);
+  assert.equal(s.gated[0].nodeId, "g");
+  assert.deepEqual(s.gated[0].skipped, ["l"]);
+  assert.equal(s.nodes.g.status, "gated");
+  assert.equal(s.nodes.g.gate.yes, 0.12);
+  assert.equal(s.nodes.l.status, "skipped");
+  assert.equal(s.nodes.l.gatedBy, "g");
+  assert.equal(s.outputs.LLM, null);
+  assert.equal(s.costUsd, 0.000003);
+  assert.match(r.stderr, /⛔ Decide \(g\) gated: gate closed/);
+  assert.match(r.stderr, /⤼ LLM \(l\) skipped — gate g said no/);
+  assert.ok(srv.requests.every((q) => q.path !== "/api/v1/chat/completions"));
+});

@@ -187,6 +187,14 @@ export const SETTING_SPECS = {
     { f: "model", label: "Model", kind: "model" },
     { f: "q", label: "Question", kind: "textarea", def: "Describe this image." },
   ],
+  decide: [
+    { f: "model", label: "Model", kind: "model" },
+    { f: "mode", label: "Decide", kind: "select", options: ["pick", "choose", "score", "yesno"], def: "pick" },
+    { f: "question", label: "Question", kind: "textarea" },
+    { f: "options", label: "Labels (one per line)", kind: "textarea" },
+    { f: "levels", label: "Scale (worst → best, one per line)", kind: "textarea", def: "poor\nokay\ngood\ngreat" },
+    { f: "gate", label: "Gate: stop downstream on no", kind: "boolean" },
+  ],
   image: [
     { f: "model", label: "Model", kind: "model" },
     { f: "size", label: "Image size", kind: "select", options: SIZES, def: "1024x1024" },

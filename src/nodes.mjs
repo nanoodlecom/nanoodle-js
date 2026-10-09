@@ -4,8 +4,9 @@ import { IMG_PORT_RE, EDIT_IMG_RE, REF_PORT_RE, CLIP_PORT_RE, VID_PORT_RE, optio
 import { MEDIA_INLINE_MAX } from "./media.mjs";
 import {
   resizeCropImage, trimAudioToWav, extractAudioToWav,
-  extractVideoFrames, concatVideos, muxSoundtrack, maskToSource, fitImageInline,
+  extractVideoFrames, concatVideos, muxSoundtrack, maskToSource, fitImageInline, fitImageJpeg,
 } from "./local-media.mjs";
+import { decideRun, decideImageLimits } from "./decide.mjs";
 
 function mdl(n) {
   const m = String((n.fields && n.fields.model) || "").trim();
@@ -622,6 +623,17 @@ export const RUNNERS = {
       content: [{ type: "text", text: q }, { type: "image_url", image_url: { url: img } }],
     }];
     return { text: await ctx.chat(messages, mdl(n), {}) };
+  },
+
+  // ⚖️ Decide: one typed question to a NanoGPT decision model (twin of the editor/play node).
+  // A closed yes/no gate throws a NanoodleError with code "decide-gate" — downstream skips, unbilled.
+  async decide(n, inp, ctx) {
+    const model = mdl(n);
+    const it = catItem(ctx.catalog, "chat", model);
+    // a catalog row WITHOUT decision_input (e.g. the non-detailed /api/v1/models list) is "unknown", not text-only
+    const lim = decideImageLimits(it && it.decision_input, !!(it && it.decision_input));
+    const fit = (u, maxDim, budget) => fitImageJpeg(u, maxDim, budget, mediaOpts(ctx));
+    return decideRun(n.fields || {}, model, inp.text, collectPorts(inp, IMG_PORT_RE), lim, (body) => ctx.decide(body), fit);
   },
 
   async image(n, inp, ctx) {

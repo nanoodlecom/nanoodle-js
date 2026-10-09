@@ -47,6 +47,7 @@ field-port overrides the typed field value at run time.
 | inpaint | Inpaint | image:image, mask:image | — | image:image | model, prompt, size, seed, brush |
 | resize | Resize/crop | image:image | — | image:image | mode(fit\|fill\|exact), width, height (LOCAL) |
 | vision | Vision | image:image | — | text:text | model, q |
+| decide | Decide | text:text | img1..:image (candidates) | text:text, image:image | model, mode(pick\|choose\|score\|yesno), question, options, levels, gate |
 | tvideo | Text→Video | — | ref1..:image | video:video | model, prompt, duration, aspect, resolution, modelOpts |
 | ivideo | Image→Video | image:image | endframe:image | video:video | model, prompt, duration, aspect, resolution, modelOpts |
 | vedit | Video edit | video:video | — | video:video | model, prompt, resolution, modelOpts |

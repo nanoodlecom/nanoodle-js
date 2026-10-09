@@ -203,6 +203,19 @@ export class NanoClient {
     return out;
   }
 
+  /**
+   * POST /api/v1/decisions (⚖️ Decide). Returns the JSON ({ answers, usage:{ input_tokens, output_tokens, cost } }).
+   * Decision models bill input tokens only; the real price rides usage.cost.
+   */
+  async decide(body, { onCost, signal } = {}) {
+    const r = await this._postJson("/api/v1/decisions", body, signal);
+    if (!r.ok) throw httpError(r.status, await r.text());
+    const j = await r.json();
+    const c = j && j.usage && typeof j.usage.cost === "number" ? j.usage.cost : null;
+    if (onCost) onCost(costWithHeaders(c != null ? { ...j, cost: c } : j, r));
+    return j;
+  }
+
   /** POST /v1/images/generations (NOTE: not /api/v1). Returns data: / https URL(s). */
   async image({ prompt, model, size, imageDataUrl, maskDataUrl, extra, n = 1, multi = false }, { onCost, signal } = {}) {
     const body = { model, size: size || "1024x1024", n, response_format: "b64_json" };
