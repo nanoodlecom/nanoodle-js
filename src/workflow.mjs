@@ -39,14 +39,30 @@ function throwIfAborted(signal) {
 }
 
 /** The outcome of Workflow.run(). Media values are MediaRef; text values plain strings. */
+/** Internal: thrown by a node skipped behind a closed gate, so ITS dependents skip too. Never surfaced. */
+class GateSkip extends Error {
+  constructor(gatedBy) { super("skipped — a gate upstream said no"); this.gatedBy = gatedBy; }
+}
+
 export class RunResult {
-  constructor({ outputs, nodes, errors, costUsd, costExact, remainingBalance }) {
-    /** { [friendlyKey | nodeId]: value } — sink node primary outputs */
+  constructor({ outputs, nodes, errors, gated = [], costUsd, costExact, remainingBalance }) {
+    /** { [friendlyKey | nodeId]: value } — sink node primary outputs (a sink skipped by a closed gate has none) */
     this.outputs = outputs;
-    /** per-node { status: "done"|"error"|"skipped", out, error, costUsd, ms } */
+    /**
+     * per-node { status: "done"|"error"|"gated"|"skipped", out, error, costUsd, ms }.
+     * "gated": a ⚖️ Decide yes/no gate that answered no — it ran and billed, `out` holds its answer
+     * ({ text: "no", decision }), and it carries `gate: { yes, message }`. Not an error.
+     * "skipped" + `gatedBy: <decide node id>`: downstream of a closed gate — never ran, never billed.
+     * (Annotation notes are "skipped" with no gatedBy.)
+     */
     this.nodes = nodes;
-    /** [{ nodeId, name, message }] for every node that failed (incl. non-sink warnings) */
+    /** [{ nodeId, name, message }] for every node that failed (incl. non-sink warnings) — never gates */
     this.errors = errors;
+    /**
+     * [{ nodeId, name, message, yes, skipped: [nodeId…] }] — every Decide gate that closed this run.
+     * A closed gate is a deliberate, successful outcome: run() resolves, it never throws for one.
+     */
+    this.gated = gated;
     /** summed USD cost of all calls that reported one */
     this.costUsd = costUsd;
     /** false when any network call omitted its price (total is a floor) */
@@ -63,6 +79,8 @@ export class RunResult {
     for (const k of Object.keys(this.outputs)) {
       if (k.toLowerCase() === norm) return this.outputs[k];
     }
+    const g = (this._gatedOutputs || []).find((o) => o.key.toLowerCase() === norm || o.nodeId.toLowerCase() === norm);
+    if (g) throw new NanoodleError(`output "${g.key}" was skipped — the gate "${g.gateName}" answered no, so it never ran (see result.gated)`, { code: "gated" });
     throw new NanoodleError(`no output "${key}" — available outputs: ${Object.keys(this.outputs).map((k) => `"${k}"`).join(", ") || "(none)"}`);
   }
 }
@@ -280,6 +298,15 @@ export class Workflow {
       };
     };
 
+    const gated = [];
+    // a node whose upstream settled as a closed gate (or was itself skipped by one) → that gate's id
+    const gateOf = (id) => {
+      const r = nodesRec[id];
+      if (!r) return null;
+      if (r.status === "gated") return id;
+      if (r.status === "skipped" && r.gatedBy) return r.gatedBy;
+      return null;
+    };
     const execNode = async (n) => {
       const rec = nodesRec[n.id];
       try {
@@ -287,18 +314,31 @@ export class Workflow {
         const inbound = graph.links.filter((l) => l.to.node === n.id);
         const inp = {};
         let fields = effFields.get(n.id);
-        let upstreamFail = null;
+        let upstreamFail = null, gatedBy = null;
         for (const l of inbound) {
           let srcOut;
           try { srcOut = await promises.get(l.from.node); }
-          catch { if (!upstreamFail) upstreamFail = displayName(byId.get(l.from.node)); continue; }
+          catch {
+            const g = gateOf(l.from.node);
+            if (g) { if (!gatedBy) gatedBy = g; } else if (!upstreamFail) upstreamFail = displayName(byId.get(l.from.node));
+            continue;
+          }
           const v = srcOut[l.from.port];
           if (isInputPort(n, l.to.port)) inp[l.to.port] = v;
           // wired textarea port = field override; a missing upstream port (degraded save) must
           // NOT clobber the typed field with undefined — the app only applies v != null
           else if (v != null) fields = { ...fields, [l.to.port]: v };
         }
+        // a real failure upstream wins over a gate (the browser runners agree): that is an error
         if (upstreamFail) throw new NanoodleError("upstream failed: " + upstreamFail);
+        if (gatedBy) {
+          rec.status = "skipped";
+          rec.gatedBy = gatedBy;
+          const gr = gated.find((x) => x.nodeId === gatedBy);
+          if (gr) gr.skipped.push(n.id);
+          emit({ type: "node-skipped", nodeId: n.id, name: displayName(n), reason: "gated", gatedBy });
+          throw new GateSkip(gatedBy);
+        }
         throwIfAborted(ac.signal);
         // Prompt length caps (see prompt-caps.mjs). Many image/video models reject an over-long
         // prompt at the route, and in a graph the prompt is WRITTEN by an upstream LLM — so a
@@ -322,6 +362,16 @@ export class Workflow {
         emit({ type: "node-done", nodeId: n.id, name: displayName(n), ms: rec.ms, costUsd: rec.costUsd });
         return out;
       } catch (e) {
+        if (e instanceof GateSkip) throw e;
+        // ⚖️ Decide gate answered no: a settled, billed decision — not an error. Downstream skips.
+        if (e && e.gate === true && !ac.signal.aborted) {
+          rec.status = "gated";
+          rec.out = e.out || null;
+          rec.gate = { yes: e.decision && typeof e.decision.yes === "number" ? e.decision.yes : null, message: e.message };
+          gated.push({ nodeId: n.id, name: displayName(n), message: e.message, yes: rec.gate.yes, skipped: [] });
+          emit({ type: "node-gated", nodeId: n.id, name: displayName(n), message: e.message, yes: rec.gate.yes, costUsd: rec.costUsd });
+          throw e;
+        }
         // A prompt-length rejection is free (nothing generated) and, once banked, preventable: the
         // next run budgets the LLM above this node and fits whatever is left. Say that, rather than
         // relaying "please shorten it" about a prompt the caller never wrote.
@@ -352,7 +402,7 @@ export class Workflow {
     const outputsMap = {};
     for (const o of this.outputs) {
       const rec = nodesRec[o.nodeId];
-      if (!rec || rec.status !== "done") continue;
+      if (!rec || !(rec.status === "done" || (rec.status === "gated" && rec.out))) continue;
       const primary = o.ports[0];
       const value = this._wrapValue(rec.out[primary.name], primary.type);
       outputsMap[o.key] = value;
@@ -362,9 +412,16 @@ export class Workflow {
       outputs: outputsMap,
       nodes: nodesRec,
       errors,
+      gated,
       costUsd: cost.total,
       costExact: cost.exact,
       remainingBalance: cost.balance,
+    });
+    // sinks a closed gate skipped: get() names the gate instead of "no output"
+    Object.defineProperty(result, "_gatedOutputs", {
+      enumerable: false,
+      value: this.outputs.filter((o) => nodesRec[o.nodeId] && nodesRec[o.nodeId].gatedBy)
+        .map((o) => ({ key: o.key, nodeId: o.nodeId, gateName: displayName(byId.get(nodesRec[o.nodeId].gatedBy)) })),
     });
 
     // timeout/abort must fail the run even when local media finished after the deadline

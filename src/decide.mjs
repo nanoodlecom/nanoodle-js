@@ -98,11 +98,16 @@ export function decideOutputs(mode, ans, q, imgs, usage, model) {
   d.rows = [{ label: "yes", p: py, win: py >= 0.5 }, { label: "no", p: 1 - py, win: py < 0.5 }];
   return { text: py >= 0.5 ? "yes" : "no", image: imgs[0] || "", decision: d };
 }
-/** A closed yes/no gate: a deliberate stop. Downstream nodes skip (unbilled) like any upstream failure. */
-export function decideGateError(d) {
+/**
+ * A closed yes/no gate: a deliberate stop, not a failure. The runner throws this (so the browser
+ * twin and any direct RUNNERS caller see err.gate), and Workflow.run() settles it as node status
+ * "gated" — the decision ran and billed, `out` carries its answer, everything downstream is
+ * "skipped" unbilled, and the run itself succeeds.
+ */
+export function decideGateError(d, out) {
   return new NanoodleError(
     "gate closed — the answer was no (yes " + Math.round(d.yes * 100) + "%), so nothing downstream ran",
-    { code: "decide-gate", gate: true, decision: d });
+    { code: "decide-gate", gate: true, decision: d, out: out || null });
 }
 /** Average pick probabilities across runs that saw the candidates in different orders; costs add up. */
 export function decideMergeOrders(js, orders) {
@@ -150,6 +155,6 @@ export async function decideRun(f, model, text, imgs, lim, send, fit) {
     j = await send({ model, state: decideState(text, sent), questions: { answer: q } });
   }
   const out = decideOutputs(mode, j && j.answers && j.answers.answer, q, imgs, j && j.usage, model);
-  if (mode === "yesno" && (f.gate === true || f.gate === "true") && out.decision.yes < 0.5) throw decideGateError(out.decision);
+  if (mode === "yesno" && (f.gate === true || f.gate === "true") && out.decision.yes < 0.5) throw decideGateError(out.decision, out);
   return out;
 }

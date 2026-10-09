@@ -90,11 +90,75 @@ test("decide: a closed yes/no gate skips downstream nodes (no request for them)"
       { id: "l2", from: { node: "g", port: "text" }, to: { node: "l", port: "prompt" } },
     ],
   }, mockOpts(srv));
-  await assert.rejects(wf.run({}), (e) => {
-    const recs = e.result && e.result.nodes;
-    return /gate closed/.test(JSON.stringify(recs || e.message));
-  });
+  const events = [];
+  const result = await wf.run({}, { onProgress: (e) => events.push(e) });   // a closed gate is NOT a failed run
   assert.ok(srv.requests.every((r) => r.path !== "/api/v1/chat/completions"), "the LLM behind a closed gate never ran");
+  assert.equal(result.nodes.g.status, "gated");
+  assert.equal(result.nodes.g.error, null);
+  assert.equal(result.nodes.g.out.text, "no");
+  assert.ok(Math.abs(result.nodes.g.gate.yes - 0.1) < 1e-9 && /gate closed/.test(result.nodes.g.gate.message));
+  assert.ok(Math.abs(result.nodes.g.costUsd - 0.000001) < 1e-12, "the decision itself billed");
+  assert.equal(result.nodes.l.status, "skipped");
+  assert.equal(result.nodes.l.gatedBy, "g");
+  assert.equal(result.nodes.l.costUsd, null);
+  assert.deepEqual(result.errors, [], "a gate is never an error");
+  assert.equal(result.gated.length, 1);
+  assert.deepEqual({ ...result.gated[0], yes: Math.round(result.gated[0].yes * 10) / 10 },
+    { nodeId: "g", name: "Decide", message: result.nodes.g.gate.message, yes: 0.1, skipped: ["l"] });
+  assert.ok(Math.abs(result.costUsd - 0.000001) < 1e-12);
+  assert.equal(result.outputs.LLM, undefined, "the skipped sink has no output");
+  assert.throws(() => result.get("LLM"), (e) => e.code === "gated" && /skipped — the gate "Decide" answered no/.test(e.message));
+  assert.ok(events.some((e) => e.type === "node-gated" && e.nodeId === "g"));
+  assert.ok(events.some((e) => e.type === "node-skipped" && e.nodeId === "l" && e.gatedBy === "g"));
+  assert.ok(!events.some((e) => e.type === "node-error"));
+});
+
+test("decide: gate skips cascade through a chain and name the gate; other lanes and an open gate run", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  const graph = (gate) => ({
+    nodes: [
+      { id: "g", type: "decide", fields: { model: "liquid/d1", mode: "yesno", gate, question: "Is it a cat?" } },
+      { id: "l", type: "llm", fields: { model: "gpt-x", prompt: "x" } },
+      { id: "j", type: "join", fields: {} },
+      { id: "s", type: "decide", fields: { model: "liquid/d1", mode: "yesno", question: "Side?" } },
+    ],
+    links: [
+      { id: "l1", from: { node: "g", port: "text" }, to: { node: "l", port: "prompt" } },
+      { id: "l2", from: { node: "l", port: "text" }, to: { node: "j", port: "a" } },
+    ],
+  });
+  srv.script("POST /api/v1/decisions", { json: { answers: { answer: { type: "noul", noul: 0.2 } }, usage: usage(0.000001) } });
+  const r = await Workflow.fromJSON(graph(true), mockOpts(srv)).run({});
+  assert.equal(r.nodes.l.status, "skipped"); assert.equal(r.nodes.l.gatedBy, "g");
+  assert.equal(r.nodes.j.status, "skipped"); assert.equal(r.nodes.j.gatedBy, "g", "skips name the gate that closed, not the neighbor");
+  assert.deepEqual(r.gated[0].skipped.sort(), ["j", "l"]);
+  assert.equal(r.nodes.s.status, "done", "an unrelated lane still runs");
+  assert.equal(r.get("s"), "no", "a gate-less yes/no just answers no");
+
+  // gate off → plain "no", downstream runs
+  srv.script("POST /api/v1/chat/completions", { json: { choices: [{ message: { content: "poem" } }], usage: { cost: 0 } } });
+  const open = await Workflow.fromJSON(graph(false), mockOpts(srv)).run({});
+  assert.equal(open.nodes.g.status, "done"); assert.equal(open.nodes.l.status, "done"); assert.deepEqual(open.gated, []);
+});
+
+test("decide: a downstream node fed by a closed gate AND a failed node is an error, not a skip", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /api/v1/decisions", { json: { answers: { answer: { type: "noul", noul: 0.2 } }, usage: usage(0.000001) } });
+  srv.script("POST /api/v1/chat/completions", { status: 500, json: { error: { message: "boom" } } });
+  const wf = Workflow.fromJSON({
+    nodes: [
+      { id: "g", type: "decide", fields: { model: "liquid/d1", mode: "yesno", gate: "true", question: "ok?" } },
+      { id: "bad", type: "llm", fields: { model: "gpt-x", prompt: "x" } },
+      { id: "j", type: "join", fields: {} },
+    ],
+    links: [
+      { id: "l1", from: { node: "g", port: "text" }, to: { node: "j", port: "a" } },
+      { id: "l2", from: { node: "bad", port: "text" }, to: { node: "j", port: "b" } },
+    ],
+  }, mockOpts(srv));
+  await assert.rejects(wf.run({}), (e) => e.result && e.result.nodes.j.status === "error" && e.result.nodes.g.status === "gated");
 });
 
 test("decide: pick shrinks wired images to JPEG within the decision budget (ffmpeg)", async (t) => {

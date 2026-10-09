@@ -170,6 +170,24 @@ Failures in lanes no output depends on only appear in `result.errors`.
 Unknown node types, missing required inputs, bad keys, and a missing API key
 all fail **before** anything is spent.
 
+### Gates (Decide said no)
+
+A ⚖️ `decide` node in yes/no mode with **gate** on stops its branch when the
+answer is no. That is a result, not an error, so `run()` resolves:
+
+```js
+result.gated
+// [{ nodeId: "n4", name: "Decide", yes: 0.12, skipped: ["n5", "n6"],
+//    message: "gate closed — the answer was no (yes 12%), so nothing downstream ran" }]
+result.nodes.n4   // { status: "gated", out: { text: "no", decision }, gate: { yes, message }, costUsd, ... }
+result.nodes.n5   // { status: "skipped", gatedBy: "n4", costUsd: null, ... } — never ran, never billed
+result.get("Image")   // throws NanoodleError code "gated": the gate "Decide" answered no
+```
+
+`result.errors` stays empty, progress emits `node-gated` / `node-skipped`, and
+the CLI exits 0 with `gated` in its JSON summary. A node fed by both a closed
+gate and a real failure is still an error.
+
 ### Prompt length caps
 
 Many image and video models reject an over-long prompt at NanoGPT's route
@@ -208,7 +226,7 @@ The pieces are exported if you orchestrate graphs yourself:
 | local media† | resize, vframes, combine, soundtrack, trim, extractaudio |
 | NanoGPT | llm (incl. vision + audio input), image, edit, inpaint*, vision, decide†, tvideo, ivideo, vedit, lipsync, music, remix, tts, transcribe |
 
-† `decide` asks a NanoGPT decision model one typed question (`POST /api/v1/decisions`): pick the best of the wired `img1…` images, choose a label, score on a scale, or yes/no. Text-only decisions need nothing extra; wired images are shrunk to the model's limits with ffmpeg. A yes/no gate that answers no fails that node with `code: "decide-gate"`, so everything downstream is skipped unbilled.
+† `decide` asks a NanoGPT decision model one typed question (`POST /api/v1/decisions`): pick the best of the wired `img1…` images, choose a label, score on a scale, or yes/no. Text-only decisions need nothing extra; wired images are shrunk to the model's limits with ffmpeg. A yes/no gate that answers no is not a failure: that node settles as `gated`, everything downstream is `skipped` unbilled, and the run succeeds (see [Gates](#gates-decide-said-no)).
 
 † **local media** prefers a pure-JS path that matches the browser (lossless mp4 remux, PCM-WAV trim, PNG resize). **ffmpeg** on `PATH` is the fallback for everything else (soft dependency — not an npm package); clear error if it’s required and missing.
 

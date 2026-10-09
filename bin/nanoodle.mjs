@@ -242,6 +242,8 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
         if (e.type === "node-start") console.error(`▶ ${e.name} (${e.nodeId})`);
         if (e.type === "node-done") console.error(`✔ ${e.name} (${e.nodeId}) ${e.ms}ms${e.costUsd != null ? ` $${e.costUsd}` : ""}`);
         if (e.type === "node-error") console.error(`✖ ${e.name} (${e.nodeId}): ${e.error}`);
+        if (e.type === "node-gated") console.error(`⛔ ${e.name} (${e.nodeId}) gated: ${e.message}${e.costUsd != null ? ` $${e.costUsd}` : ""}`);
+        if (e.type === "node-skipped") console.error(`⤼ ${e.name} (${e.nodeId}) skipped — gate ${e.gatedBy} said no`);
       },
     });
   } catch (e) {
@@ -284,7 +286,11 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
     costExact: result.costExact,
     remainingBalance: result.remainingBalance,
     errors: result.errors,
-    nodes: Object.fromEntries(Object.entries(result.nodes).map(([id, r]) => [id, { status: r.status, ms: r.ms, costUsd: r.costUsd, error: r.error }])),
+    gated: result.gated || [],
+    nodes: Object.fromEntries(Object.entries(result.nodes).map(([id, r]) => [id, {
+      status: r.status, ms: r.ms, costUsd: r.costUsd, error: r.error,
+      ...(r.gate ? { gate: r.gate } : {}), ...(r.gatedBy ? { gatedBy: r.gatedBy } : {}),
+    }])),
   }, null, 2));
   if (!quiet) {
     const approx = result.costExact ? "" : "≥ ";
