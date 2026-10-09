@@ -3,7 +3,7 @@ import { NanoodleError } from "./errors.mjs";
 /* Dynamic input-port families (mirrors the nanoodle app's runGraph). A wire landing on one of
    these ports — or on a port declared in NODE_TYPES[type].inputs — is a data input; a wire
    landing on ANY other port is a field override (wired prompt/system/lyrics/q/...). */
-export const IMG_PORT_RE = /^img\d+$/;      // llm vision references
+export const IMG_PORT_RE = /^img\d+$/;      // llm vision references, decide candidates
 export const EDIT_IMG_RE = /^image\d*$/;    // edit multi-reference: image, image2, ...
 export const VID_PORT_RE = /^vid\d+$/;
 export const CLIP_PORT_RE = /^clip\d+$/;    // combine clips
@@ -48,6 +48,7 @@ export const NODE_TYPES = {
   inpaint: { title: "Inpaint",         inputs: ["image", "mask"], outputs: [{ name: "image", type: "image" }], network: true },
   resize:  { title: "Resize / crop",   inputs: ["image"], outputs: [{ name: "image", type: "image" }], local: true },
   vision:  { title: "Vision",          inputs: ["image"], outputs: [{ name: "text", type: "text" }], network: true },
+  decide:  { title: "Decide",          inputs: ["text"], outputs: [{ name: "text", type: "text" }, { name: "image", type: "image" }], network: true }, // img1… candidates (IMG_PORT_RE)
   tvideo:  { title: "Text→Video",      inputs: [], outputs: [{ name: "video", type: "video" }], network: true },
   ivideo:  { title: "Image→Video",     inputs: ["image"], outputs: [{ name: "video", type: "video" }], network: true },
   vedit:   { title: "Video edit",      inputs: ["video"], outputs: [{ name: "video", type: "video" }], network: true },

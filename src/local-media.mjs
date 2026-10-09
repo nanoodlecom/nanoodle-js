@@ -729,6 +729,44 @@ export async function fitImageInline(url, { budget = INLINE_IMAGE_BUDGET, fetch:
   throw new NanoodleError("image is too large to send inline even after resizing (~4 MB max) — use a smaller image");
 }
 
+/**
+ * Shrink an image to fit a decision model's limits (⚖️ Decide): long edge ≤ maxDim and the
+ * data: URL ≤ budget characters. JPEG on white (a transparent PNG can't turn black), stepping
+ * quality down, then size, until it fits — the twin of the browser's canvas decideFitImage.
+ * Needs ffmpeg (decisions without images never touch this).
+ */
+export async function fitImageJpeg(url, maxDim, budget, { fetch: fetchFn, signal } = {}) {
+  return withTemp(async (dir) => {
+    throwIfAborted(signal);
+    const inPath = await writeInput(dir, "in", url, fetchFn);
+    const probe = await runProc("ffprobe", [
+      "-v", "error", "-select_streams", "v:0",
+      "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", inPath,
+    ], { signal });
+    const dims = String(probe.stdout).trim().split("x").map(Number);
+    const sw = dims[0], sh = dims[1];
+    if (!(sw > 0) || !(sh > 0)) throw new NanoodleError("couldn’t read an image to judge");
+    let s = Math.min(1, maxDim / Math.max(sw, sh));
+    const qs = [3, 5, 8, 12]; // mjpeg -q:v (2 = best … 31 = worst) ≈ canvas quality 0.85 → 0.48
+    for (let round = 0; round < 6; round++) {
+      const w = Math.max(2, Math.round(sw * s / 2) * 2), h = Math.max(2, Math.round(sh * s / 2) * 2);
+      for (const q of qs) {
+        throwIfAborted(signal);
+        const outPath = join(dir, `fit-${round}-${q}.jpg`);
+        await runProc("ffmpeg", [
+          "-y", "-i", inPath, "-filter_complex",
+          `color=c=white:s=${w}x${h}[bg];[0:v]scale=${w}:${h},format=rgba[fg];[bg][fg]overlay=shortest=1,format=yuvj420p`,
+          "-frames:v", "1", "-q:v", String(q), outPath,
+        ], { signal });
+        const out = await dataUrlFromFile(outPath, "image/jpeg");
+        if (out.length <= budget) return out;
+      }
+      s *= 0.75;
+    }
+    throw new NanoodleError("couldn’t shrink an image small enough for the decision model");
+  });
+}
+
 async function resizeCropImageFfmpeg(url, m, w, h, { fetch: fetchFn, signal } = {}) {
   return withTemp(async (dir) => {
     throwIfAborted(signal);

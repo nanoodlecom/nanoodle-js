@@ -31,7 +31,7 @@ import { pricingAdvertisesRefs } from "./catalog.mjs";
 // that cannot happen. It contributes $0 and is not counted as `unpriced`,
 // because "we could not price it" is the wrong report — it is not billable.
 const PRICE_KIND = {
-  llm: "chat", vision: "chat",
+  llm: "chat", vision: "chat", decide: "chat",
   image: "image", edit: "image", inpaint: "image",
   tvideo: "video", ivideo: "video", vedit: "video", lipsync: "video",
   music: "audio", remix: "audio", tts: "audio", transcribe: "audio",
@@ -262,6 +262,15 @@ function nodeUnitUsd(node, catItem, graph) {
       : 0;
     const u = videoUnitUsd(pricing, f, refCount);
     return (u != null && isFinite(u)) ? u : null;
+  }
+  if (node.type === "decide") {
+    // input tokens only (twin of the editor's Decide estimate); pick asks twice (in order + reversed)
+    const imgs = (graph && Array.isArray(graph.links))
+      ? graph.links.filter((l) => l.to && l.to.node === node.id && /^img\d+$/.test(l.to.port)).length : 0;
+    const inTok = 120 + Math.round(((f.question || "").length + (f.options || "").length + (f.levels || "").length) / 4) + 250 + imgs * 400;
+    const u = chatUnitUsd(pricing, inTok, 0);
+    const pick = !(f.mode === "choose" || f.mode === "score" || f.mode === "yesno");
+    return u == null ? null : u * (pick ? 2 : 1);
   }
   if (kind === "chat") {
     const inTok = Math.max(200, Math.round(((f.system || "").length + (f.prompt || "").length) / 4) + 200);

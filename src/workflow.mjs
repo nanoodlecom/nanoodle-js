@@ -266,6 +266,7 @@ export class Workflow {
       const io = { onCost, onPoll, signal: ac.signal };
       return {
         chat: (messages, model, opts) => this.client.chat(messages, model, opts, io),
+        decide: (body) => this.client.decide(body, io),
         image: (args) => this.client.image(args, io),
         video: (model, prompt, opts, imageDataUrl) => this.client.video(model, prompt, opts, imageDataUrl, io),
         audio: (model, input, extra) => this.client.audio(model, input, extra, io),
