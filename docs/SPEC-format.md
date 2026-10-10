@@ -28,7 +28,7 @@ Verified against /home/ntc/dev/nanoodlecom/nanoodle/index.html (editor). The �
 - Library extension: a media field value that is NOT a `data:`/`http(s)` URL (a prose placeholder, a bare file path, an object) is blanked at load with a warning — the input then surfaces as genuinely required instead of posting garbage to the API. Authors/agents: leave media fields `""` and supply the file at run time.
 
 ## Node type registry (NODE_TYPES, index.html:5015-5679)
-Port kinds: text | image | audio | video. Only matching kinds connect.
+Port kinds: text | image | audio | video | model3d. Only matching kinds connect.
 Every `<textarea>` field is also a wireable text input port with port name == field name
 (EXCEPT on node types `text`, `choice`, comments, and the `extraJson` field). A wire into a
 field-port overrides the typed field value at run time.
@@ -39,6 +39,7 @@ field-port overrides the typed field value at run time.
 | upload | Image input | — | — | image:image | image (data: URL) |
 | aupload | Audio input | — | — | audio:audio | audio (data: URL) |
 | vupload | Video input | — | — | video:video | video (data: URL) |
+| mupload | 3D input | — | — | model:model3d | model (data: or https URL of a .glb) |
 | choice | Choice | — | — | text:text | options (newline-separated), selected |
 | join | Join | a:text, b:text | — | text:text | sep (default " "; literal "\n" means newline) |
 | llm | LLM | — | img1..:image (vision), audio:audio | text:text | model, system, prompt, temperature, maxTokens, format(Text\|JSON), reasoningEffort, showThinking |
@@ -50,6 +51,7 @@ field-port overrides the typed field value at run time.
 | decide | Decide | text:text | img1..:image (candidates) | text:text, image:image | model, mode(pick\|choose\|score\|yesno), question, options, levels, gate |
 | tvideo | Text→Video | — | ref1..:image | video:video | model, prompt, duration, aspect, resolution, modelOpts |
 | ivideo | Image→Video | image:image | endframe:image | video:video | model, prompt, duration, aspect, resolution, modelOpts |
+| model3d | 3D model | image:image | — | model:model3d | model (default tripo3d/v2.5), prompt, modelOpts |
 | vedit | Video edit | video:video | — | video:video | model, prompt, resolution, modelOpts |
 | vframes | Video→frames | video:video | — | frame1..frameN:image (dynamic, fields.frames) | frames(1-12), gap, dir(end\|start) (LOCAL) |
 | combine | Combine videos | — | clip1..:video | video:video | dedup (LOCAL) |
@@ -61,6 +63,8 @@ field-port overrides the typed field value at run time.
 | trim | Trim audio | audio:audio | — | audio:audio | start, length (LOCAL) |
 | extractaudio | Extract audio | video:video | — | audio:audio | start, length (LOCAL) |
 | transcribe | Transcribe | audio:audio | — | text:text | model, language |
+| cleanvoice | Clean voice | audio:audio, video:video | — | audio:audio | model (default elevenlabs/audio-isolation), url |
+| endpoint | Custom endpoint | text:text, image:image, audio:audio, video:video | — | port follows mode (chat/json→text, image, video, audio) | url, mode, model, prompt, system, auth, size |
 | comment | Comment | none (note:true, never runs) | — | — | text, color |
 
 Display name resolution (play.html `displayName`): `node.name` (trimmed, if set) → NODE_TYPES[type].title → type → "?".

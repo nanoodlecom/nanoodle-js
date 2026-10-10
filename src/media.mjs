@@ -42,6 +42,7 @@ const EXT_MIME = {
   ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg", ".opus": "audio/ogg",
   ".aac": "audio/aac", ".flac": "audio/flac", ".m4a": "audio/mp4",
   ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime", ".mkv": "video/x-matroska",
+  ".glb": "model/gltf-binary",
   ".txt": "text/plain", ".json": "application/json",
 };
 
@@ -50,6 +51,7 @@ const MIME_EXT = {
   "audio/mpeg": "mp3", "audio/wav": "wav", "audio/ogg": "ogg", "audio/aac": "aac",
   "audio/flac": "flac", "audio/mp4": "m4a",
   "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov",
+  "model/gltf-binary": "glb",
   "text/plain": "txt", "application/json": "json",
 };
 
@@ -80,6 +82,7 @@ export function sniffMime(bytes) {
   if (ascii(0, "fLaC")) return "audio/flac";
   if (b.length >= 12 && ascii(4, "ftyp")) return "video/mp4";
   if (b.length >= 4 && b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return "video/webm";
+  if (b.length >= 4 && ascii(0, "glTF")) return "model/gltf-binary";
   return "application/octet-stream";
 }
 

@@ -222,11 +222,16 @@ The pieces are exported if you orchestrate graphs yourself:
 
 | runs | node types |
 |---|---|
-| local | text, upload (image/audio/video), choice, join, comment |
+| local | text, upload (image/audio/video), mupload (3D .glb), choice, join, comment |
 | local media† | resize, vframes, combine, soundtrack, trim, extractaudio |
-| NanoGPT | llm (incl. vision + audio input), image, edit, inpaint*, vision, decide†, tvideo, ivideo, vedit, lipsync, music, remix, tts, transcribe |
+| NanoGPT | llm (incl. vision + audio input), image, edit, inpaint*, vision, decide†, tvideo, ivideo, model3d‡, vedit, lipsync, music, remix, tts, transcribe, cleanvoice§ |
+| custom URL | endpoint (POST to a URL in the graph; no NanoGPT key) |
 
 † `decide` asks a NanoGPT decision model one typed question (`POST /api/v1/decisions`): pick the best of the wired `img1…` images, choose a label, score on a scale, or yes/no. Text-only decisions need nothing extra; wired images are shrunk to the model's limits with ffmpeg. A yes/no gate that answers no is not a failure: that node settles as `gated`, everything downstream is `skipped` unbilled, and the run succeeds (see [Gates](#gates-decide-said-no)).
+
+‡ `model3d` turns an image and/or a prompt into a GLB (`POST /api/generate-video`, then `GET /api/video/status`). The output port is `model`. A blank model id uses `tripo3d/v2.5` (image only). Polling stops at 25 minutes.
+
+§ `cleanvoice` strips noise and music from hosted audio or video (`POST /api/v1/audio/speech` with `elevenlabs/audio-isolation` or `veed/clean-audio`, then `GET /api/tts/status`). The source must be a public `http(s)` URL — `data:` and `blob:` are refused before any request. Priced from the source length (default model is $0.121/min).
 
 † **local media** prefers a pure-JS path that matches the browser (lossless mp4 remux, PCM-WAV trim, PNG resize). **ffmpeg** on `PATH` is the fallback for everything else (soft dependency — not an npm package); clear error if it’s required and missing.
 

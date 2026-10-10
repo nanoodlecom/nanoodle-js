@@ -325,6 +325,12 @@ export class Workflow {
           }
           const v = srcOut[l.from.port];
           if (isInputPort(n, l.to.port)) inp[l.to.port] = v;
+          // Custom endpoint url/mode: a Choice path like "/post" must ride inp so
+          // endpointResolveTarget can join it onto the typed host. Overwriting
+          // fields.url with "/post" rejects the joined URL.
+          else if (n.type === "endpoint" && (l.to.port === "url" || l.to.port === "mode")) {
+            if (v != null) inp[l.to.port] = v;
+          }
           // wired textarea port = field override; a missing upstream port (degraded save) must
           // NOT clobber the typed field with undefined — the app only applies v != null
           else if (v != null) fields = { ...fields, [l.to.port]: v };
