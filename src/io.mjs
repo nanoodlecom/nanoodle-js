@@ -1,5 +1,6 @@
 import { NanoodleError } from "./errors.mjs";
 import { NODE_TYPES, displayName, optionalNode, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
+import { endpointOutPort } from "./endpoint.mjs";
 
 /* ============================== INPUTS ============================== */
 
@@ -9,6 +10,7 @@ export const INPUT_SPECS = {
   upload:  [{ f: "image",  label: "Image", kind: "image" }],
   aupload: [{ f: "audio",  label: "Audio", kind: "audio" }],
   vupload: [{ f: "video",  label: "Video", kind: "video" }],
+  mupload: [{ f: "model",  label: "3D file", kind: "model3d" }],
   llm:     [{ f: "prompt", label: "Prompt", kind: "textarea" },
             { f: "system", label: "System prompt", kind: "textarea", optional: true, def: "You are a helpful, concise assistant." }],
   image:   [{ f: "prompt", label: "Image prompt", kind: "textarea" }],
@@ -16,6 +18,9 @@ export const INPUT_SPECS = {
   music:   [{ f: "prompt", label: "Style / prompt", kind: "textarea" }],
   remix:   [{ f: "prompt", label: "Style / direction", kind: "textarea" }],
   tts:     [{ f: "prompt", label: "Text to speak", kind: "textarea" }],
+  // Optional: image-only 3D models run with a photo and no prompt.
+  model3d: [{ f: "prompt", label: "3D prompt", kind: "textarea", optional: true }],
+  endpoint:[{ f: "prompt", label: "Prompt", kind: "textarea" }],
 };
 
 /**
@@ -163,6 +168,8 @@ export function deriveOutputs(graph) {
       ports = [];
       for (let i = 1; i <= count; i++) ports.push({ name: "frame" + i, type: "image" });
     }
+    // Custom endpoint's output port follows fields.mode (chat→text, image, video, audio, json→text).
+    if (n.type === "endpoint") ports = [endpointOutPort(n)];
     return { key, nodeId: n.id, type: n.type, ports };
   });
 }
@@ -252,6 +259,19 @@ export const SETTING_SPECS = {
   transcribe: [
     { f: "model", label: "Model", kind: "model" },
     { f: "language", label: "Language", kind: "text", def: "auto" },
+  ],
+  cleanvoice: [
+    { f: "model", label: "Model", kind: "model" },
+    { f: "url", label: "Public link (when nothing is wired)", kind: "text" },
+  ],
+  model3d: [
+    { f: "model", label: "Model", kind: "model" },
+  ],
+  endpoint: [
+    { f: "url", label: "URL", kind: "text", def: "http://127.0.0.1:8787/v1/chat/completions" },
+    { f: "mode", label: "Mode", kind: "select", options: ["chat", "image", "video", "audio", "json"], def: "chat" },
+    { f: "model", label: "Model", kind: "text", def: "local" },
+    { f: "auth", label: "Authorization (optional)", kind: "text", def: "" },
   ],
   join: [{ f: "sep", label: "Separator (use \\n for a line break)", kind: "text", def: " " }],
   inpaint: [

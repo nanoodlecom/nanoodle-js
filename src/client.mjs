@@ -79,6 +79,22 @@ export function sleep(ms, signal) {
  * NanoGPT transport. `baseUrl` and `fetch` are injectable (that's how the offline test harness runs);
  * pollIntervals / timeouts are per-media-kind knobs (ms).
  */
+/**
+ * GLB URL from a 3D status poll. A completed payload is 3D only when
+ * output.kind is "3d" or output.format is "glb" — a bare video url is not a model.
+ * Prefers model_url, then model.url, video.url, then videoUrls[0].
+ */
+export function model3dStatusUrl(s) {
+  const out = (s && s.data && s.data.output) || (s && s.output) || {};
+  const kind = String(out.kind || "").toLowerCase();
+  const format = String(out.format || "").toLowerCase();
+  if (kind !== "3d" && format !== "glb") return "";
+  const list = Array.isArray(out.videoUrls) ? out.videoUrls : [];
+  const first = list.length ? list[0] : null;
+  const fromList = typeof first === "string" ? first : (first && first.url) || "";
+  return out.model_url || (out.model && out.model.url) || (out.video && out.video.url) || fromList || "";
+}
+
 export class NanoClient {
   constructor({ apiKey, baseUrl = "https://nano-gpt.com", fetch = globalThis.fetch, pollIntervals = {}, timeouts = {}, payment } = {}) {
     // non-enumerable: console.log/util.inspect/JSON.stringify of a client (or a Workflow holding
@@ -91,8 +107,9 @@ export class NanoClient {
     this.pollIntervals = { video: 5000, audio: 3000, x402: 3000, ...pollIntervals };
     // video: no default deadline — NanoGPT jobs keep running server-side and long renders
     // routinely exceed 10 min. Pass timeouts.video (ms) to cap a headless/CI run. Audio keeps
-    // a 5-min default (shorter jobs; still overridable).
-    this.timeouts = { video: Infinity, audio: 300000, ...timeouts };
+    // a 5-min default (shorter jobs; still overridable). 3D stops at 25 min (the editor's
+    // MODEL3D_DEADLINE_MS); the job may still be running after that.
+    this.timeouts = { video: Infinity, audio: 300000, model3d: 25 * 60 * 1000, ...timeouts };
   }
 
   _auth() {
@@ -240,7 +257,10 @@ export class NanoClient {
   // io.resume (a runId) skips the submit — and its charge — and goes straight to
   // polling: how a timed-out job is picked back up without paying twice.
   async video(model, prompt, opts = {}, imageDataUrl, { onCost, onPoll, onRunId, resume, signal } = {}) {
-    const body = { model, prompt };
+    const is3d = opts.mediaKind === "model3d";
+    const body = { model };
+    // 3D omits an empty prompt (image-only models). Video still sends a blank prompt.
+    if (!(is3d && !String(prompt || "").trim())) body.prompt = prompt;
     if (opts.duration) body.duration = opts.duration;
     if (opts.aspect_ratio) body.aspect_ratio = opts.aspect_ratio;
     if (opts.resolution) body.resolution = opts.resolution;
@@ -276,10 +296,11 @@ export class NanoClient {
     }
 
     const t0 = Date.now();
-    const videoCap = this.timeouts.video;
+    const videoCap = is3d ? this.timeouts.model3d : this.timeouts.video;
+    const pollEvery = is3d ? (this.pollIntervals.model3d || this.pollIntervals.video) : this.pollIntervals.video;
     // Infinity/non-finite = wait forever (default). Finite ms = headless/CI cap.
     while (!Number.isFinite(videoCap) || Date.now() - t0 < videoCap) {
-      await sleep(this.pollIntervals.video, signal);
+      await sleep(pollEvery, signal);
       let s;
       try {
         s = await (await this._get("/api/video/status?requestId=" + encodeURIComponent(runId), signal)).json();
@@ -290,16 +311,23 @@ export class NanoClient {
       const st = String((s.data && s.data.status) || s.status || "").toUpperCase();
       if (onPoll) onPoll({ status: st, elapsedMs: Date.now() - t0, runId });
       if (st === "COMPLETED" || st === "SUCCEEDED") {
+        if (is3d) {
+          const url = model3dStatusUrl(s);
+          if (!url) throw new NanoodleError("completed but no model url");
+          return url;
+        }
         const out = (s.data && s.data.output) || s.output || {};
         const url = (out.video && out.video.url) || out.url || (Array.isArray(out.video) ? out.video[0] && out.video[0].url : null);
         if (!url) throw new NanoodleError("completed but no video url");
         return url;
       }
       if (["FAILED", "ERROR", "CANCELED"].includes(st)) {
-        throw new NanoodleError("video failed: " + ((s.data && s.data.error) || st));
+        const why = (s.data && s.data.error) || st;
+        throw new NanoodleError((is3d ? "3D failed: " : "video failed: ") + why);
       }
     }
-    throw new NanoodleError(`video timed out (${Math.round(videoCap / 1000)}s) — the job may still be running on NanoGPT's side`, { code: "timeout" });
+    const label = is3d ? "3D" : "video";
+    throw new NanoodleError(`${label} timed out (${Math.round(videoCap / 1000)}s) — the job may still be running on NanoGPT's side`, { code: "timeout" });
   }
 
   /**

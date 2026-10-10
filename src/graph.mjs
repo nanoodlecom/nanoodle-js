@@ -40,6 +40,7 @@ export const NODE_TYPES = {
   upload:  { title: "Image input",     inputs: [], outputs: [{ name: "image", type: "image" }], local: true },
   aupload: { title: "Audio input",     inputs: [], outputs: [{ name: "audio", type: "audio" }], local: true },
   vupload: { title: "Video input",     inputs: [], outputs: [{ name: "video", type: "video" }], local: true },
+  mupload: { title: "3D input",        inputs: [], outputs: [{ name: "model", type: "model3d" }], local: true },
   choice:  { title: "Choice",          inputs: [], outputs: [{ name: "text", type: "text" }], local: true },
   join:    { title: "Join",            inputs: ["a", "b"], outputs: [{ name: "text", type: "text" }], local: true },
   llm:     { title: "LLM",             inputs: [], outputs: [{ name: "text", type: "text" }], network: true },
@@ -51,6 +52,7 @@ export const NODE_TYPES = {
   decide:  { title: "Decide",          inputs: ["text"], outputs: [{ name: "text", type: "text" }, { name: "image", type: "image" }], network: true }, // img1… candidates (IMG_PORT_RE)
   tvideo:  { title: "Text→Video",      inputs: [], outputs: [{ name: "video", type: "video" }], network: true },
   ivideo:  { title: "Image→Video",     inputs: ["image"], outputs: [{ name: "video", type: "video" }], network: true },
+  model3d: { title: "3D model",        inputs: ["image"], outputs: [{ name: "model", type: "model3d" }], network: true },
   vedit:   { title: "Video edit",      inputs: ["video"], outputs: [{ name: "video", type: "video" }], network: true },
   vframes: { title: "Video → frames",  inputs: ["video"], outputs: [{ name: "frame1", type: "image" }], local: true, framesOut: true }, // dynamic frame1..N
   combine: { title: "Combine videos",  inputs: [], outputs: [{ name: "video", type: "video" }], local: true },
@@ -62,6 +64,10 @@ export const NODE_TYPES = {
   trim:    { title: "Trim audio",      inputs: ["audio"], outputs: [{ name: "audio", type: "audio" }], local: true },
   extractaudio: { title: "Extract audio", inputs: ["video"], outputs: [{ name: "audio", type: "audio" }], local: true },
   transcribe: { title: "Transcribe",   inputs: ["audio"], outputs: [{ name: "text", type: "text" }], network: true },
+  cleanvoice: { title: "Clean voice", inputs: ["audio", "video"], outputs: [{ name: "audio", type: "audio" }], network: true },
+  // Custom URL — not a NanoGPT call, so `network` stays unset (no API key required).
+  // Output port follows fields.mode (see deriveOutputs / endpointOutPort).
+  endpoint: { title: "Custom endpoint", inputs: ["text", "image", "audio", "video"], outputs: [{ name: "text", type: "text" }] },
   comment: { title: "Comment",         inputs: [], outputs: [], note: true, local: true },
 };
 
@@ -105,7 +111,10 @@ const MEDIA_FIELD_KEYS = ["image", "mask", "audio", "video"];
 const MEDIA_URL_RE = /^(data:|https?:)/i;
 
 function scrubMediaPlaceholders(n, warnings) {
-  for (const k of MEDIA_FIELD_KEYS) {
+  // mupload stores the .glb on fields.model. That key is an AI model id on every
+  // other node, so it is only treated as media here.
+  const keys = n.type === "mupload" ? MEDIA_FIELD_KEYS.concat(["model"]) : MEDIA_FIELD_KEYS;
+  for (const k of keys) {
     const v = n.fields[k];
     if (v == null || v === "" || (typeof v === "string" && MEDIA_URL_RE.test(v.trim()))) continue;
     const shown = typeof v === "string"

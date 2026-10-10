@@ -18,6 +18,18 @@
 
 import { REF_PORT_RE } from "./graph.mjs";
 import { pricingAdvertisesRefs } from "./catalog.mjs";
+import { cleanVoiceEstSeconds, CLEANVOICE_DEFAULT_MODEL } from "./cleanvoice.mjs";
+
+const MODEL3D_DEFAULT_MODEL = "tripo3d/v2.5";
+
+/** Model id the run will actually send: the field, or the runner's default when the field is blank. */
+function pricedModelId(node) {
+  const id = node.fields && String(node.fields.model || "").trim();
+  if (id) return id;
+  if (node.type === "model3d") return MODEL3D_DEFAULT_MODEL;
+  if (node.type === "cleanvoice") return CLEANVOICE_DEFAULT_MODEL;
+  return "";
+}
 
 // node type → pricing "kind" == which catalog it's priced from + which unit fn.
 // Mirrors the app's SETTING_MODEL_KIND. This set is exactly the billable
@@ -34,7 +46,8 @@ const PRICE_KIND = {
   llm: "chat", vision: "chat", decide: "chat",
   image: "image", edit: "image", inpaint: "image",
   tvideo: "video", ivideo: "video", vedit: "video", lipsync: "video",
-  music: "audio", remix: "audio", tts: "audio", transcribe: "audio",
+  music: "audio", remix: "audio", tts: "audio", transcribe: "audio", cleanvoice: "audio",
+  model3d: "model3d",
 };
 
 // Fallback assumptions when a run's real quantity isn't knowable up front.
@@ -75,16 +88,45 @@ function videoLoraOn(fields) {
   return rows.some((r) => r && String(r.url || "").trim() !== "");
 }
 
+// Untouched audio switch: modelOpts omits the key. The checkbox paints the catalog
+// default and only writes it once the user flips it; the generate-video body omits
+// it the same way. NanoGPT then bills that catalog default (42 models default on).
+// An explicit false stays on the silent tier. No param descriptor stays off.
+function videoAudioOn(fields, audioCtx) {
+  const f = fields || {};
+  const opts = (f.modelOpts && typeof f.modelOpts === "object") ? f.modelOpts : {};
+  let explicit = false;
+  for (const k in opts) {
+    if (/audio/i.test(k) && !/^(no|disable|without|mute)/i.test(k)) {
+      explicit = true;
+      const val = opts[k];
+      if (val === true || val === "true" || val === 1 || val === "1" || val === "on" || val === "yes") return true;
+    }
+  }
+  if (explicit) return false;
+  const ctx = audioCtx || {}, pp = ctx.params || {}, dflt = ctx.defaults || {};
+  for (const k of Object.keys(pp)) {
+    const d = pp[k];
+    if (!d || typeof d !== "object") continue;
+    if (d.type !== "switch" && d.type !== "boolean") continue;
+    if (!/audio/i.test(k) || /^(no|disable|without|mute)/i.test(k)) continue;
+    const def = dflt[k] != null ? dflt[k] : d.default;
+    return def === true || def === "true" || def === 1 || def === "1" || def === "on" || def === "yes";
+  }
+  return false;
+}
+
 // A video run bills a HIGHER tier when reference images are wired or the model's
 // audio switch is on. refWired comes from the graph wiring; the audio switch /
 // reference mode ride in fields.modelOpts. refWired may be a boolean (legacy
-// "any refs?") or a count of wired refN ports.
-function videoUnitUsd(pricing, fields, refWired) {
+// "any refs?") or a count of wired refN ports. audioCtx is
+// { params, defaults } from the catalog's supported_parameters — an untouched
+// switch uses that default instead of assuming audio off.
+function videoUnitUsd(pricing, fields, refWired, audioCtx) {
   const p = pricing || {};
   const f = fields || {};
   const opts = (f.modelOpts && typeof f.modelOpts === "object") ? f.modelOpts : {};
-  let audioOn = false;
-  for (const k in opts) { if (/audio/i.test(k) && !/^(no|disable|without|mute)/i.test(k)) { const val = opts[k]; if (val === true || val === "true" || val === 1 || val === "1" || val === "on" || val === "yes") { audioOn = true; break; } } }
+  const audioOn = videoAudioOn(f, audioCtx);
   const refCount = typeof refWired === "number" ? Math.max(0, refWired | 0) : (refWired ? 1 : 0);
   const refOn = refCount > 0 || /reference/i.test(String(opts.mode || ""));
   let usd = videoBaseUsd(p, f, audioOn, refOn);
@@ -213,6 +255,11 @@ function audioUnitUsd(pricing, chars, seconds) {
   if (p.per_prompt_char_block != null) { const bs = _num(p.prompt_char_block_size) || 1; return Math.max(Math.ceil(c / bs) * _num(p.per_prompt_char_block), _num(p.minimum) || 0); }
   if (p.per_generation != null) return _num(p.per_generation);
   if (p.per_second != null) return Math.max(_num(p.per_second) * secs, _num(p.minimum) || 0);
+  // per started billing interval (ElevenLabs Music / VEED Clean Audio: $/started minute)
+  if (p.per_billing_interval != null) {
+    const iv = _num(p.billing_interval_seconds) || 60;
+    return Math.max(Math.ceil(secs / iv) * _num(p.per_billing_interval), _num(p.minimum) || 0);
+  }
   if (p.per_minute != null) return _num(p.per_minute) * EST.sttMinutes;
   return null;
 }
@@ -244,7 +291,7 @@ export function graphModelKinds(graph) {
 // only to detect wired reference-image ports (video ref tier).
 function nodeUnitUsd(node, catItem, graph) {
   const kind = PRICE_KIND[node.type]; if (!kind) return null;
-  const id = node.fields && node.fields.model; if (!id) return null;
+  const id = pricedModelId(node); if (!id) return null;
   const m = catItem; if (!m) return null;
   const pricing = m.pricing, f = node.fields || {};
   if (kind === "image") {
@@ -260,9 +307,11 @@ function nodeUnitUsd(node, catItem, graph) {
     const refCount = (modelHasRefs && graph && Array.isArray(graph.links))
       ? graph.links.filter((l) => l.to && l.to.node === node.id && REF_PORT_RE.test(l.to.port)).length
       : 0;
-    const u = videoUnitUsd(pricing, f, refCount);
+    const audioCtx = { params: (sp.parameters && typeof sp.parameters === "object") ? sp.parameters : {}, defaults: sp.defaults || {} };
+    const u = videoUnitUsd(pricing, f, refCount, audioCtx);
     return (u != null && isFinite(u)) ? u : null;
   }
+  if (kind === "model3d") return _num(pricing && pricing.per_run);
   if (node.type === "decide") {
     // input tokens only (twin of the editor's Decide estimate); pick asks twice (in order + reversed)
     const imgs = (graph && Array.isArray(graph.links))
@@ -278,6 +327,15 @@ function nodeUnitUsd(node, catItem, graph) {
     return chatUnitUsd(pricing, inTok, outTok);
   }
   if (kind === "audio") {
+    if (node.type === "cleanvoice") {
+      // Bills the wired source's duration knob (else 30 s). per_minute models ignore seconds.
+      const link = graph && Array.isArray(graph.links)
+        ? graph.links.find((l) => l.to && l.to.node === node.id && (l.to.port === "audio" || l.to.port === "video"))
+        : null;
+      const src = link && Array.isArray(graph.nodes) ? graph.nodes.find((x) => x.id === link.from.node) : null;
+      const u = audioUnitUsd(pricing, undefined, cleanVoiceEstSeconds(src && src.fields));
+      return (u != null && isFinite(u)) ? u : null;
+    }
     const chars = node.type === "transcribe" ? undefined : ((f.prompt || "").length || EST.ttsChars);
     const secs = audioBilledSeconds(m.supported_parameters, f);
     const u = audioUnitUsd(pricing, chars, secs);
@@ -290,7 +348,7 @@ function nodeUnitUsd(node, catItem, graph) {
  * Forecast a graph's per-run cost from the public catalog.
  *
  * @param {{nodes:Array, links?:Array}} graph  a materialized graph (Workflow#graph)
- * @param {{chat?:Array, image?:Array, video?:Array, audio?:Array}} catalogs
+ * @param {{chat?:Array, image?:Array, video?:Array, audio?:Array, model3d?:Array}} catalogs
  *        raw catalog arrays (as /api/v1/*-models return them, `.data`), indexed here by model id
  * @returns {{usd:number, exact:boolean, priced:number, unpriced:number}}
  *          usd = sum over priced billable nodes; exact = every priced node was image
@@ -299,7 +357,7 @@ function nodeUnitUsd(node, catItem, graph) {
 export function estimateGraphCost(graph, catalogs = {}) {
   const nodes = (graph && Array.isArray(graph.nodes)) ? graph.nodes : [];
   const byKind = {};
-  for (const kind of ["chat", "image", "video", "audio"]) {
+  for (const kind of ["chat", "image", "video", "audio", "model3d"]) {
     const arr = Array.isArray(catalogs[kind]) ? catalogs[kind] : [];
     const map = new Map();
     for (const m of arr) if (m && m.id != null) map.set(String(m.id), m);
@@ -308,12 +366,18 @@ export function estimateGraphCost(graph, catalogs = {}) {
   let usd = 0, priced = 0, unpriced = 0, exact = true;
   for (const n of nodes) {
     const kind = PRICE_KIND[n.type]; if (!kind) continue;   // free/local node
-    const id = n.fields && n.fields.model;
-    const m = id != null ? byKind[kind].get(String(id)) : null;
+    const id = pricedModelId(n);
+    const m = id ? byKind[kind].get(String(id)) : null;
     const u = m ? nodeUnitUsd(n, m, graph) : null;
     if (u == null || !isFinite(u)) { unpriced++; continue; }
     usd += u; priced++;
-    if (kind !== "image") exact = false;
+    if (kind === "model3d") {
+      const by = m.pricing && m.pricing.per_run_by_variant;
+      if (by && typeof by === "object") {
+        const vals = Object.values(by).map(_num).filter((v) => v != null);
+        if (vals.length && Math.min(...vals) !== Math.max(...vals)) exact = false;
+      }
+    } else if (kind !== "image") exact = false;
   }
   return { usd, exact, priced, unpriced };
 }

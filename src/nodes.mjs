@@ -7,6 +7,8 @@ import {
   extractVideoFrames, concatVideos, muxSoundtrack, maskToSource, fitImageInline, fitImageJpeg,
 } from "./local-media.mjs";
 import { decideRun, decideImageLimits } from "./decide.mjs";
+import { cleanVoiceRun, CLEANVOICE_DEFAULT_MODEL } from "./cleanvoice.mjs";
+import { runEndpoint } from "./endpoint.mjs";
 
 function mdl(n) {
   const m = String((n.fields && n.fields.model) || "").trim();
@@ -502,6 +504,13 @@ export const RUNNERS = {
     }
     return { video: n.fields.video };
   },
+  async mupload(n) {
+    if (!n.fields.model) {
+      if (optionalNode(n)) return { model: "" };
+      throw new NanoodleError("no 3D file — drop a .glb first");
+    }
+    return { model: n.fields.model };
+  },
 
   async choice(n) {
     const opts = String(n.fields.options || "").split("\n").map((s) => s.trim()).filter(Boolean);
@@ -791,4 +800,58 @@ export const RUNNERS = {
     if (!inp.audio) throw new NanoodleError("no audio input");
     return { text: await ctx.transcribe(mdl(n), inp.audio, (n.fields.language || "auto").trim()) };
   },
+
+  // 🎧 Clean voice: hosted audio or video → voice-only audio. data:/blob: refused before any request.
+  async cleanvoice(n, inp, ctx) {
+    const model = String((n.fields && n.fields.model) || "").trim() || CLEANVOICE_DEFAULT_MODEL;
+    return cleanVoiceRun(model, inp, n.fields, (m, extra) => ctx.audio(m, "", extra));
+  },
+
+  // 🧊 3D model: image and/or text → GLB via the video submit/poll API (mediaKind model3d).
+  async model3d(n, inp, ctx) {
+    const model = String((n.fields && n.fields.model) || "").trim() || MODEL3D_IMAGE_DEFAULT;
+    const mods = model3dInputMods(ctx && ctx.catalog, model);
+    const prompt = promptOf(n, inp);
+    let image = mods.image ? (inp.image || "") : "";
+    if (inp.image && !mods.image && ctx && ctx.progress) {
+      ctx.progress("This model takes text only — the image wire stays, but this run ignores it.");
+    }
+    if (prompt && !mods.text && ctx && ctx.progress) {
+      ctx.progress("This model takes an image only — the prompt stays, but this run ignores it.");
+    }
+    if (mods.image && !mods.text && !image) throw new NanoodleError("Connect an image first.");
+    if (mods.text && !mods.image && !prompt) throw new NanoodleError("Add a prompt first.");
+    if (mods.image && mods.text && !image && !prompt) throw new NanoodleError("Add a prompt or connect an image first.");
+    if (image) image = await fitImage(image, ctx, "source image");
+    const url = await ctx.video(model, mods.text ? prompt : "", {
+      extra: n.fields.modelOpts || {},
+      mediaKind: "model3d",
+    }, image || null);
+    return { model: url };
+  },
+
+  // 🔌 Custom endpoint: POST to the graph's own URL. ctx.fetch so tests can point it at a mock.
+  async endpoint(n, inp, ctx) {
+    return runEndpoint(n, inp, { fetch: ctx && ctx.fetch, signal: ctx && ctx.signal });
+  },
 };
+
+// Image→3D (Tripo) takes a photo only. Hunyuan Rapid takes text and an optional image.
+// Anything else, including a catalog miss, accepts either — the editor's same fallback.
+const MODEL3D_IMAGE_DEFAULT = "tripo3d/v2.5";
+const MODEL3D_TEXT_DEFAULT = "wavespeed-ai/hunyuan-3d-v3.1-rapid";
+
+function model3dInputMods(catalog, id) {
+  const it = catItem(catalog, "model3d", id);
+  const raw = it && (
+    (Array.isArray(it.modalities) && it.modalities)
+    || (it.architecture && Array.isArray(it.architecture.input_modalities) && it.architecture.input_modalities)
+  );
+  if (raw && raw.length) {
+    const mods = raw.filter((x) => x === "image" || x === "text");
+    if (mods.length) return { image: mods.includes("image"), text: mods.includes("text") };
+  }
+  if (id === MODEL3D_IMAGE_DEFAULT) return { image: true, text: false };
+  if (id === MODEL3D_TEXT_DEFAULT) return { image: true, text: true };
+  return { image: true, text: true };
+}
