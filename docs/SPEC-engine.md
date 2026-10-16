@@ -64,6 +64,8 @@ body = { model, prompt }
 + dims from node fields: aspect → aspect_ratio, duration → duration, resolution → resolution
   (catalog can rename e.g. aspect→orientation / duration→seconds; WITHOUT catalog use the standard names)
 + ivideo/lipsync source image → body.imageDataUrl (data: or https, verbatim)
+  (lipsync: a preset-only avatar — catalog row with image_to_video false, e.g. heygen/avatar-v —
+   needs no portrait and never sends one; catalog miss keeps the portrait requirement)
 + ivideo wired endframe → body.last_image
 + vedit source: https URL → body.videoUrl ; local data → body.videoDataUrl
 + lipsync audio: https → body.audioUrl ; local → body.audioDataUrl

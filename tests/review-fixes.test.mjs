@@ -28,6 +28,24 @@ test("image LoRA: fields.loras → lora_url/lora_strength on the image payload",
   assert.equal(body.lora_strength, 0.8);
 });
 
+test("image LoRA: FLUX.2 Klein takes numbered slots; FLUX.3 Klein (no lora_url) gets none", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /v1/images/generations", { json: { data: [{ b64_json: PNG_B64 }], cost: 0.02 } });
+  srv.script("POST /v1/images/generations", { json: { data: [{ b64_json: PNG_B64 }], cost: 0.02 } });
+  const loras = [{ url: "https://host.example/k.safetensors", strength: "0.6" }];
+
+  await one(srv, { id: "n1", type: "image", fields: { model: "flux-2-klein-9b", prompt: "cat", loras } }).run({});
+  const f2 = srv.requests[0].json;
+  assert.equal(f2.lora_url_1, "https://host.example/k.safetensors");
+  assert.equal(f2.lora_scale_1, 0.6);
+
+  // nanoodle #732 twin: /klein/ alone matched blackforestlabs/flux-3/klein/* — it has no lora_url
+  await one(srv, { id: "n1", type: "image", fields: { model: "blackforestlabs/flux-3/klein/text-to-image", prompt: "cat", loras } }).run({});
+  const f3 = srv.requests[1].json;
+  for (const k of Object.keys(f3)) assert.ok(!/lora/i.test(k), "FLUX.3 Klein must not carry LoRA params (got " + k + ")");
+});
+
 test("image LoRA: legacy loraUrl/loraStrength fields still ride", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());
