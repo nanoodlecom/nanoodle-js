@@ -323,3 +323,85 @@ test("video dims: leftover Omni v1.1 resolution omitted on v1; listed 4k still p
   const miss = srv.of("POST /api/generate-video")[4].json;
   assert.equal(miss.resolution, undefined, "uncatalogued model omits leftover resolution");
 });
+
+/* ---- lipsync: preset-only avatars (audio→video, no image_to_video) need no portrait ---- */
+
+const AVATAR_CATALOG = { video: [
+  { id: "heygen/avatar-v", architecture: { modality: "audio->video" }, capabilities: { image_to_video: false, audio_input: true } },
+  { id: "heygen/avatar-iv", architecture: { modality: "image+audio->video" }, capabilities: { image_to_video: true, audio_input: true } },
+] };
+const lipsyncGraph = (model, withImage) => ({
+  nodes: [
+    ...(withImage ? [{ id: "u1", type: "upload", fields: { image: PNG_DATA_URL } }] : []),
+    { id: "a1", type: "aupload", fields: { audio: WAV_DATA_URL } },
+    { id: "l1", type: "lipsync", fields: { model, prompt: "" } },
+  ],
+  links: [
+    ...(withImage ? [{ id: "li", from: { node: "u1", port: "image" }, to: { node: "l1", port: "image" } }] : []),
+    { id: "la", from: { node: "a1", port: "audio" }, to: { node: "l1", port: "audio" } },
+  ],
+});
+const scriptVideo = (srv) => {
+  srv.script("POST /api/generate-video", { json: { runId: "v_av", cost: 0.4 } });
+  srv.script("GET /api/video/status", { json: { status: "COMPLETED", output: { url: "https://cdn.example/av.mp4" } } });
+};
+
+test("lipsync preset-only avatar (catalog image_to_video false): runs on audio alone, no imageDataUrl", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  scriptVideo(srv);
+  const res = await Workflow.fromJSON(lipsyncGraph("heygen/avatar-v", false), mockOpts(srv, { catalog: AVATAR_CATALOG })).run({});
+  const body = srv.of("POST /api/generate-video")[0].json;
+  assert.equal(body.model, "heygen/avatar-v");
+  assert.equal(body.audioDataUrl, WAV_DATA_URL);
+  assert.ok(!("imageDataUrl" in body), "preset-only avatar sends no portrait");
+  assert.equal(res.get("l1").url, "https://cdn.example/av.mp4");
+});
+
+test("lipsync preset-only avatar: a wired image is NOT forwarded (twin of the app's built-in runner)", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  scriptVideo(srv);
+  await Workflow.fromJSON(lipsyncGraph("heygen/avatar-v", true), mockOpts(srv, { catalog: AVATAR_CATALOG })).run({});
+  assert.ok(!("imageDataUrl" in srv.of("POST /api/generate-video")[0].json));
+});
+
+test("lipsync preset-only check also honors a normalized catalog row (i2v:false)", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  scriptVideo(srv);
+  const catalog = { video: [{ id: "heygen/avatar-v", i2v: false, avatar: true }] };
+  await Workflow.fromJSON(lipsyncGraph("heygen/avatar-v", false), mockOpts(srv, { catalog })).run({});
+  assert.ok(!("imageDataUrl" in srv.of("POST /api/generate-video")[0].json));
+});
+
+test("lipsync image_to_video avatar (Avatar IV) still demands a portrait — no request without one", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  await assert.rejects(
+    Workflow.fromJSON(lipsyncGraph("heygen/avatar-iv", false), mockOpts(srv, { catalog: AVATAR_CATALOG })).run({}),
+    /no image input/);
+  assert.equal(srv.of("POST /api/generate-video").length, 0);
+});
+
+test("lipsync image_to_video avatar forwards the wired portrait", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  scriptVideo(srv);
+  await Workflow.fromJSON(lipsyncGraph("heygen/avatar-iv", true), mockOpts(srv, { catalog: AVATAR_CATALOG })).run({});
+  assert.equal(srv.of("POST /api/generate-video")[0].json.imageDataUrl, PNG_DATA_URL);
+});
+
+test("lipsync catalog miss / no catalog keeps the portrait requirement (OmniHuman, H3 Max Lip Sync, …)", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  for (const model of ["bytedance/omnihuman-v2", "minimax/h3-max/lip-sync/image-to-video", "heygen/avatar-v"]) {
+    // no catalog at all — even Avatar V can't be proven preset-only, so the old rule holds
+    await assert.rejects(Workflow.fromJSON(lipsyncGraph(model, false), mockOpts(srv)).run({}), /no image input/);
+    // catalog present but model absent
+    await assert.rejects(
+      Workflow.fromJSON(lipsyncGraph(model === "heygen/avatar-v" ? "some/other-avatar" : model, false), mockOpts(srv, { catalog: AVATAR_CATALOG })).run({}),
+      /no image input/);
+  }
+  assert.equal(srv.of("POST /api/generate-video").length, 0);
+});
