@@ -273,7 +273,7 @@ export class Workflow {
     const promises = new Map();
     const mediaFetch = this.client.fetch;
 
-    const ctxFor = (node, rec) => {
+    const ctxFor = (node, rec, nodeSignal = ac.signal) => {
       const onCost = (c) => {
         if (!c) return;
         if (c.usd != null) { rec.costUsd = (rec.costUsd || 0) + c.usd; cost.total += c.usd; }
@@ -281,7 +281,7 @@ export class Workflow {
         if (c.balance != null) cost.balance = c.balance;
       };
       const onPoll = (info) => emit({ type: "poll", nodeId: node.id, name: displayName(node), ...info });
-      const io = { onCost, onPoll, signal: ac.signal };
+      const io = { onCost, onPoll, signal: nodeSignal };
       return {
         chat: (messages, model, opts) => this.client.chat(messages, model, opts, io),
         decide: (body) => this.client.decide(body, io),
@@ -292,7 +292,7 @@ export class Workflow {
         fetchMedia: (url) => this.client.fetchMediaDataUrl(url, io),
         // local media (resize/combine/…) — same fetch + signal as network I/O
         fetch: mediaFetch,
-        signal: ac.signal,
+        signal: nodeSignal,
         catalog: this.catalog,
         progress: (msg) => emit({ type: "node-progress", nodeId: node.id, name: displayName(node), message: msg }),
       };
@@ -309,15 +309,19 @@ export class Workflow {
     };
     const execNode = async (n) => {
       const rec = nodesRec[n.id];
+      let nodeTimer = null, unlinkNode = null;
       try {
         throwIfAborted(ac.signal);
         const inbound = graph.links.filter((l) => l.to.node === n.id);
         const inp = {};
         let fields = effFields.get(n.id);
-        let upstreamFail = null, gatedBy = null;
+        let upstreamFail = null, gatedBy = null, skippedIn = 0;
         for (const l of inbound) {
           let srcOut;
-          try { srcOut = await promises.get(l.from.node); }
+          try {
+            srcOut = await promises.get(l.from.node);
+            if (nodesRec[l.from.node] && nodesRec[l.from.node].skippedOnError) { skippedIn++; continue; }
+          }
           catch {
             const g = gateOf(l.from.node);
             if (g) { if (!gatedBy) gatedBy = g; } else if (!upstreamFail) upstreamFail = displayName(byId.get(l.from.node));
@@ -337,6 +341,12 @@ export class Workflow {
         }
         // a real failure upstream wins over a gate (the browser runners agree): that is an error
         if (upstreamFail) throw new NanoodleError("upstream failed: " + upstreamFail);
+        // onError:"skip" upstreams leave their ports undefined (ignored above). A node whose
+        // EVERY wire comes from a skipped node has nothing left to work with — fail clearly.
+        if (inbound.length && skippedIn === inbound.length) {
+          throw new NanoodleError("all inputs were skipped after failing: " +
+            [...new Set(inbound.map((l) => displayName(byId.get(l.from.node))))].join(", "));
+        }
         if (gatedBy) {
           rec.status = "skipped";
           rec.gatedBy = gatedBy;
@@ -360,7 +370,28 @@ export class Workflow {
             `${fields.model} rejects prompts over ${fit.trimmed.cap}`);
         }
         const t0 = Date.now();
-        const out = await RUNNERS[n.type]({ ...n, fields }, inp, ctxFor(n, rec));
+        // Per-node timeout (fields.timeoutMs): a child controller linked to the run signal.
+        // The race guarantees the deadline even if a runner never observes its signal.
+        const timeoutMs = Number(fields.timeoutMs);
+        let nodeSignal = ac.signal, deadline = null;
+        if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+          const nac = new AbortController();
+          const onRunAbort = () => nac.abort(ac.signal.reason);
+          ac.signal.addEventListener("abort", onRunAbort, { once: true });
+          unlinkNode = () => ac.signal.removeEventListener("abort", onRunAbort);
+          nodeSignal = nac.signal;
+          deadline = new Promise((_, reject) => {
+            nodeTimer = setTimeout(() => {
+              const err = new NanoodleError(`node timed out after ${timeoutMs}ms`, { code: "timeout" });
+              nac.abort(err);
+              reject(err);
+            }, timeoutMs);
+          });
+          deadline.catch(() => {});
+        }
+        const work = RUNNERS[n.type]({ ...n, fields }, inp, ctxFor(n, rec, nodeSignal));
+        const out = deadline ? await Promise.race([work, deadline]) : await work;
+        if (deadline) throwIfAborted(nodeSignal);
         throwIfAborted(ac.signal);
         rec.status = "done";
         rec.out = out;
@@ -384,11 +415,24 @@ export class Workflow {
         if (learnPromptCap(this._promptCaps, n, e.message)) {
           e.message = e.message + " — noted: nanoodle keeps this model's prompt inside that limit from now on, so running again should succeed";
         }
-        rec.status = "error";
         rec.error = e.message;
-        errors.push({ nodeId: n.id, name: displayName(n), message: e.message });
+        errors.push({ nodeId: n.id, name: displayName(n), message: e.message, ...(e && e.code ? { code: e.code } : {}) });
+        // fields.onError:"skip" — a failed (or timed-out) node is recorded and skipped; its
+        // dependents see undefined ports. A run-level abort/timeout is never skipped.
+        const onError = (effFields.get(n.id) || {}).onError;
+        if (onError === "skip" && !ac.signal.aborted) {
+          rec.status = "skipped";
+          rec.skippedOnError = true;
+          rec.out = {};
+          emit({ type: "node-skipped", nodeId: n.id, name: displayName(n), reason: "error", error: e.message });
+          return {};
+        }
+        rec.status = "error";
         emit({ type: "node-error", nodeId: n.id, name: displayName(n), error: e.message });
         throw e;
+      } finally {
+        if (nodeTimer) clearTimeout(nodeTimer);
+        if (unlinkNode) unlinkNode();
       }
     };
 
@@ -459,6 +503,12 @@ export class Workflow {
         detail += ` (root cause — ${roots.map((e) => `"${e.name}": ${e.message}`).join("; ")})`;
       }
       throw new RunError("run failed — " + detail, result);
+    }
+    // onError:"skip" never makes a run succeed with nothing: if every output skipped, fail.
+    const skippedSinks = this.outputs.filter((o) => nodesRec[o.nodeId] && nodesRec[o.nodeId].skippedOnError);
+    if (this.outputs.length && skippedSinks.length === this.outputs.length) {
+      throw new RunError("run failed — every output was skipped after failing: " +
+        skippedSinks.map((o) => `"${o.key}": ${nodesRec[o.nodeId].error}`).join("; "), result);
     }
     return result;
   }

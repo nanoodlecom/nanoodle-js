@@ -90,6 +90,12 @@ export function optionalNode(node) {
   return v === true || v === "true";
 }
 
+/** Author-locked node: fields.locked keeps every field at its stored value (no inputs derived). */
+export function lockedNode(node) {
+  const v = node && node.fields && node.fields.locked;
+  return v === true || v === "true";
+}
+
 /** Is a wire landing on `port` of `node` a data input (vs a field override)? */
 export function isInputPort(node, port) {
   const t = NODE_TYPES[node.type];
