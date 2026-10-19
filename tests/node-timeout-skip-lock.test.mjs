@@ -20,7 +20,7 @@ function fakeFetch(seen = []) {
       });
     }
     const last = body.messages[body.messages.length - 1].content;
-    return new Response(JSON.stringify({ choices: [{ message: { content: `${body.model}:${last}` } }] }),
+    return new Response(JSON.stringify({ choices: [{ message: { content: `${body.model}:${last}` } }], x_nanogpt_pricing: { costUsd: 0.002 } }),
       { status: 200, headers: { "content-type": "application/json" } });
   };
 }
@@ -130,4 +130,69 @@ test("locked: node fields are not inputs and run with stored values; unlocked un
   assert.equal(seen[0].messages[0].content, "SYS");
   // a locked input key is rejected rather than silently overriding the stored value
   await assert.rejects(wf.run({ Label: "x" }));
+});
+
+test("cost exactness: a timed-out/skipped network node with no price makes costExact false", async () => {
+  const wf = Workflow.fromJSON(writersGraph("ok", "hang", { timeoutMs: 50 }), opts());
+  const r = await wf.run({});
+  assert.equal(r.nodes.w2.status, "skipped");
+  assert.equal(r.nodes.w2.costUsd, null);
+  assert.equal(r.costExact, false);
+  assert.ok(Math.abs(r.costUsd - 0.004) < 1e-12, "the priced nodes still sum");
+});
+
+test("cost exactness: all nodes priced and done stays exact", async () => {
+  const wf = Workflow.fromJSON(writersGraph("ok", "ok"), opts());
+  const r = await wf.run({});
+  assert.equal(r.costExact, true);
+});
+
+test("late callbacks: a fetch that ignores abort and reports cost after the run returns changes nothing", async () => {
+  let lateReport;
+  const fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    if (body.model === "stubborn") {
+      // ignores init.signal entirely; answers (with a price) only when the test says so
+      return new Promise((resolve) => { lateReport = () => resolve(new Response(JSON.stringify({
+        choices: [{ message: { content: "late" } }], x_nanogpt_pricing: { costUsd: 0.2 } }),
+        { status: 200, headers: { "content-type": "application/json" } })); });
+    }
+    return fakeFetch()(url, init);
+  };
+  const g = writersGraph("ok", "stubborn", { timeoutMs: 50 });
+  g.nodes[1].id = "w-a"; g.links.forEach((l) => { if (l.from.node === "w1") l.from.node = "w-a"; if (l.to.node === "w1") l.to.node = "w-a"; });
+  g.nodes[2].id = "w-b"; g.links.forEach((l) => { if (l.from.node === "w2") l.from.node = "w-b"; if (l.to.node === "w2") l.to.node = "w-b"; });
+  const events = [];
+  const wf = Workflow.fromJSON(g, { apiKey: "k", baseUrl: "http://fake.invalid", fetch, quiet: true });
+  const r = await wf.run({}, { onProgress: (e) => events.push(e) });
+  const before = { a: r.nodes["w-a"].costUsd, b: r.nodes["w-b"].costUsd, total: r.costUsd, exact: r.costExact, status: r.nodes["w-b"].status, n: events.length };
+  assert.equal(before.status, "skipped");
+  lateReport();
+  await new Promise((res) => setTimeout(res, 30));
+  assert.equal(r.nodes["w-a"].costUsd, before.a);
+  assert.equal(r.nodes["w-b"].costUsd, before.b);
+  assert.equal(r.nodes["w-b"].status, "skipped");
+  assert.equal(r.costUsd, before.total);
+  assert.equal(r.costExact, before.exact);
+  assert.equal(events.length, before.n, "no late progress events");
+});
+
+test("locked: a settings override aimed at a locked node is rejected", async () => {
+  const g = {
+    nodes: [
+      { id: "d", type: "text", name: "Draft", fields: { text: "hi" } },
+      { id: "w-a", type: "llm", name: "Writer", fields: { model: "ok", locked: true } },
+    ],
+    links: [{ from: { node: "d", port: "text" }, to: { node: "w-a", port: "prompt" } }],
+  };
+  const seen = [];
+  const wf = Workflow.fromJSON(g, opts(seen));
+  await assert.rejects(wf.run({}, { settings: { "w-a.model": "other" } }),
+    (e) => e.code === "locked" && /locked node w-a/.test(e.message));
+  assert.equal(seen.length, 0, "rejected before any call");
+  // unlocked: the same override still applies
+  g.nodes[1].fields.locked = false;
+  const wf2 = Workflow.fromJSON(g, opts(seen));
+  const r = await wf2.run({}, { settings: { "w-a.model": "other" } });
+  assert.equal(r.nodes["w-a"].out.text, "other:hi");
 });

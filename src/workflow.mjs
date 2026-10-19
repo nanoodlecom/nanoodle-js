@@ -1,5 +1,5 @@
 import { NanoodleError, RunError, UnsupportedNodeError } from "./errors.mjs";
-import { NODE_TYPES, displayName, isInputPort, materialize, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
+import { NODE_TYPES, displayName, isInputPort, lockedNode, materialize, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
 import { deriveInputs, deriveOutputs, deriveSettings, resolveInputKey, resolveSettingKey } from "./io.mjs";
 import { NanoClient } from "./client.mjs";
 import { MediaRef, coerceMediaInput } from "./media.mjs";
@@ -195,6 +195,13 @@ export class Workflow {
     const settingAssignments = [];
     for (const [key, value] of Object.entries(settings)) {
       const entry = resolveSettingKey(graph, this.settings, key);
+      const target = graph.nodes.find((x) => x.id === entry.nodeId);
+      if (lockedNode(target)) {
+        throw new NanoodleError(
+          `setting "${key}" targets locked node ${entry.nodeId} (${displayName(target)}) — ` +
+          `a locked node always runs with its stored fields, so settings can't override ${entry.nodeId}.${entry.field}`,
+          { code: "locked" });
+      }
       settingAssignments.push({ entry, value });
     }
 
@@ -273,14 +280,18 @@ export class Workflow {
     const promises = new Map();
     const mediaFetch = this.client.fetch;
 
+    // Once a node is finalized (done / skipped / error) or the run has settled, late
+    // callbacks from a runner that ignored its abort signal must not mutate anything.
+    let runSettled = false;
+    const frozen = (rec) => runSettled || rec.final === true;
     const ctxFor = (node, rec, nodeSignal = ac.signal) => {
       const onCost = (c) => {
-        if (!c) return;
+        if (!c || frozen(rec)) return;
         if (c.usd != null) { rec.costUsd = (rec.costUsd || 0) + c.usd; cost.total += c.usd; }
         else cost.exact = false;
         if (c.balance != null) cost.balance = c.balance;
       };
-      const onPoll = (info) => emit({ type: "poll", nodeId: node.id, name: displayName(node), ...info });
+      const onPoll = (info) => frozen(rec) ? undefined : emit({ type: "poll", nodeId: node.id, name: displayName(node), ...info });
       const io = { onCost, onPoll, signal: nodeSignal };
       return {
         chat: (messages, model, opts) => this.client.chat(messages, model, opts, io),
@@ -294,7 +305,7 @@ export class Workflow {
         fetch: mediaFetch,
         signal: nodeSignal,
         catalog: this.catalog,
-        progress: (msg) => emit({ type: "node-progress", nodeId: node.id, name: displayName(node), message: msg }),
+        progress: (msg) => frozen(rec) ? undefined : emit({ type: "node-progress", nodeId: node.id, name: displayName(node), message: msg }),
       };
     };
 
@@ -362,6 +373,7 @@ export class Workflow {
         // and report it below. The graph's own prompts are never rewritten to avoid this.
         const fit = withFittedPrompt(n, fields, { catalog: this.catalog, learned: this._promptCaps });
         fields = fit.fields;
+        rec.started = true;
         emit({ type: "node-start", nodeId: n.id, name: displayName(n) });
         // A fitted prompt changed what this run pays for — never silent, even headless.
         if (fit.trimmed) {
@@ -393,12 +405,14 @@ export class Workflow {
         const out = deadline ? await Promise.race([work, deadline]) : await work;
         if (deadline) throwIfAborted(nodeSignal);
         throwIfAborted(ac.signal);
+        rec.final = true;
         rec.status = "done";
         rec.out = out;
         rec.ms = Date.now() - t0;
         emit({ type: "node-done", nodeId: n.id, name: displayName(n), ms: rec.ms, costUsd: rec.costUsd });
         return out;
       } catch (e) {
+        rec.final = true;
         if (e instanceof GateSkip) throw e;
         // ⚖️ Decide gate answered no: a settled, billed decision — not an error. Downstream skips.
         if (e && e.gate === true && !ac.signal.aborted) {
@@ -444,10 +458,19 @@ export class Workflow {
       }
       await Promise.allSettled([...promises.values()]);
     } finally {
+      runSettled = true;
       if (timer) clearTimeout(timer);
       if (signal) signal.removeEventListener("abort", onOuterAbort);
     }
 
+    // A network node that started but was skipped, timed out or aborted without ever reporting
+    // a price may still have been billed: the total can't be exact.
+    for (const n of order) {
+      const rec = nodesRec[n.id];
+      const t = NODE_TYPES[n.type];
+      if (!rec || !rec.started || rec.status === "done" || rec.costUsd != null || (t && t.local)) continue;
+      cost.exact = false;
+    }
     // ---- result ----
     const outputsMap = {};
     for (const o of this.outputs) {

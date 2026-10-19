@@ -204,9 +204,17 @@ Three optional keys inside a node's `fields` (saved with the graph, no format ch
   node whose **every** input was skipped fails with "all inputs were skipped
   after failing", and the run still fails if a non-skipped output fails or if
   every output was skipped. A run-level abort is never skipped.
+  A network node that started but was skipped, timed out or aborted without
+  reporting a price makes `result.costExact` false. Once a node is finalized
+  (and once the run settles), late cost, progress or output callbacks from a
+  runner that ignored its abort signal are ignored, so `result.nodes` and the
+  cost totals don't change afterwards.
 - **`locked: true`**: none of the node's fields become inputs (`wf.inputs`,
-  CLI `--input`, MCP tool args), so the run always uses the stored values. An
-  input key aimed at a locked field is rejected.
+  CLI `--input`, MCP tool args). An input key aimed at a locked field is
+  rejected, and so is any `run(…, { settings })` override that targets the
+  locked node (`NanoodleError` code `"locked"`). Inputs and settings can't
+  change a locked node's stored fields. Wires into its ports still deliver
+  data as usual, and editing the graph file itself still changes it.
 
 ```js
 { id: "w1", type: "llm", fields: { model: "…", system: "…", timeoutMs: 60000, onError: "skip", locked: true } }
