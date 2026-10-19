@@ -159,6 +159,9 @@ export class NanoClient {
       });
       if (cr.ok) {
         const ct = ((cr.headers && cr.headers.get && cr.headers.get("content-type")) || "");
+        // A non-JSON 2xx IS the replayed result (TTS replays raw audio/mpeg bytes). The payment is
+        // now completed and can't be reused, so dropping this body and re-POSTing only gets a 402.
+        if (ct && !ct.includes("json")) return { paymentId: invoice.paymentId, statusUrl: invoice.statusUrl, response: cr };
         let cj = null;
         if (ct.includes("json")) { try { cj = await cr.json(); } catch { /* treat as settle-only */ } }
         if (looksLikeResult(cj)) {
