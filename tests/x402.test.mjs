@@ -167,6 +167,50 @@ test("x402 tts: complete replays raw audio/mpeg → that IS the result (settle-t
   assert.equal(hits.speech, 1);
 });
 
+/** Chat-call stub: 402 quote, then the complete call answers `completeRes()`. Counts payments + re-POSTs. */
+function completeStub(completeRes) {
+  const hits = { paid: 0, posts: 0, rePost: 0, complete: 0 };
+  const fetch = async (url, init) => {
+    if (url.includes("/chat/completions") || url.includes("/audio/speech")) {
+      hits.posts++;
+      if (init.headers && init.headers["x-x402-payment-id"]) hits.rePost++;
+      return jsonRes(402, fresh402());
+    }
+    hits.complete++;
+    return completeRes();
+  };
+  const c = new NanoClient({ payment: async () => { hits.paid++; }, fetch, pollIntervals: { x402: 1 } });
+  return { c, hits };
+}
+const rawRes = (status, contentType, text) => new Response(text, { status, headers: { "content-type": contentType } });
+
+test("x402: text/plain settlement ack on complete → error, not a result; one payment, no re-POST", async () => {
+  const { c, hits } = completeStub(() => rawRes(200, "text/plain; charset=utf-8", "OK settled"));
+  await assert.rejects(c.audio("Minimax-Speech-2.8-HD", "Hello.", { response_format: "mp3" }),
+    (e) => e.code === "x402" && /text\/plain instead of a result/.test(e.message) && /OK settled/.test(e.message) && /^pay_/.test(e.paymentId));
+  assert.equal(hits.paid, 1);
+  assert.equal(hits.rePost, 0);
+  assert.equal(hits.posts, 1);
+});
+
+test("x402: text/html error page on complete → error, not audio; one payment, no re-POST", async () => {
+  const { c, hits } = completeStub(() => rawRes(200, "text/html", "<html><body>Bad gateway</body></html>"));
+  await assert.rejects(c.audio("Minimax-Speech-2.8-HD", "Hello.", { response_format: "mp3" }),
+    (e) => e.code === "x402" && /text\/html instead of a result/.test(e.message));
+  assert.equal(hits.paid, 1);
+  assert.equal(hits.rePost, 0);
+  assert.equal(hits.posts, 1);
+});
+
+test("x402: application/octet-stream complete is still the replayed audio", async () => {
+  const MP3 = Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0xff, 0xfb, 0x90, 0x64]);
+  const { c, hits } = completeStub(() => new Response(MP3, { status: 200, headers: { "content-type": "application/octet-stream" } }));
+  const url = await c.audio("Minimax-Speech-2.8-HD", "Hello.", { response_format: "mp3" });
+  assert.equal(url, "data:audio/mpeg;base64," + MP3.toString("base64"));
+  assert.equal(hits.paid, 1);
+  assert.equal(hits.rePost, 0);
+});
+
 test("x402: expired invoice window → x402-expired with the address and explorer in the message", async () => {
   const expired = JSON.parse(JSON.stringify(fixture402));
   for (const a of expired.accepts) a.expiresAt = Math.floor(Date.now() / 1000) - 60;

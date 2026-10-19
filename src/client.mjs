@@ -159,9 +159,27 @@ export class NanoClient {
       });
       if (cr.ok) {
         const ct = ((cr.headers && cr.headers.get && cr.headers.get("content-type")) || "");
-        // A non-JSON 2xx IS the replayed result (TTS replays raw audio/mpeg bytes). The payment is
-        // now completed and can't be reused, so dropping this body and re-POSTing only gets a 402.
-        if (ct && !ct.includes("json")) return { paymentId: invoice.paymentId, statusUrl: invoice.statusUrl, response: cr };
+        const mime = ct.split(";")[0].trim().toLowerCase();
+        // A binary 2xx IS the replayed result: TTS (/api/v1/audio/speech) replays raw audio bytes,
+        // typed audio/* or a generic application/octet-stream. It's the only paid call that answers
+        // binary — images, video, chat and decisions all answer JSON — so image/* and video/* are
+        // not accepted here. The payment is now completed and can't be reused, so dropping this
+        // body and re-POSTing only gets a 402.
+        if (mime.startsWith("audio/") || mime === "application/octet-stream") {
+          return { paymentId: invoice.paymentId, statusUrl: invoice.statusUrl, response: cr };
+        }
+        // Any other non-JSON 2xx (a text/plain settlement ack, a text/html error page) is neither
+        // the result nor a settle receipt we can act on. The complete call may already have
+        // consumed the payment, so re-POSTing could get a second 402 and paying again would
+        // double-charge: fail with the payment id instead. No second payment, no re-POST.
+        if (mime && !mime.includes("json")) {
+          const snippet = String(await cr.text().catch(() => "")).replace(/\s+/g, " ").trim().slice(0, 160);
+          throw new NanoodleError(
+            "payment " + invoice.paymentId + " was sent, but the complete call answered HTTP " + cr.status +
+            " with " + mime + " instead of a result" + (snippet ? " (" + snippet + ")" : "") +
+            " — check " + (invoice.statusUrl || "the payment status") + " before paying again",
+            { code: "x402", status: cr.status, paymentId: invoice.paymentId });
+        }
         let cj = null;
         if (ct.includes("json")) { try { cj = await cr.json(); } catch { /* treat as settle-only */ } }
         if (looksLikeResult(cj)) {
