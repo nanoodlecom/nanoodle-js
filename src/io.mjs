@@ -1,5 +1,5 @@
 import { NanoodleError } from "./errors.mjs";
-import { NODE_TYPES, displayName, optionalNode, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
+import { NODE_TYPES, displayName, lockedNode, optionalNode, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
 import { endpointOutPort } from "./endpoint.mjs";
 
 /* ============================== INPUTS ============================== */
@@ -41,6 +41,9 @@ export function deriveInputs(graph) {
   };
   for (const n of graph.nodes) {
     if (n.unknown) continue;
+    // fields.locked: the node's fields are fixed by the graph — never surfaced as inputs,
+    // so runs use the stored values.
+    if (lockedNode(n)) continue;
     if (n.type === "inpaint") {
       if (!fed(n.id, "prompt")) entries.push(mk(n, "prompt", "What to paint in", "textarea", false));
       // image and/or mask surface whenever not wired (SPEC-io). The app's combined brush widget

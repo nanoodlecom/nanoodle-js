@@ -188,6 +188,38 @@ result.get("Image")   // throws NanoodleError code "gated": the gate "Decide" an
 the CLI exits 0 with `gated` in its JSON summary. A node fed by both a closed
 gate and a real failure is still an error.
 
+### Per-node timeout, skip on failure, locked nodes
+
+Three optional keys inside a node's `fields` (saved with the graph, no format change):
+
+- **`timeoutMs`**: a deadline for this node alone. The node gets its own abort
+  signal, linked to the run's, and fails with a `NanoodleError` of code
+  `"timeout"` (`result.errors[i].code === "timeout"`). The run-level
+  `run(inputs, { timeoutMs })` still applies on top.
+- **`onError: "skip"`**: if the node fails or times out, it gets
+  `status: "skipped"` (with `error`), the failure is still recorded in
+  `result.errors`, and progress emits `node-skipped` with `reason: "error"`.
+  Its ports come out `undefined`, so dependents just ignore it: a `join` keeps
+  the surviving inputs, and a decider reads only the writers that finished. A
+  node whose **every** input was skipped fails with "all inputs were skipped
+  after failing", and the run still fails if a non-skipped output fails or if
+  every output was skipped. A run-level abort is never skipped.
+  A network node that started but was skipped, timed out or aborted without
+  reporting a price makes `result.costExact` false. Once a node is finalized
+  (and once the run settles), late cost, progress or output callbacks from a
+  runner that ignored its abort signal are ignored, so `result.nodes` and the
+  cost totals don't change afterwards.
+- **`locked: true`**: none of the node's fields become inputs (`wf.inputs`,
+  CLI `--input`, MCP tool args). An input key aimed at a locked field is
+  rejected, and so is any `run(…, { settings })` override that targets the
+  locked node (`NanoodleError` code `"locked"`). Inputs and settings can't
+  change a locked node's stored fields. Wires into its ports still deliver
+  data as usual, and editing the graph file itself still changes it.
+
+```js
+{ id: "w1", type: "llm", fields: { model: "…", system: "…", timeoutMs: 60000, onError: "skip", locked: true } }
+```
+
 ### Prompt length caps
 
 Many image and video models reject an over-long prompt at NanoGPT's route

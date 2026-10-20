@@ -23,7 +23,9 @@ const hasFfmpeg = !spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).error
 function skipWithoutFfmpeg(t) {
   // Must return: t.skip() only marks the test; it does not abort the body
   // (Node 20/22 then report exit 1 with fail=0 if the body later throws).
-  if (!hasFfmpeg) return t.skip("ffmpeg not on PATH");
+  // t.skip() returns undefined and does NOT abort the body: return true so callers
+  // (`if (skipWithoutFfmpeg(t)) return;`) actually stop before shelling out to ffmpeg.
+  if (!hasFfmpeg) { t.skip("ffmpeg not on PATH"); return true; }
   return false;
 }
 
