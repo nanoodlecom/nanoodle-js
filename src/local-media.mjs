@@ -15,7 +15,7 @@
  */
 import { inflate, deflate } from "./zlib.mjs";
 import { NanoodleError } from "./errors.mjs";
-import { bytesToDataUrl, dataUrlBytes, sniffMime, MEDIA_INLINE_MAX } from "./media.mjs";
+import { bytesToDataUrl, dataUrlBytes, redactUrl, sniffMime, MEDIA_INLINE_MAX } from "./media.mjs";
 import { MP4CAT } from "./mp4cat.mjs";
 
 const MAX_FRAMES = 12;
@@ -121,8 +121,13 @@ async function urlBytes(url, fetchFn) {
   if (/^https?:/i.test(u)) {
     const fetchImpl = fetchFn || globalThis.fetch;
     if (!fetchImpl) throw new NanoodleError("can't download media: no fetch available");
-    const r = await fetchImpl(u);
-    if (!r.ok) throw new NanoodleError(`couldn't download media (${r.status}): ${u.slice(0, 120)}`);
+    let r;
+    try { r = await fetchImpl(u); }
+    catch (e) {
+      if (e && (e.name === "AbortError" || e.code === "aborted")) throw e;
+      throw new NanoodleError(`couldn't download media: ${redactUrl(u)}`);
+    }
+    if (!r.ok) throw new NanoodleError(`couldn't download media (${r.status}): ${redactUrl(u)}`);
     return new Uint8Array(await r.arrayBuffer());
   }
   throw new NanoodleError("media must be a data: or http(s) URL");

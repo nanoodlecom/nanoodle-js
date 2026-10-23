@@ -1,5 +1,5 @@
 import { NanoodleError } from "./errors.mjs";
-import { b64ImageMime, bytesToDataUrl, dataUrlBytes, MEDIA_INLINE_MAX } from "./media.mjs";
+import { b64ImageMime, bytesToDataUrl, dataUrlBytes, redactUrl, sniffMime, MEDIA_INLINE_MAX } from "./media.mjs";
 import { assertPaymentOption, parseNanoInvoice, looksLikeResult } from "./x402.mjs";
 
 const AUDIO_MIME = { mp3: "audio/mpeg", opus: "audio/ogg", aac: "audio/aac", flac: "audio/flac", wav: "audio/wav", pcm: "audio/wav" };
@@ -432,8 +432,14 @@ export class NanoClient {
     if (/^data:/i.test(audioUrl)) {
       ({ bytes, mime } = dataUrlBytes(audioUrl));
     } else {
-      const r = await this.fetch(audioUrl, { signal }); // media CDN — no auth headers
-      if (!r.ok) throw new NanoodleError("couldn't download the audio to transcribe (" + r.status + ")");
+      let r;
+      try { r = await this.fetch(audioUrl, { signal }); } // media CDN — no auth headers
+      catch (e) {
+        if (e && (e.name === "AbortError" || e.code === "aborted")) throw e;
+        if (signal && signal.aborted) throw e;
+        throw new NanoodleError("couldn't download the audio to transcribe: " + redactUrl(audioUrl));
+      }
+      if (!r.ok) throw new NanoodleError("couldn't download the audio to transcribe (" + r.status + "): " + redactUrl(audioUrl));
       bytes = new Uint8Array(await r.arrayBuffer());
       mime = ((r.headers && r.headers.get && r.headers.get("content-type")) || "audio/mpeg").split(";")[0];
     }
@@ -462,12 +468,39 @@ export class NanoClient {
    * Used when a chat audio part needs base64 bytes but the upstream node produced an https URL.
    */
   async fetchMediaDataUrl(url, { signal } = {}) {
-    const r = await this.fetch(url, { signal });
-    if (!r.ok) throw new NanoodleError("couldn't download media to inline (" + r.status + "): " + url);
+    let r;
+    try { r = await this.fetch(url, { signal }); }
+    catch (e) {
+      if (e && (e.name === "AbortError" || e.code === "aborted")) throw e;
+      if (signal && signal.aborted) throw e;
+      throw new NanoodleError("couldn't download media to inline: " + redactUrl(url));
+    }
+    if (!r.ok) throw new NanoodleError("couldn't download media to inline (" + r.status + "): " + redactUrl(url));
     const bytes = new Uint8Array(await r.arrayBuffer());
     const ct = (((r.headers && r.headers.get && r.headers.get("content-type")) || "").split(";")[0] || "").trim().toLowerCase();
     const mime = ct && ct !== "application/octet-stream" && ct !== "binary/octet-stream" ? ct : undefined;
     return bytesToDataUrl(bytes, mime); // sniffs magic bytes when the CDN's content-type is generic
+  }
+
+  /**
+   * Resolve a provider media URL before it is handed to another node or returned
+   * as a node output. Relative content paths (Grok Imagine's
+   * `/api/generate-video/content?...`) and same-origin `/api` or `/v1` URLs are
+   * joined onto `baseUrl` and fetched with the API key, redirects manual so the
+   * key is never forwarded to the file host. A redirect Location becomes the
+   * absolute file URL (presigned queries stay on that URL — the next provider
+   * needs them — and are never put in errors). A direct 200 is inlined as a
+   * data URL only when it fits MEDIA_INLINE_MAX; an over-cap clip must come
+   * back as a redirect URL rather than failing the inline budget.
+   */
+  async resolveContentUrl(url, { signal } = {}) {
+    return resolveProviderMediaUrl(url, {
+      baseUrl: this.baseUrl,
+      fetch: this.fetch,
+      authHeaders: this._auth(),
+      apiKey: this.apiKey,
+      signal,
+    });
   }
 
   /** Optional helper: POST /api/check-balance → { usd_balance }. */
@@ -476,4 +509,143 @@ export class NanoClient {
     if (!r.ok) throw httpError(r.status, await r.text());
     return r.json();
   }
+}
+
+/** Paths that still need the API key (a content endpoint), not a public file. */
+function isContentApiPath(pathname) {
+  return pathname === "/api" || pathname.startsWith("/api/")
+    || pathname === "/v1" || pathname.startsWith("/v1/");
+}
+
+function apiBase(baseUrl) {
+  const base = String(baseUrl || "https://nano-gpt.com").replace(/\/+$/, "");
+  const origin = new URL(base + "/").origin;
+  return { base, origin };
+}
+
+/** Estimated data-URL length for `byteLength` raw bytes. Matches the inline cap's string check. */
+function dataUrlWouldExceed(byteLength, mime) {
+  const header = ("data:" + (mime || "application/octet-stream") + ";base64,").length;
+  return header + Math.ceil(Math.max(0, byteLength) / 3) * 4 > MEDIA_INLINE_MAX;
+}
+
+/** Drop the API key, bearer tokens, and query strings from text that may be shown. */
+function scrubSecrets(text, apiKey) {
+  let s = String(text || "");
+  if (apiKey && String(apiKey).length >= 4) s = s.split(String(apiKey)).join("[redacted]");
+  s = s.replace(/bearer\s+\S+/gi, "Bearer [redacted]");
+  s = s.replace(/[?#][^\s)"']*/g, "");
+  s = s.replace(/(?:X-Amz-[A-Za-z-]*|Signature|sig|token|api_key|apikey)\s*[:=]\s*\S+/gi, (m) => m.split(/[:=]/)[0] + "=[redacted]");
+  return s.replace(/\s+/g, " ").trim().slice(0, 160);
+}
+
+function authHeadersFor(url, origin, authHeaders) {
+  try {
+    if (new URL(url).origin !== origin) return {};
+  } catch {
+    return {};
+  }
+  return authHeaders ? { ...authHeaders } : {};
+}
+
+async function drainBody(r) {
+  try {
+    if (r && r.body && typeof r.body.cancel === "function") await r.body.cancel();
+    else if (r && typeof r.arrayBuffer === "function") await r.arrayBuffer();
+  } catch { /* already consumed, or the peer hung up */ }
+}
+
+function responseMime(r) {
+  const ct = ((r && r.headers && r.headers.get && r.headers.get("content-type")) || "").split(";")[0].trim().toLowerCase();
+  if (!ct || ct === "application/octet-stream" || ct === "binary/octet-stream") return "";
+  return ct;
+}
+
+/**
+ * Resolve one provider media URL.
+ * - data:, blob:, and ordinary http(s) URLs pass through (no fetch, no key).
+ * - A path-absolute URL is joined onto the NanoGPT base. Non-API paths become
+ *   that absolute URL and are not fetched (the next node can GET them).
+ * - `/api` and `/v1` URLs (relative, or already on the API origin) are fetched
+ *   with the key and `redirect: "manual"`. An off-origin or non-API Location is
+ *   the fetchable file URL and is returned without downloading it — so a clip
+ *   over the ~4.4 MB inline cap still chains. A 200 body is inlined only when
+ *   the data URL fits MEDIA_INLINE_MAX.
+ * Errors never include the API key or a presigned query string.
+ */
+export async function resolveProviderMediaUrl(url, { baseUrl, fetch: fetchImpl, authHeaders, apiKey, signal } = {}) {
+  if (typeof url !== "string") return url;
+  const s = url.trim();
+  if (!s || /^(data:|blob:)/i.test(s)) return s;
+  const { base, origin } = apiBase(baseUrl);
+  let start;
+  try {
+    if (/^https?:/i.test(s)) {
+      const abs = new URL(s);
+      if (abs.origin !== origin || !isContentApiPath(abs.pathname)) return s;
+      start = abs;
+    } else if (s.startsWith("/") && !s.startsWith("//")) {
+      start = new URL(s, base + "/");
+      if (!isContentApiPath(start.pathname)) return start.href;
+    } else {
+      return s;
+    }
+  } catch {
+    return s;
+  }
+
+  const doFetch = fetchImpl || globalThis.fetch;
+  if (!doFetch) throw new NanoodleError("couldn't fetch provider media: no fetch available");
+  let current = start.href;
+  for (let hop = 0; hop < 5; hop++) {
+    let r;
+    try {
+      r = await doFetch(current, {
+        method: "GET",
+        headers: authHeadersFor(current, origin, authHeaders),
+        redirect: "manual",
+        signal,
+      });
+    } catch (e) {
+      if (e && (e.name === "AbortError" || e.code === "aborted")) throw e;
+      if (signal && signal.aborted) throw e;
+      const detail = scrubSecrets(e && e.message, apiKey);
+      throw new NanoodleError("couldn't fetch provider media" + (detail ? " (" + detail + ")" : ""));
+    }
+    const status = r.status;
+    const loc = r.headers && r.headers.get && r.headers.get("location");
+    if (loc && (status === 0 || (status >= 300 && status < 400))) {
+      await drainBody(r);
+      let next;
+      try { next = new URL(loc, current); }
+      catch { throw new NanoodleError("provider media redirect had no usable location"); }
+      // File host or a non-API path: hand back the absolute URL. Do not fetch it
+      // (that would pull a multi-megabyte clip and might attach the key).
+      if (next.origin !== origin || !isContentApiPath(next.pathname)) return next.href;
+      current = next.href;
+      continue;
+    }
+    if (status >= 300 && status < 400) {
+      await drainBody(r);
+      throw new NanoodleError("provider media redirect had no location");
+    }
+    if (!r.ok) {
+      const raw = String(await r.text().catch(() => "")).slice(0, 500);
+      const snippet = scrubSecrets(raw, apiKey);
+      throw new NanoodleError("couldn't fetch provider media (HTTP " + status + ")" + (snippet ? ": " + snippet : ""));
+    }
+    const mimeHeader = responseMime(r);
+    const declared = Number(r.headers && r.headers.get && r.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared >= 0 && dataUrlWouldExceed(declared, mimeHeader)) {
+      await drainBody(r);
+      throw new NanoodleError("provider media is too large to send inline (~4 MB max) and did not redirect to a fetchable file");
+    }
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    const mime = mimeHeader || sniffMime(bytes);
+    if (dataUrlWouldExceed(bytes.length, mime)) {
+      throw new NanoodleError("provider media is too large to send inline (~4 MB max) and did not redirect to a fetchable file");
+    }
+    return bytesToDataUrl(bytes, mime);
+  }
+  throw new NanoodleError("provider media redirect did not resolve to a fetchable file");
 }
