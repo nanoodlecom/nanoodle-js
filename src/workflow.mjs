@@ -1,5 +1,6 @@
 import { NanoodleError, RunError, UnsupportedNodeError } from "./errors.mjs";
 import { NODE_TYPES, displayName, isInputPort, lockedNode, materialize, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
+import { endpointOutPort } from "./endpoint.mjs";
 import { deriveInputs, deriveOutputs, deriveSettings, resolveInputKey, resolveSettingKey } from "./io.mjs";
 import { NanoClient } from "./client.mjs";
 import { MediaRef, coerceMediaInput } from "./media.mjs";
@@ -27,6 +28,68 @@ function warnGraph(msg) {
 }
 
 const MEDIA_KINDS = new Set(["image", "audio", "video", "inpaint"]);
+/** Ports whose value is media a later node will fetch or inline. */
+const HANDED_MEDIA_PORT = /^(?:video|audio|image|mask|endframe|model)$|^(?:img|image|vid|clip|ref|frame)\d+$/;
+const MEDIA_OUT_TYPES = new Set(["image", "audio", "video", "model3d"]);
+
+function mediaOutputKeys(node, out) {
+  const keys = [];
+  const add = (k) => { if (k && !keys.includes(k)) keys.push(k); };
+  if (!out || typeof out !== "object") return keys;
+  if (node.type === "endpoint") {
+    const p = endpointOutPort(node);
+    if (p && MEDIA_OUT_TYPES.has(p.type)) add(p.name);
+  } else if (node.type === "vframes") {
+    for (const k of Object.keys(out)) if (/^frame\d+$/.test(k)) add(k);
+  } else {
+    const spec = NODE_TYPES[node.type];
+    for (const p of (spec && spec.outputs) || []) {
+      if (MEDIA_OUT_TYPES.has(p.type)) add(p.name);
+    }
+  }
+  if (Array.isArray(out.images)) add("images");
+  return keys;
+}
+
+/**
+ * Resolve provider-relative content URLs on a node's media outputs before they
+ * are stored or wired onward. One fetch per distinct URL (image + images[]).
+ */
+async function publishNodeMedia(client, node, out, signal) {
+  if (!out || typeof out !== "object" || Array.isArray(out)) return out;
+  const keys = mediaOutputKeys(node, out);
+  if (!keys.length) return out;
+  const cache = new Map();
+  const resolve = async (value) => {
+    if (typeof value === "string") {
+      if (!value) return value;
+      if (cache.has(value)) return cache.get(value);
+      const resolved = await client.resolveContentUrl(value, { signal });
+      cache.set(value, resolved);
+      return resolved;
+    }
+    if (Array.isArray(value)) {
+      let changed = false;
+      const next = [];
+      for (const item of value) {
+        const r = await resolve(item);
+        if (r !== item) changed = true;
+        next.push(r);
+      }
+      return changed ? next : value;
+    }
+    return value;
+  };
+  let copy = null;
+  for (const k of keys) {
+    const resolved = await resolve(out[k]);
+    if (resolved !== out[k]) {
+      if (!copy) copy = { ...out };
+      copy[k] = resolved;
+    }
+  }
+  return copy || out;
+}
 
 function abortReason(signal) {
   const r = signal && signal.reason;
@@ -339,7 +402,14 @@ export class Workflow {
             continue;
           }
           const v = srcOut[l.from.port];
-          if (isInputPort(n, l.to.port)) inp[l.to.port] = v;
+          if (isInputPort(n, l.to.port)) {
+            // Node boundary: a relative content URL from the upstream provider is
+            // resolved (authed redirect → absolute file URL, or inlined bytes)
+            // before this node builds videoUrl / videoDataUrl / audio / image.
+            inp[l.to.port] = (typeof v === "string" && v && HANDED_MEDIA_PORT.test(l.to.port))
+              ? await this.client.resolveContentUrl(v, { signal: ac.signal })
+              : v;
+          }
           // Custom endpoint url/mode: a Choice path like "/post" must ride inp so
           // endpointResolveTarget can join it onto the typed host. Overwriting
           // fields.url with "/post" rejects the joined URL.
@@ -401,9 +471,14 @@ export class Workflow {
           });
           deadline.catch(() => {});
         }
-        const work = RUNNERS[n.type]({ ...n, fields }, inp, ctxFor(n, rec, nodeSignal));
-        const out = deadline ? await Promise.race([work, deadline]) : await work;
+        const nodeForRun = { ...n, fields };
+        const work = RUNNERS[n.type](nodeForRun, inp, ctxFor(n, rec, nodeSignal));
+        const rawOut = deadline ? await Promise.race([work, deadline]) : await work;
         if (deadline) throwIfAborted(nodeSignal);
+        throwIfAborted(ac.signal);
+        // Final outputs of this node are absolute usable URLs, not the relative
+        // content path the provider returned. Downstream reads this same object.
+        const out = await publishNodeMedia(this.client, nodeForRun, rawOut, nodeSignal);
         throwIfAborted(ac.signal);
         rec.final = true;
         rec.status = "done";

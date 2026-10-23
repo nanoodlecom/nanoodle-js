@@ -55,6 +55,22 @@ const MIME_EXT = {
   "text/plain": "txt", "application/json": "json",
 };
 
+/**
+ * A URL safe to put in an error or log line: origin + path only.
+ * Presigned query strings (and any other search/fragment) are dropped, so a
+ * signature or a key that rode along in the query cannot leak via an error.
+ */
+export function redactUrl(url) {
+  const s = String(url || "");
+  try {
+    const u = new URL(s);
+    return u.origin + u.pathname;
+  } catch {
+    const cut = s.search(/[?#]/);
+    return (cut >= 0 ? s.slice(0, cut) : s).slice(0, 120);
+  }
+}
+
 /** Best-effort file extension for a MIME type (used by the CLI --out saver). */
 export function extForMime(mime) {
   return MIME_EXT[String(mime || "").split(";")[0].trim().toLowerCase()] || "bin";
@@ -134,8 +150,14 @@ export class MediaRef {
   /** @returns {Promise<Uint8Array>} the raw media bytes (decodes data:, fetches http(s)). */
   async bytes() {
     if (this.url.startsWith("data:")) return dataUrlBytes(this.url).bytes;
-    const r = await this._fetch(this.url);
-    if (!r.ok) throw new NanoodleError("couldn't download media (" + r.status + "): " + this.url);
+    let r;
+    try {
+      r = await this._fetch(this.url);
+    } catch (e) {
+      if (e && (e.name === "AbortError" || e.code === "aborted")) throw e;
+      throw new NanoodleError("couldn't download media: " + redactUrl(this.url));
+    }
+    if (!r.ok) throw new NanoodleError("couldn't download media (" + r.status + "): " + redactUrl(this.url));
     if (!this._mime) {
       const ct = r.headers && r.headers.get && r.headers.get("content-type");
       if (ct) this._mime = ct.split(";")[0].trim();
