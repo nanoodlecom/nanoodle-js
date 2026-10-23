@@ -205,3 +205,26 @@ test("minimax-h3 LoRA tier matches the client quote at 480p / 5s", () => {
   blank.nodes[0].fields.loras = [{ url: "  ", strength: "1" }];
   near(estimateGraphCost(blank, cats).usd, 0.65, "blank LoRA url");
 });
+
+// PixVerse V6 Max prices {per_second_without_audio, per_second_with_audio} by
+// resolution (NanoGPT /api/v1/video-models, 2026-10-22). Before this, neither
+// key was known and the estimate fell through to the generic scan, which read
+// minimum_duration_seconds (1) as a $1/s rate ($5 for a 5 s clip). Mirrors the
+// nanoodle editor fix (nanoodlecom/nanoodle#752).
+test("pixverse-v6-max bills per_second_with/without_audio by resolution and the audio switch", () => {
+  const pricing = {
+    currency: "USD", unit: "per_output_second",
+    per_second_without_audio: { "360p": 0.027, "540p": 0.04, "720p": 0.049, "1080p": 0.098 },
+    per_second_with_audio: { "360p": 0.04, "540p": 0.049, "720p": 0.067, "1080p": 0.124 },
+    minimum_duration_seconds: 1, maximum_duration_seconds: 15,
+    default_duration_seconds: 5, default_resolution: "720p", default_generate_audio: false,
+  };
+  const cats = { video: [{ id: "pixverse-v6-max", pricing }] };
+  const run = (fields) => estimateGraphCost(g({ id: "1", type: "tvideo", fields: { model: "pixverse-v6-max", ...fields } }), cats).usd;
+  const near = (a, b) => assert.ok(Math.abs(a - b) < 1e-9, `${a} != ${b}`);
+  near(run({ resolution: "720p", duration: "5" }), 0.245);
+  near(run({ resolution: "1080p", duration: "5", modelOpts: { generateAudio: false } }), 0.49);
+  near(run({ resolution: "1080p", duration: "5", modelOpts: { generateAudio: true } }), 0.62);
+  near(run({ resolution: "360p", duration: "15" }), 0.405);
+  near(run({ resolution: "1080p", duration: "15", modelOpts: { generate_audio_switch: true } }), 1.86);
+});

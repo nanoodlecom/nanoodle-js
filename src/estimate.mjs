@@ -163,11 +163,11 @@ function videoBaseUsd(pricing, fields, audioOn, refOn) {
     if (v != null) return v * dur;
   }
   if (audioOn) {
-    for (const k of ["text_image_with_audio_per_second", "image_to_video_with_audio_per_second", "text_to_video_with_audio_per_second"]) {
+    for (const k of ["text_image_with_audio_per_second", "image_to_video_with_audio_per_second", "text_to_video_with_audio_per_second", "per_second_with_audio"]) {
       if (p[k] != null) { v = (typeof p[k] === "object") ? rp(p[k]) : _num(p[k]); if (v != null) return v * dur; }
     }
   }
-  for (const k of ["text_to_video_per_second", "text_image_without_audio_per_second", "image_to_video_without_audio_per_second"]) {
+  for (const k of ["text_to_video_per_second", "text_image_without_audio_per_second", "image_to_video_without_audio_per_second", "per_second_without_audio"]) {
     if (p[k] != null) { v = (typeof p[k] === "object") ? rp(p[k]) : _num(p[k]); if (v != null) return v * dur; }
   }
   if (p.base_price_per_second != null) { const m = p.resolution_multipliers ? (rp(p.resolution_multipliers) ?? 1) : 1; v = _num(p.base_price_per_second); if (v != null) return v * dur * m; }
