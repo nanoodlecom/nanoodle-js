@@ -271,6 +271,37 @@ test("vedit: https source rides as videoUrl, data: as videoDataUrl", async (t) =
   assert.ok(!("videoUrl" in second.json));
 });
 
+test("vedit: wired character image rides as imageDataUrl next to the driver (image+video->video models only)", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  const catalog = { video: [
+    { id: "wan-22-animate", architecture: { modality: "image+video->video", input_modalities: ["image", "video"] }, capabilities: { video_to_video: true, image_to_video: true } },
+    { id: "lucy-edit-pro", architecture: { modality: "text+video->video", input_modalities: ["text", "video"] }, capabilities: { video_to_video: true } },
+  ] };
+  const mk = (model) => Workflow.fromJSON({
+    nodes: [
+      { id: "n1", type: "vupload", fields: { video: "https://cdn.example/driver.mp4" } },
+      { id: "n2", type: "upload", fields: { image: "data:image/png;base64,FOX" } },
+      { id: "n3", type: "vedit", fields: { model, prompt: "", modelOpts: { mode: "replace" } } },
+    ],
+    links: [
+      { id: "l1", from: { node: "n1", port: "video" }, to: { node: "n3", port: "video" } },
+      { id: "l2", from: { node: "n2", port: "image" }, to: { node: "n3", port: "image" } },
+    ],
+  }, { ...mockOpts(srv), catalog });
+  for (const model of ["wan-22-animate", "lucy-edit-pro"]) {
+    srv.script("POST /api/generate-video", { json: { runId: "vid_c", cost: 0.3 } });
+    srv.script("GET /api/video/status", { json: { status: "COMPLETED", output: { url: "https://cdn.example/swap.mp4" } } });
+    await mk(model).run({});
+  }
+  const [wan, lucy] = srv.of("POST /api/generate-video");
+  assert.equal(wan.json.videoUrl, "https://cdn.example/driver.mp4");
+  assert.equal(wan.json.imageDataUrl, "data:image/png;base64,FOX");
+  assert.equal(wan.json.mode, "replace");
+  // a stale wire on a text+video edit model is never sent
+  assert.ok(!("imageDataUrl" in lucy.json));
+});
+
 test("lipsync: image + local audio → imageDataUrl + audioDataUrl", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());

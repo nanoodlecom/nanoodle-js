@@ -717,7 +717,12 @@ export const RUNNERS = {
     const prompt = promptOf(n, inp);
     const opts = { ...videoSourceOpts(inp.video), ...videoDims(n, ctx), lora: loraParams(n), extra: n.fields.modelOpts || {} };
     applyRefs(opts, collectPorts(inp, REF_PORT_RE), n, ctx); // ref wires (seedance video-edit family) — same key/cap resolution as tvideo
-    return { video: await ctx.video(mdl(n), prompt, opts, null) };
+    // Character image (image+video->video motion-control / replace models, e.g. Wan 2.2 Animate):
+    // the wired still rides as imageDataUrl next to the driver video. Gated on the catalog so a
+    // stale wire left after a swap to a plain v2v model is never sent; catalog miss → send (the
+    // wire was authored deliberately, same permissive-ON stance as ivideo's endframe).
+    const image = inp.image && vEditTakesImage(ctx && ctx.catalog, n.fields.model) ? await fitImage(inp.image, ctx, "character image") : null;
+    return { video: await ctx.video(mdl(n), prompt, opts, image) };
   },
 
   async lipsync(n, inp, ctx) {
@@ -849,6 +854,18 @@ export const RUNNERS = {
  * HeyGen Avatar V). Catalog miss → true (the long-standing portrait requirement).
  * Mirrors play's built-in lipsync runner: raw `capabilities.image_to_video` or a normalized `i2v`.
  */
+// Video-edit models that take a character/reference still AND a driver video but no text prompt
+// (architecture image+video->video: Wan 2.2 Animate replace/animate, Kling / PixVerse motion
+// control, P-Video Animate). Text+image+video "unified" models are excluded: for them an image
+// usually switches the job to image→video and drops the source clip. Catalog miss → true.
+export function vEditTakesImage(catalog, model) {
+  const m = catItem(catalog, "video", model);
+  if (!m) return true;
+  const a = m.architecture || {};
+  const mods = Array.isArray(a.input_modalities) ? a.input_modalities : String(a.modality || "").split("->")[0].split("+");
+  return mods.includes("image") && mods.includes("video") && !mods.includes("text");
+}
+
 function avatarNeedsPortrait(catalog, model) {
   const m = catItem(catalog, "video", model);
   return !m || !!((m.capabilities || {}).image_to_video) || !!m.i2v;
