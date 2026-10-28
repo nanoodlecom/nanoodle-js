@@ -7,6 +7,7 @@ import { join, dirname } from "node:path";
 import { writeFile, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { Workflow } from "../src/index.mjs";
+import { loraParams } from "../src/nodes.mjs";
 import { startMockServer, mockOpts, chatJson, PNG_B64, PNG_DATA_URL } from "./harness/mock-server.mjs";
 
 const noNet = { apiKey: "unused", quiet: true };
@@ -28,11 +29,10 @@ test("image LoRA: fields.loras → lora_url/lora_strength on the image payload",
   assert.equal(body.lora_strength, 0.8);
 });
 
-test("image LoRA: FLUX.2 Klein takes numbered slots; FLUX.3 Klein (no lora_url) gets none", async (t) => {
+test("image LoRA: FLUX.2 Klein and FLUX.3 Klein text-to-image take numbered slots; FLUX.3 Klein edit gets none", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());
-  srv.script("POST /v1/images/generations", { json: { data: [{ b64_json: PNG_B64 }], cost: 0.02 } });
-  srv.script("POST /v1/images/generations", { json: { data: [{ b64_json: PNG_B64 }], cost: 0.02 } });
+  for (let i = 0; i < 3; i++) srv.script("POST /v1/images/generations", { json: { data: [{ b64_json: PNG_B64 }], cost: 0.02 } });
   const loras = [{ url: "https://host.example/k.safetensors", strength: "0.6" }];
 
   await one(srv, { id: "n1", type: "image", fields: { model: "flux-2-klein-9b", prompt: "cat", loras } }).run({});
@@ -40,10 +40,17 @@ test("image LoRA: FLUX.2 Klein takes numbered slots; FLUX.3 Klein (no lora_url) 
   assert.equal(f2.lora_url_1, "https://host.example/k.safetensors");
   assert.equal(f2.lora_scale_1, 0.6);
 
-  // nanoodle #732 twin: /klein/ alone matched blackforestlabs/flux-3/klein/* — it has no lora_url
-  await one(srv, { id: "n1", type: "image", fields: { model: "blackforestlabs/flux-3/klein/text-to-image", prompt: "cat", loras } }).run({});
-  const f3 = srv.requests[1].json;
-  for (const k of Object.keys(f3)) assert.ok(!/lora/i.test(k), "FLUX.3 Klein must not carry LoRA params (got " + k + ")");
+  // nanoodle #764 twin: the catalog now lists lora_url_1..3 on FLUX.3 Klein t2i (distilled + base)
+  for (const [i, model] of [[1, "blackforestlabs/flux-3/klein/text-to-image"], [2, "blackforestlabs/flux-3/klein/base/text-to-image"]]) {
+    await one(srv, { id: "n1", type: "image", fields: { model, prompt: "cat", loras } }).run({});
+    const f3 = srv.requests[i].json;
+    assert.equal(f3.lora_url_1, "https://host.example/k.safetensors", model);
+    assert.equal(f3.lora_scale_1, 0.6, model);
+    assert.ok(!("lora_url" in f3) && !("lora_strength" in f3), model + " uses numbered slots only");
+  }
+
+  // FLUX.3 Klein edit-image still has no lora_url (nanoodle #732 still holds there)
+  assert.deepEqual(loraParams({ type: "edit", fields: { model: "blackforestlabs/flux-3/klein/edit-image", loras } }), {});
 });
 
 test("image LoRA: legacy loraUrl/loraStrength fields still ride", async (t) => {

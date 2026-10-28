@@ -181,9 +181,11 @@ function loraKind(type) { return (type === "image" || type === "edit" || type ==
 function imageTakesLora(id) {
   id = String(id || "");
   if (/inpaint/i.test(id)) return false;
-  // flux-2-klein-* only (lora-capable per catalog); FLUX.3 Klein (blackforestlabs/flux-3/klein/…)
-  // takes no lora_url — twin of the app's imageTakesLora (nanoodle #732)
+  // twin of the app's imageTakesLora (nanoodle #732, #764): flux-2-klein-* is lora-capable;
+  // FLUX.3 Klein text-to-image (base + distilled) gained lora_url_1..3 in the catalog on
+  // 2026-10-27, but FLUX.3 Klein edit-image still takes no lora_url
   if (/flux-2-klein/i.test(id)) return true;
+  if (/flux-3\/klein\/(base\/)?text-to-image/i.test(id)) return true;
   if (/minimax-h3\/(text-to-image|image-edit)/i.test(id)) return true;
   return /(^|[-\/])lora($|[-\/])/i.test(id);
 }
