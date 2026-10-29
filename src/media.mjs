@@ -33,12 +33,18 @@ export function b64ImageMime(b64) {
   if (b64.startsWith("iVBOR")) return "image/png";
   if (b64.startsWith("R0lG")) return "image/gif";
   if (b64.startsWith("UklG")) return "image/webp";
+  // SVG may start with a BOM, XML declaration, or comments. Inspect a bounded
+  // prefix as text only; no XML parsing or execution.
+  try {
+    const head = atob(b64.slice(0, 8192));
+    if (/^(?:\xef\xbb\xbf)?\s*(?:<\?xml[^>]*>\s*)?(?:<!--[\s\S]*?-->\s*)*<svg(?:\s|\/?>)/i.test(head)) return "image/svg+xml";
+  } catch { /* malformed/unknown base64 keeps the raster fallback */ }
   return "image/png";
 }
 
 const EXT_MIME = {
   ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
-  ".webp": "image/webp", ".bmp": "image/bmp",
+  ".webp": "image/webp", ".bmp": "image/bmp", ".svg": "image/svg+xml",
   ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg", ".opus": "audio/ogg",
   ".aac": "audio/aac", ".flac": "audio/flac", ".m4a": "audio/mp4",
   ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime", ".mkv": "video/x-matroska",
@@ -47,7 +53,7 @@ const EXT_MIME = {
 };
 
 const MIME_EXT = {
-  "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp",
+  "image/svg+xml": "svg", "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp",
   "audio/mpeg": "mp3", "audio/wav": "wav", "audio/ogg": "ogg", "audio/aac": "aac",
   "audio/flac": "flac", "audio/mp4": "m4a",
   "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov",
