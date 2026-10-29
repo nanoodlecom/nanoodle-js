@@ -1,3 +1,4 @@
+import { imageModelOpts } from "./image-options.mjs";
 import { NanoodleError } from "./errors.mjs";
 import { catItem, chatModelCan, pricingAdvertisesRefs } from "./catalog.mjs";
 import { IMG_PORT_RE, EDIT_IMG_RE, REF_PORT_RE, CLIP_PORT_RE, VID_PORT_RE, optionalNode } from "./graph.mjs";
@@ -270,7 +271,7 @@ function airModelTakesNegative(model) {
 
 /** Per-call image extras: LoRA params + fixed seed (when numeric) + custom-civitai AIR. */
 function imgExtra(n) {
-  const e = loraParams(n);
+  const e = { ...imageModelOpts(n.fields.modelOpts), ...loraParams(n) };
   const s = n.fields.seed;
   if (s != null && String(s).trim() !== "" && !isNaN(Number(s))) e.seed = Number(s);
   if (n.fields.model === "custom-civitai") {
@@ -677,7 +678,8 @@ export const RUNNERS = {
       }
     }
     const prompt = promptOf(n, inp);
-    if (!prompt && !/upscal/i.test(n.fields.model || "")) throw new NanoodleError("no edit instruction");
+    if (!prompt && !/upscal/i.test(n.fields.model || "")
+        && !(n.fields.model === "ideogram/vector" && n.fields.modelOpts?.vector_operation === "convert")) throw new NanoodleError("no edit instruction");
     imgs = await Promise.all(imgs.map((u) => fitImage(u, ctx, "source image")));
     guardRefsSize(imgs);
     const src = imgs.length > 1 ? imgs : imgs[0]; // array → multi-image composite; string → single edit

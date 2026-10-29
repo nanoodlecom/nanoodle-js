@@ -1,3 +1,4 @@
+import { imageModelOpts } from "./image-options.mjs";
 import { NanoodleError } from "./errors.mjs";
 import { b64ImageMime, bytesToDataUrl, dataUrlBytes, redactUrl, sniffMime, MEDIA_INLINE_MAX } from "./media.mjs";
 import { assertPaymentOption, parseNanoInvoice, looksLikeResult } from "./x402.mjs";
@@ -260,7 +261,7 @@ export class NanoClient {
     if (prompt) body.prompt = prompt; // omit when blank — upscalers run with no instruction
     if (imageDataUrl) body.imageDataUrl = imageDataUrl; // string OR array (edit multi-reference)
     if (maskDataUrl) body.maskDataUrl = maskDataUrl; // white = repaint
-    if (extra) Object.assign(body, extra);
+    Object.assign(body, imageModelOpts(extra));
     const r = await this._postJson("/v1/images/generations", body, signal);
     if (!r.ok) throw httpError(r.status, await r.text());
     const j = await r.json();
