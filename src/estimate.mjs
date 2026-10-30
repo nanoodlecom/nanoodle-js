@@ -152,26 +152,29 @@ function videoBaseUsd(pricing, fields, audioOn, refOn) {
   const f = fields || {};
   const res = f.resolution, defRes = p.default_resolution ?? raw.defaultResolution;
   const dur = pickDur(p, raw, f);
+  // Per-second billing charges each started second. Flat/duration/frame prices
+  // below still use the original quantity in their own units.
+  const billDur = Math.ceil(dur);
   const rp = (m) => pickByRes(m, res, defRes);
   let v;
-  if ((v = rp(p.per_second_by_resolution)) != null) return v * dur;
-  if ((v = rp(p.standard_prices_per_second)) != null) return v * dur;
+  if ((v = rp(p.per_second_by_resolution)) != null) return v * billDur;
+  if ((v = rp(p.standard_prices_per_second)) != null) return v * billDur;
   if (p.per_second_by_mode) {
     const mm = p.per_second_by_mode;
     v = refOn ? (_num(mm.reference_to_video_image) ?? _num(mm.reference_to_video_video)) : null;
     if (v == null) v = _num(mm.text_to_video) ?? pickByRes(mm);
-    if (v != null) return v * dur;
+    if (v != null) return v * billDur;
   }
   if (audioOn) {
     for (const k of ["text_image_with_audio_per_second", "image_to_video_with_audio_per_second", "text_to_video_with_audio_per_second", "per_second_with_audio"]) {
-      if (p[k] != null) { v = (typeof p[k] === "object") ? rp(p[k]) : _num(p[k]); if (v != null) return v * dur; }
+      if (p[k] != null) { v = (typeof p[k] === "object") ? rp(p[k]) : _num(p[k]); if (v != null) return v * billDur; }
     }
   }
   for (const k of ["text_to_video_per_second", "text_image_without_audio_per_second", "image_to_video_without_audio_per_second", "per_second_without_audio"]) {
-    if (p[k] != null) { v = (typeof p[k] === "object") ? rp(p[k]) : _num(p[k]); if (v != null) return v * dur; }
+    if (p[k] != null) { v = (typeof p[k] === "object") ? rp(p[k]) : _num(p[k]); if (v != null) return v * billDur; }
   }
-  if (p.base_price_per_second != null) { const m = p.resolution_multipliers ? (rp(p.resolution_multipliers) ?? 1) : 1; v = _num(p.base_price_per_second); if (v != null) return v * dur * m; }
-  if (p.per_second != null) { v = _num(p.per_second); if (v != null) return v * dur; }
+  if (p.base_price_per_second != null) { const m = p.resolution_multipliers ? (rp(p.resolution_multipliers) ?? 1) : 1; v = _num(p.base_price_per_second); if (v != null) return v * billDur * m; }
+  if (p.per_second != null) { v = _num(p.per_second); if (v != null) return v * billDur; }
   if (p.per_duration) { const dk = String(Math.round(dur)); v = _num(p.per_duration[dk]) ?? _num(p.per_duration[String(dur)]) ?? pickByRes(p.per_duration); if (v != null) return v; }
   if (p.without_audio != null || p.with_audio != null) { v = audioOn ? (_num(p.with_audio) ?? _num(p.without_audio)) : (_num(p.without_audio) ?? _num(p.with_audio)); if (v != null) return v; }
   if (p.base_prices_by_resolution) {
@@ -184,9 +187,9 @@ function videoBaseUsd(pricing, fields, audioOn, refOn) {
     if (base != null) return base * mult;
   }
   if ((v = rp(p.per_resolution)) != null) return v;
-  if (p.base_price != null && p.per_extra_second != null) { const bd = _num(p.base_duration) || 0; return _num(p.base_price) + Math.max(0, dur - bd) * _num(p.per_extra_second); }
+  if (p.base_price != null && p.per_extra_second != null) { const bd = _num(p.base_duration) || 0; return _num(p.base_price) + Math.ceil(Math.max(0, dur - bd)) * _num(p.per_extra_second); }
   if (p.per_video != null) { v = _num(p.per_video); if (v != null) return v; }
-  if (p.per_target_megapixel_second != null) { const mp = _num(p.default_target_megapixels) || 1; v = _num(p.per_target_megapixel_second) * mp * dur; return Math.max(v, _num(p.minimum_price) || 0); }
+  if (p.per_target_megapixel_second != null) { const mp = _num(p.default_target_megapixels) || 1; v = _num(p.per_target_megapixel_second) * mp * billDur; return Math.max(v, _num(p.minimum_price) || 0); }
   if (p.per_frame_unit != null) { const fpu = _num(p.frames_per_unit) || 1; return (dur * EST.videoFps / fpu) * _num(p.per_frame_unit); }
   if (p.base_price != null) { v = _num(p.base_price); if (v != null) return v; }
   if (Object.keys(raw).length) {
@@ -194,16 +197,16 @@ function videoBaseUsd(pricing, fields, audioOn, refOn) {
       if (raw.referenceToVideoPrices) { const inner = pickObjByRes(raw.referenceToVideoPrices, res, defRes); if (inner) { const dk = String(Math.round(dur)); v = _num(inner[dk]) ?? pickByRes(inner); if (v != null) return v; } }
       for (const k of ["textToVideoWithReferenceVideoPricesPerSecond", "standardTextToVideoWithReferenceVideoPricesPerSecond", "turboTextToVideoWithReferenceVideoPricesPerSecond",
         "standardReferenceVideoPricesPerSecond", "fastReferenceVideoPricesPerSecond"]) {
-        if (raw[k]) { v = pickByRes(raw[k], res, defRes); if (v != null) return v * dur; }
+        if (raw[k]) { v = pickByRes(raw[k], res, defRes); if (v != null) return v * billDur; }
       }
     }
     if (audioOn) {
-      if (raw.withAudioPricesPerSecond) { v = pickByRes(raw.withAudioPricesPerSecond, res, defRes); if (v != null) return v * dur; }
+      if (raw.withAudioPricesPerSecond) { v = pickByRes(raw.withAudioPricesPerSecond, res, defRes); if (v != null) return v * billDur; }
       if (raw.withAudioPrices) { const inner = pickObjByRes(raw.withAudioPrices, res, defRes); if (inner) { const dk = String(Math.round(dur)); v = _num(inner[dk]) ?? pickByRes(inner); if (v != null) return v; } }
     }
     for (const k of ["pricesPerSecond", "textToVideoPricesPerSecond", "withoutAudioPricesPerSecond",
       "standardPricesPerSecond", "standardTextToVideoPricesPerSecond", "outputPricesPerSecond", "fastPricesPerSecond"]) {
-      if (raw[k]) { v = pickByRes(raw[k], res, defRes); if (v != null) return v * dur; }
+      if (raw[k]) { v = pickByRes(raw[k], res, defRes); if (v != null) return v * billDur; }
     }
     for (const k of ["withoutAudioPrices", "withAudioPrices", "referenceToVideoPrices"]) {
       if (raw[k]) { const inner = pickObjByRes(raw[k], res, defRes); if (inner) { const dk = String(Math.round(dur)); v = _num(inner[dk]) ?? pickByRes(inner); if (v != null) return v; } }
@@ -224,7 +227,7 @@ function videoBaseUsd(pricing, fields, audioOn, refOn) {
     const billSecs = (d, lo, hi) => Math.min(_num(hi) ?? d, Math.max(_num(lo) ?? d, d));
     const tbl = (refOn && L.reference_per_second) ? L.reference_per_second : L.text_or_image_per_second;
     v = (tbl && typeof tbl === "object") ? rp(tbl) : _num(tbl);
-    if (v != null) return v * billSecs(dur, L.min_duration, L.max_duration);
+    if (v != null) return v * Math.ceil(billSecs(dur, L.min_duration, L.max_duration));
   }
   return genericScanUsd(p, dur);
 }
@@ -238,7 +241,7 @@ function genericScanUsd(p, dur) {
     if (typeof o === "number") { if (o > 0 && o < 500) { if (/second|persec/i.test(key)) perSec = Math.min(perSec ?? Infinity, o); else flat = Math.min(flat ?? Infinity, o); } return; }
     if (typeof o === "object") for (const k of Object.keys(o)) walk(o[k], k);
   })(p, "");
-  if (perSec != null) return perSec * dur;
+  if (perSec != null) return perSec * Math.ceil(dur);
   if (flat != null) return flat;
   return null;
 }
@@ -254,7 +257,7 @@ function audioUnitUsd(pricing, chars, seconds) {
   if (p.per_thousand_chars != null) { let cost = _num(p.per_thousand_chars) * (c / 1000); if (p.per_generation != null) cost += _num(p.per_generation); return Math.max(cost, _num(p.minimum) || 0); }
   if (p.per_prompt_char_block != null) { const bs = _num(p.prompt_char_block_size) || 1; return Math.max(Math.ceil(c / bs) * _num(p.per_prompt_char_block), _num(p.minimum) || 0); }
   if (p.per_generation != null) return _num(p.per_generation);
-  if (p.per_second != null) return Math.max(_num(p.per_second) * secs, _num(p.minimum) || 0);
+  if (p.per_second != null) return Math.max(_num(p.per_second) * Math.ceil(secs), _num(p.minimum) || 0);
   // per started billing interval (ElevenLabs Music / VEED Clean Audio: $/started minute)
   if (p.per_billing_interval != null) {
     const iv = _num(p.billing_interval_seconds) || 60;

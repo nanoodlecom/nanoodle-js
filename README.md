@@ -298,6 +298,21 @@ generation.
 - `result.costUsd` — total of prices NanoGPT returned
 - `result.costExact` — `false` if any call omitted a price (total is then a floor)
 - `result.remainingBalance` — freshest balance the API reported
+- `result.nodes[nodeId].runId` — provider job ID for async video, 3D, and audio
+  jobs, or `null`. Available on failures too through `RunError.result`; an
+  `onProgress` event `{ type: "node-run-id", nodeId, name, runId }` reports it
+  immediately after submit, before polling.
+
+`estimateGraphCost()` rounds per-second billing up to each started second;
+flat, frame, and explicit billing-interval prices retain their own units.
+The estimate remains a forecast: actual generated duration and provider pricing
+can differ.
+
+Hosted media downloads (`MediaRef.bytes()` / `.save()` and media inputs) retry
+connection or response-body interruptions up to three total GET attempts. Final
+failures are `NanoodleError`s with signed URL queries omitted. HTTP rejections
+and cancellation stop immediately. Generation requests are never retried by
+this download policy.
 
 A price of `0` means known-included (subscription), not unknown. `inspect`
 and loading/validating workflows never call the API. No telemetry, no

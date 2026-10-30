@@ -128,6 +128,47 @@ export function dataUrlBytes(url) {
 }
 
 /**
+ * Internal hosted-media GET. Retry connection/body interruptions from scratch,
+ * never generation POSTs. Keep errors redacted even when fetch includes a signed
+ * URL in its exception. HTTP rejections and deliberate cancellation are final.
+ */
+export async function downloadMedia(url, { fetch: fetchFn = globalThis.fetch, signal, what = "media" } = {}) {
+  const checkAbort = () => {
+    if (signal && signal.aborted) throw signal.reason || new NanoodleError("download aborted", { code: "aborted" });
+  };
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    checkAbort();
+    try {
+      if (typeof fetchFn !== "function") throw new NanoodleError("can't download media: no fetch available");
+      const r = await fetchFn(url, { signal }); // CDN: no credentials or API auth headers
+      if (!r.ok) throw new NanoodleError(`couldn't download ${what} (${r.status}): ${redactUrl(url)}`, { status: r.status });
+      const bytes = new Uint8Array(await r.arrayBuffer());
+      checkAbort();
+      return { bytes, response: r };
+    } catch (e) {
+      checkAbort();
+      if (e && (e.name === "AbortError" || e.code === "aborted")) throw e;
+      if (e instanceof NanoodleError) throw e;
+      if (attempt === 3) throw new NanoodleError(`couldn't download ${what}: ${redactUrl(url)}`, { code: "download", attempts: attempt });
+    }
+    // Short, bounded backoff; cancellation also interrupts the retry delay.
+    await new Promise((resolve, reject) => {
+      const done = () => { if (signal) signal.removeEventListener("abort", cancel); resolve(); };
+      const timer = setTimeout(done, 100 * attempt);
+      const cancel = () => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", cancel);
+        reject(signal.reason || new NanoodleError("download aborted", { code: "aborted" }));
+      };
+      if (signal) {
+        signal.addEventListener("abort", cancel, { once: true });
+        if (signal.aborted) cancel();
+      }
+    });
+  }
+}
+
+/**
  * A media output value: a data: or https URL plus lazy byte access.
  * String-coerces to the URL so it drops into templates / JSON naturally.
  *
@@ -156,19 +197,12 @@ export class MediaRef {
   /** @returns {Promise<Uint8Array>} the raw media bytes (decodes data:, fetches http(s)). */
   async bytes() {
     if (this.url.startsWith("data:")) return dataUrlBytes(this.url).bytes;
-    let r;
-    try {
-      r = await this._fetch(this.url);
-    } catch (e) {
-      if (e && (e.name === "AbortError" || e.code === "aborted")) throw e;
-      throw new NanoodleError("couldn't download media: " + redactUrl(this.url));
-    }
-    if (!r.ok) throw new NanoodleError("couldn't download media (" + r.status + "): " + redactUrl(this.url));
+    const { bytes, response: r } = await downloadMedia(this.url, { fetch: this._fetch });
     if (!this._mime) {
       const ct = r.headers && r.headers.get && r.headers.get("content-type");
       if (ct) this._mime = ct.split(";")[0].trim();
     }
-    return new Uint8Array(await r.arrayBuffer());
+    return bytes;
   }
 
   /** Write the media bytes to `path` (Node only); resolves to the path. */

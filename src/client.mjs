@@ -1,6 +1,6 @@
 import { imageModelOpts } from "./image-options.mjs";
 import { NanoodleError } from "./errors.mjs";
-import { b64ImageMime, bytesToDataUrl, dataUrlBytes, redactUrl, sniffMime, MEDIA_INLINE_MAX } from "./media.mjs";
+import { b64ImageMime, bytesToDataUrl, dataUrlBytes, downloadMedia, sniffMime, MEDIA_INLINE_MAX } from "./media.mjs";
 import { assertPaymentOption, parseNanoInvoice, looksLikeResult } from "./x402.mjs";
 
 const AUDIO_MIME = { mp3: "audio/mpeg", opus: "audio/ogg", aac: "audio/aac", flac: "audio/flac", wav: "audio/wav", pcm: "audio/wav" };
@@ -433,15 +433,9 @@ export class NanoClient {
     if (/^data:/i.test(audioUrl)) {
       ({ bytes, mime } = dataUrlBytes(audioUrl));
     } else {
-      let r;
-      try { r = await this.fetch(audioUrl, { signal }); } // media CDN — no auth headers
-      catch (e) {
-        if (e && (e.name === "AbortError" || e.code === "aborted")) throw e;
-        if (signal && signal.aborted) throw e;
-        throw new NanoodleError("couldn't download the audio to transcribe: " + redactUrl(audioUrl));
-      }
-      if (!r.ok) throw new NanoodleError("couldn't download the audio to transcribe (" + r.status + "): " + redactUrl(audioUrl));
-      bytes = new Uint8Array(await r.arrayBuffer());
+      const downloaded = await downloadMedia(audioUrl, { fetch: this.fetch, signal, what: "the audio to transcribe" });
+      const r = downloaded.response;
+      bytes = downloaded.bytes;
       mime = ((r.headers && r.headers.get && r.headers.get("content-type")) || "audio/mpeg").split(";")[0];
     }
     if (bytes.length > 3.5 * 1024 * 1024) {
@@ -469,15 +463,7 @@ export class NanoClient {
    * Used when a chat audio part needs base64 bytes but the upstream node produced an https URL.
    */
   async fetchMediaDataUrl(url, { signal } = {}) {
-    let r;
-    try { r = await this.fetch(url, { signal }); }
-    catch (e) {
-      if (e && (e.name === "AbortError" || e.code === "aborted")) throw e;
-      if (signal && signal.aborted) throw e;
-      throw new NanoodleError("couldn't download media to inline: " + redactUrl(url));
-    }
-    if (!r.ok) throw new NanoodleError("couldn't download media to inline (" + r.status + "): " + redactUrl(url));
-    const bytes = new Uint8Array(await r.arrayBuffer());
+    const { bytes, response: r } = await downloadMedia(url, { fetch: this.fetch, signal, what: "media to inline" });
     const ct = (((r.headers && r.headers.get && r.headers.get("content-type")) || "").split(";")[0] || "").trim().toLowerCase();
     const mime = ct && ct !== "application/octet-stream" && ct !== "binary/octet-stream" ? ct : undefined;
     return bytesToDataUrl(bytes, mime); // sniffs magic bytes when the CDN's content-type is generic

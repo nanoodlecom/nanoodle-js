@@ -15,7 +15,7 @@
  */
 import { inflate, deflate } from "./zlib.mjs";
 import { NanoodleError } from "./errors.mjs";
-import { bytesToDataUrl, dataUrlBytes, redactUrl, sniffMime, MEDIA_INLINE_MAX } from "./media.mjs";
+import { bytesToDataUrl, dataUrlBytes, downloadMedia, sniffMime, MEDIA_INLINE_MAX } from "./media.mjs";
 import { MP4CAT } from "./mp4cat.mjs";
 
 const MAX_FRAMES = 12;
@@ -114,28 +114,21 @@ async function withTemp(fn) {
 }
 
 /** data:/https URL (or raw string MediaRef url) → bytes. */
-async function urlBytes(url, fetchFn) {
+async function urlBytes(url, fetchFn, signal) {
   if (url == null) throw new NanoodleError("no media input");
   const u = typeof url === "object" && url.url != null ? url.url : String(url);
   if (/^data:/i.test(u)) return dataUrlBytes(u).bytes;
   if (/^https?:/i.test(u)) {
     const fetchImpl = fetchFn || globalThis.fetch;
     if (!fetchImpl) throw new NanoodleError("can't download media: no fetch available");
-    let r;
-    try { r = await fetchImpl(u); }
-    catch (e) {
-      if (e && (e.name === "AbortError" || e.code === "aborted")) throw e;
-      throw new NanoodleError(`couldn't download media: ${redactUrl(u)}`);
-    }
-    if (!r.ok) throw new NanoodleError(`couldn't download media (${r.status}): ${redactUrl(u)}`);
-    return new Uint8Array(await r.arrayBuffer());
+    return (await downloadMedia(u, { fetch: fetchImpl, signal })).bytes;
   }
   throw new NanoodleError("media must be a data: or http(s) URL");
 }
 
-async function writeInput(dir, name, url, fetchFn) {
+async function writeInput(dir, name, url, fetchFn, signal) {
   await ensureNodeDeps();
-  const bytes = await urlBytes(url, fetchFn);
+  const bytes = await urlBytes(url, fetchFn, signal);
   // preserve a sensible extension so ffmpeg picks the demuxer
   let ext = ".bin";
   if (/^data:/i.test(String(typeof url === "object" ? url.url : url))) {
@@ -379,9 +372,9 @@ export async function maskToSource(maskUrl, sourceUrl, { fetch: fetchFn, signal 
   if (!maskUrl) throw new NanoodleError("couldn't read the mask");
   if (!sourceUrl) throw new NanoodleError("couldn't read the source image");
 
-  const srcBytes = await urlBytes(sourceUrl, fetchFn);
+  const srcBytes = await urlBytes(sourceUrl, fetchFn, signal);
   throwIfAborted(signal);
-  const maskBytes = await urlBytes(maskUrl, fetchFn);
+  const maskBytes = await urlBytes(maskUrl, fetchFn, signal);
   throwIfAborted(signal);
 
   const srcMime = sniffMime(srcBytes);
@@ -450,8 +443,8 @@ async function maskToSourcePngPure(maskBytes, srcBytes) {
 async function maskToSourceFfmpeg(maskUrl, sourceUrl, { fetch: fetchFn, signal } = {}) {
   return withTemp(async (dir) => {
     throwIfAborted(signal);
-    const srcPath = await writeInput(dir, "src", sourceUrl, fetchFn);
-    const maskPath = await writeInput(dir, "mask", maskUrl, fetchFn);
+    const srcPath = await writeInput(dir, "src", sourceUrl, fetchFn, signal);
+    const maskPath = await writeInput(dir, "mask", maskUrl, fetchFn, signal);
     const probe = await runProc("ffprobe", [
       "-v", "error", "-select_streams", "v:0",
       "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", srcPath,
@@ -668,7 +661,7 @@ export async function resizeCropImage(url, mode, tw, th, { fetch: fetchFn, signa
   if (!w && !h) throw new NanoodleError("set a width or height to resize to");
   const m = mode || "fit";
 
-  const bytes = await urlBytes(url, fetchFn);
+  const bytes = await urlBytes(url, fetchFn, signal);
   throwIfAborted(signal);
   const mime = sniffMime(bytes);
 
@@ -743,7 +736,7 @@ export async function fitImageInline(url, { budget = INLINE_IMAGE_BUDGET, fetch:
 export async function fitImageJpeg(url, maxDim, budget, { fetch: fetchFn, signal } = {}) {
   return withTemp(async (dir) => {
     throwIfAborted(signal);
-    const inPath = await writeInput(dir, "in", url, fetchFn);
+    const inPath = await writeInput(dir, "in", url, fetchFn, signal);
     const probe = await runProc("ffprobe", [
       "-v", "error", "-select_streams", "v:0",
       "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", inPath,
@@ -775,7 +768,7 @@ export async function fitImageJpeg(url, maxDim, budget, { fetch: fetchFn, signal
 async function resizeCropImageFfmpeg(url, m, w, h, { fetch: fetchFn, signal } = {}) {
   return withTemp(async (dir) => {
     throwIfAborted(signal);
-    const inPath = await writeInput(dir, "in", url, fetchFn);
+    const inPath = await writeInput(dir, "in", url, fetchFn, signal);
     const probe = await runProc("ffprobe", [
       "-v", "error", "-select_streams", "v:0",
       "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", inPath,
@@ -819,7 +812,7 @@ async function resizeCropImageFfmpeg(url, m, w, h, { fetch: fetchFn, signal } = 
  */
 export async function trimAudioToWav(url, start, len, rate = 16000, { fetch: fetchFn, wholeIfBlank = false, signal } = {}) {
   throwIfAborted(signal);
-  const bytes = await urlBytes(url, fetchFn);
+  const bytes = await urlBytes(url, fetchFn, signal);
   throwIfAborted(signal);
   const mime = sniffMime(bytes);
 
@@ -845,7 +838,7 @@ export async function trimAudioToWav(url, start, len, rate = 16000, { fetch: fet
 async function trimAudioToWavFfmpeg(url, start, len, rate = 16000, { fetch: fetchFn, wholeIfBlank = false, signal } = {}) {
   return withTemp(async (dir) => {
     throwIfAborted(signal);
-    const inPath = await writeInput(dir, "in", url, fetchFn);
+    const inPath = await writeInput(dir, "in", url, fetchFn, signal);
     const outPath = join(dir, "out.wav");
     const s = Math.max(0, Number(start) || 0);
 
@@ -908,7 +901,7 @@ export async function extractVideoFrames(url, { count = 1, gap = 0.5, dir = "end
   const fromEnd = (dir || "end") === "end";
 
   return withTemp(async (dir) => {
-    const inPath = await writeInput(dir, "in", url, fetchFn);
+    const inPath = await writeInput(dir, "in", url, fetchFn, signal);
     throwIfAborted(signal);
     const pr = await runProc("ffprobe", [
       "-v", "error", "-select_streams", "v:0",
@@ -977,7 +970,7 @@ export async function concatVideos(urls, dedup = true, { fetch: fetchFn, onProgr
     for (let i = 0; i < urls.length; i++) {
       throwIfAborted(signal);
       if (onProgress) onProgress(`loading clip ${i + 1}/${urls.length}…`);
-      bufs.push(await urlBytes(urls[i], fetchFn));
+      bufs.push(await urlBytes(urls[i], fetchFn, signal));
     }
     if (bufs.every((b) => MP4CAT.isMp4(b)) && MP4CAT.mp4ParamsMatch(bufs)) {
       if (onProgress) onProgress("combining…");
@@ -1003,7 +996,7 @@ async function concatVideosFfmpeg(urls, dedup = true, { fetch: fetchFn, onProgre
     for (let i = 0; i < urls.length; i++) {
       throwIfAborted(signal);
       if (onProgress) onProgress(`loading clip ${i + 1}/${urls.length}…`);
-      paths.push(await writeInput(dir, `c${i}`, urls[i], fetchFn));
+      paths.push(await writeInput(dir, `c${i}`, urls[i], fetchFn, signal));
     }
 
     // When dedup: trim ~1/30s from the start of clips 2..N (approximate seam-frame drop —
@@ -1057,8 +1050,8 @@ export async function muxSoundtrack(videoUrl, audioUrl, loop = false, { fetch: f
   return withTemp(async (dir) => {
     throwIfAborted(signal);
     if (onProgress) onProgress("adding soundtrack…");
-    const vPath = await writeInput(dir, "v", videoUrl, fetchFn);
-    const aPath = await writeInput(dir, "a", audioUrl, fetchFn);
+    const vPath = await writeInput(dir, "v", videoUrl, fetchFn, signal);
+    const aPath = await writeInput(dir, "a", audioUrl, fetchFn, signal);
     const outPath = join(dir, "out.mp4");
 
     let vdur = null;

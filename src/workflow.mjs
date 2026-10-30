@@ -112,7 +112,9 @@ export class RunResult {
     /** { [friendlyKey | nodeId]: value } — sink node primary outputs (a sink skipped by a closed gate has none) */
     this.outputs = outputs;
     /**
-     * per-node { status: "done"|"error"|"gated"|"skipped", out, error, costUsd, ms }.
+     * per-node { status: "done"|"error"|"gated"|"skipped", out, error, costUsd, ms, runId }.
+     * runId: the provider's async video/3D/audio job ID, or null when none was returned.
+     * Retained on failure/timeout too, so an accepted job can be traced without resubmitting.
      * "gated": a ⚖️ Decide yes/no gate that answered no — it ran and billed, `out` holds its answer
      * ({ text: "no", decision }), and it carries `gate: { yes, message }`. Not an error.
      * "skipped" + `gatedBy: <decide node id>`: downstream of a closed gate — never ran, never billed.
@@ -355,7 +357,14 @@ export class Workflow {
         if (c.balance != null) cost.balance = c.balance;
       };
       const onPoll = (info) => frozen(rec) ? undefined : emit({ type: "poll", nodeId: node.id, name: displayName(node), ...info });
-      const io = { onCost, onPoll, signal: nodeSignal };
+      const onRunId = (job) => {
+        if (frozen(rec)) return;
+        const runId = job && typeof job === "object" ? (job.runId || job.id) : job;
+        if (runId == null) return;
+        rec.runId = runId;
+        emit({ type: "node-run-id", nodeId: node.id, name: displayName(node), runId });
+      };
+      const io = { onCost, onPoll, onRunId, signal: nodeSignal };
       return {
         chat: (messages, model, opts) => this.client.chat(messages, model, opts, io),
         decide: (body) => this.client.decide(body, io),
@@ -527,8 +536,8 @@ export class Workflow {
 
     try {
       for (const n of order) {
-        if (NODE_TYPES[n.type].note) { nodesRec[n.id] = { status: "skipped", out: null, error: null, costUsd: null, ms: null }; continue; }
-        nodesRec[n.id] = { status: "pending", out: null, error: null, costUsd: null, ms: null };
+        if (NODE_TYPES[n.type].note) { nodesRec[n.id] = { status: "skipped", out: null, error: null, costUsd: null, ms: null, runId: null }; continue; }
+        nodesRec[n.id] = { status: "pending", out: null, error: null, costUsd: null, ms: null, runId: null };
         promises.set(n.id, execNode(n)); // siblings run concurrently; a node starts when ITS deps finish
       }
       await Promise.allSettled([...promises.values()]);
