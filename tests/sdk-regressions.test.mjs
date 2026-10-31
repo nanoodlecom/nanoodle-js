@@ -187,40 +187,55 @@ test("job ID is retained when polling times out; late callbacks cannot change it
   assert.equal(events.length, n);
 });
 
-test("per-second video prices round fractional duration up across catalog shapes", () => {
+test("per-second video shapes round only under an explicit whole-second quantity contract", () => {
+  const billing = "Duration rounded up to whole seconds, then clamped to the minimum and maximum billable duration";
   const shapes = [
     { per_second_by_resolution: { "720p": 0.085 } },
     { standard_prices_per_second: { "720p": 0.085 } },
     { per_second_by_mode: { text_to_video: 0.085 } },
-    { per_second_with_audio: 0.085 },
-    { per_second_without_audio: 0.085 },
-    { base_price_per_second: 0.085 },
-    { per_second: 0.085 },
-    { output_per_second: 0.085 },
-    { raw: { pricesPerSecond: { "720p": 0.085 } } },
+    ...["text_image_with_audio_per_second", "image_to_video_with_audio_per_second", "text_to_video_with_audio_per_second", "per_second_with_audio",
+      "text_to_video_per_second", "text_image_without_audio_per_second", "image_to_video_without_audio_per_second", "per_second_without_audio",
+      "base_price_per_second", "per_second", "output_per_second"].map((k) => ({ [k]: 0.085 })),
+    ...["pricesPerSecond", "textToVideoPricesPerSecond", "withoutAudioPricesPerSecond", "standardPricesPerSecond", "standardTextToVideoPricesPerSecond",
+      "outputPricesPerSecond", "fastPricesPerSecond", "withAudioPricesPerSecond"].map((k) => ({ raw: { [k]: { "720p": 0.085 } } })),
+    { per_target_megapixel_second: 0.085, default_target_megapixels: 1 },
     { output_per_second: 1, lora: { text_or_image_per_second: { "720p": 0.085 }, min_duration: 3, max_duration: 15 } },
   ];
-  for (const pricing of shapes) {
-    for (const [duration, seconds] of [[0.1, pricing.lora ? 3 : 1], [5.01, 6], [6.001, 7], [7, 7]]) {
-      const graph = { nodes: [{ id: "v", type: "tvideo", fields: {
-        model: "v", duration, resolution: "720p", loraUrl: "https://cdn.example/lora", modelOpts: { generate_audio: true },
-      } }], links: [] };
-      const result = estimateGraphCost(graph, { video: [{ id: "v", pricing }] });
-      assert.ok(Math.abs(result.usd - 0.085 * seconds) < 1e-12, JSON.stringify({ pricing, duration, usd: result.usd }));
+  for (const shape of shapes) {
+    for (const rule of [undefined, billing, "Reference clips are rounded up to whole seconds"]) {
+      const pricing = { ...shape, billing: rule };
+      for (const duration of [0.1, 5.01, 6.001, 7]) {
+        const source = pricing.lora ? Math.max(3, Math.min(15, duration)) : duration;
+        const seconds = rule === billing ? Math.ceil(source) : source;
+        const graph = { nodes: [{ id: "v", type: "tvideo", fields: {
+          model: "v", duration, resolution: "720p", loraUrl: "https://cdn.example/lora", modelOpts: { generate_audio: true },
+        } }], links: [] };
+        const result = estimateGraphCost(graph, { video: [{ id: "v", pricing }] });
+        assert.ok(Math.abs(result.usd - 0.085 * seconds) < 1e-12, JSON.stringify({ pricing, duration, usd: result.usd, seconds }));
+        assert.equal(result.exact, false);
+      }
     }
   }
 });
 
-test("audio per-second billing rounds after duration clamping; flat/frame prices keep their units", () => {
+test("audio per-second quantities preserve fractions by default; explicit contracts and other units remain separate", () => {
   const estimate = (type, pricing, duration, supported_parameters) => estimateGraphCost({
     nodes: [{ id: "n", type, fields: { model: "m", duration } }], links: [],
   }, { [type === "music" ? "audio" : "video"]: [{ id: "m", pricing, supported_parameters }] }).usd;
-  assert.ok(Math.abs(estimate("music", { per_second: 0.085 }, 6.001, { min_duration: 1, max_duration: 30 }) - 0.595) < 1e-12);
+  const billing = "Duration rounded up to whole seconds, then clamped to the minimum and maximum billable duration";
+  for (const rule of [undefined, billing]) {
+    const seconds = rule ? 7 : 6.001;
+    assert.ok(Math.abs(estimate("music", { per_second: 0.085, billing: rule }, 6.001,
+      { min_duration: 1, max_duration: 30 }) - 0.085 * seconds) < 1e-12);
+  }
   assert.equal(estimate("music", { per_second: 0.1 }, 35.1, { min_duration: 1, max_duration: 30 }), 3);
-  assert.equal(estimate("tvideo", { per_video: 0.43 }, 6.001), 0.43);
-  assert.equal(estimate("tvideo", { per_frame_unit: 0.01, frames_per_unit: 1 }, 0.5), 0.15);
-  assert.equal(estimate("tvideo", { base_price: 0.2, base_duration: 5, per_extra_second: 0.1 }, 5.01), 0.2 + 0.1);
-  assert.equal(estimate("tvideo", { per_duration: { "5.5": 0.43 } }, 5.5), 0.43);
+  assert.equal(estimate("tvideo", { per_video: 0.43, billing }, 6.001), 0.43);
+  assert.equal(estimate("tvideo", { per_frame_unit: 0.01, frames_per_unit: 1, billing }, 0.5), 0.15);
+  for (const rule of [undefined, billing]) {
+    const extra = rule ? 1 : 0.01;
+    assert.ok(Math.abs(estimate("tvideo", { base_price: 0.2, base_duration: 5, per_extra_second: 0.1, billing: rule }, 5.01) - (0.2 + extra * 0.1)) < 1e-12);
+  }
+  assert.equal(estimate("tvideo", { per_duration: { "5.5": 0.43 }, billing }, 5.5), 0.43);
   assert.equal(estimate("music", { per_billing_interval: 1, billing_interval_seconds: 60 }, 60.1,
     { min_duration: 1, max_duration: 300 }), 2);
 });

@@ -303,10 +303,13 @@ generation.
   `onProgress` event `{ type: "node-run-id", nodeId, name, runId }` reports it
   immediately after submit, before polling.
 
-`estimateGraphCost()` rounds per-second billing up to each started second;
-flat, frame, and explicit billing-interval prices retain their own units.
-The estimate remains a forecast: actual generated duration and provider pricing
-can differ.
+`estimateGraphCost()` follows recognized per-model billing contracts in the
+NanoGPT catalog. Explicit whole-second contracts round up and apply their
+billable-duration bounds; P-Video Upscale also applies its documented frame cap
+and output-FPS rate. Fractional and unspecified per-second contracts preserve
+fractions. Flat, frame, and explicit billing-interval prices retain their own
+units. Audio/video estimates remain forecasts: the provider verifies source
+media duration, and actual generated duration and pricing can differ.
 
 Hosted media downloads (`MediaRef.bytes()` / `.save()` and media inputs) retry
 connection or response-body interruptions up to three total GET attempts. Final
@@ -317,6 +320,14 @@ this download policy.
 `MediaRef.save("splat")` adds the detected media extension and returns the actual
 saved path (for example, `splat.ply`). An explicit filename extension is preserved.
 Generic binary downloads are sniffed before naming; unknown formats use `.bin`.
+
+**0.x migration note:** previously, an extensionless string path passed to
+`save()` was the literal output path. It now gets a detected extension; use the returned path
+instead of assuming the argument names the saved file. Explicit extensions stay
+unchanged. If you require an exact extensionless path in Node.js, write the bytes
+yourself: `await writeFile(exactPath, await media.bytes())`, with `writeFile` from
+`node:fs/promises`.
+
 The Idol 3D node returns its Gaussian splat PLY, while mesh models retain their
 GLB output. TRELLIS.2 estimates use the selected geometry resolution and texture
 size, including the catalog's 4K-texture variant prices.
