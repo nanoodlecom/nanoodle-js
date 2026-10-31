@@ -1,6 +1,6 @@
 import { imageModelOpts } from "./image-options.mjs";
 import { NanoodleError } from "./errors.mjs";
-import { b64ImageMime, bytesToDataUrl, dataUrlBytes, redactUrl, sniffMime, MEDIA_INLINE_MAX } from "./media.mjs";
+import { b64ImageMime, bytesToDataUrl, dataUrlBytes, downloadMedia, sniffMime, MEDIA_INLINE_MAX } from "./media.mjs";
 import { assertPaymentOption, parseNanoInvoice, looksLikeResult } from "./x402.mjs";
 
 const AUDIO_MIME = { mp3: "audio/mpeg", opus: "audio/ogg", aac: "audio/aac", flac: "audio/flac", wav: "audio/wav", pcm: "audio/wav" };
@@ -81,15 +81,17 @@ export function sleep(ms, signal) {
  * pollIntervals / timeouts are per-media-kind knobs (ms).
  */
 /**
- * GLB URL from a 3D status poll. A completed payload is 3D only when
+ * Model URL from a 3D status poll. A completed payload is 3D only when
  * output.kind is "3d" or output.format is "glb" — a bare video url is not a model.
- * Prefers model_url, then model.url, video.url, then videoUrls[0].
+ * Idol's model_url is only a point-cloud preview: its real Gaussian splat is
+ * model_mesh.url. Other models retain model_url, model.url, video.url, videoUrls[0].
  */
-export function model3dStatusUrl(s) {
+export function model3dStatusUrl(s, model) {
   const out = (s && s.data && s.data.output) || (s && s.output) || {};
   const kind = String(out.kind || "").toLowerCase();
   const format = String(out.format || "").toLowerCase();
   if (kind !== "3d" && format !== "glb") return "";
+  if (model === "speridlabs/idol") return (out.model_mesh && out.model_mesh.url) || "";
   const list = Array.isArray(out.videoUrls) ? out.videoUrls : [];
   const first = list.length ? list[0] : null;
   const fromList = typeof first === "string" ? first : (first && first.url) || "";
@@ -334,7 +336,7 @@ export class NanoClient {
       if (onPoll) onPoll({ status: st, elapsedMs: Date.now() - t0, runId });
       if (st === "COMPLETED" || st === "SUCCEEDED") {
         if (is3d) {
-          const url = model3dStatusUrl(s);
+          const url = model3dStatusUrl(s, model);
           if (!url) throw new NanoodleError("completed but no model url");
           return url;
         }
@@ -433,15 +435,9 @@ export class NanoClient {
     if (/^data:/i.test(audioUrl)) {
       ({ bytes, mime } = dataUrlBytes(audioUrl));
     } else {
-      let r;
-      try { r = await this.fetch(audioUrl, { signal }); } // media CDN — no auth headers
-      catch (e) {
-        if (e && (e.name === "AbortError" || e.code === "aborted")) throw e;
-        if (signal && signal.aborted) throw e;
-        throw new NanoodleError("couldn't download the audio to transcribe: " + redactUrl(audioUrl));
-      }
-      if (!r.ok) throw new NanoodleError("couldn't download the audio to transcribe (" + r.status + "): " + redactUrl(audioUrl));
-      bytes = new Uint8Array(await r.arrayBuffer());
+      const downloaded = await downloadMedia(audioUrl, { fetch: this.fetch, signal, what: "the audio to transcribe" });
+      const r = downloaded.response;
+      bytes = downloaded.bytes;
       mime = ((r.headers && r.headers.get && r.headers.get("content-type")) || "audio/mpeg").split(";")[0];
     }
     if (bytes.length > 3.5 * 1024 * 1024) {
@@ -469,15 +465,7 @@ export class NanoClient {
    * Used when a chat audio part needs base64 bytes but the upstream node produced an https URL.
    */
   async fetchMediaDataUrl(url, { signal } = {}) {
-    let r;
-    try { r = await this.fetch(url, { signal }); }
-    catch (e) {
-      if (e && (e.name === "AbortError" || e.code === "aborted")) throw e;
-      if (signal && signal.aborted) throw e;
-      throw new NanoodleError("couldn't download media to inline: " + redactUrl(url));
-    }
-    if (!r.ok) throw new NanoodleError("couldn't download media to inline (" + r.status + "): " + redactUrl(url));
-    const bytes = new Uint8Array(await r.arrayBuffer());
+    const { bytes, response: r } = await downloadMedia(url, { fetch: this.fetch, signal, what: "media to inline" });
     const ct = (((r.headers && r.headers.get && r.headers.get("content-type")) || "").split(";")[0] || "").trim().toLowerCase();
     const mime = ct && ct !== "application/octet-stream" && ct !== "binary/octet-stream" ? ct : undefined;
     return bytesToDataUrl(bytes, mime); // sniffs magic bytes when the CDN's content-type is generic

@@ -823,7 +823,7 @@ export const RUNNERS = {
     return cleanVoiceRun(model, inp, n.fields, (m, extra) => ctx.audio(m, "", extra));
   },
 
-  // 🧊 3D model: image and/or text → GLB via the video submit/poll API (mediaKind model3d).
+  // 🧊 3D model: image and/or text → model asset via the video submit/poll API.
   async model3d(n, inp, ctx) {
     const model = String((n.fields && n.fields.model) || "").trim() || MODEL3D_IMAGE_DEFAULT;
     const mods = model3dInputMods(ctx && ctx.catalog, model);

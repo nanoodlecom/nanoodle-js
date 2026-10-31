@@ -80,6 +80,38 @@ function pickDur(p, raw, fields) {
   return 5;
 }
 
+// Catalog billing is model-specific: a per-second rate alone does not imply
+// started-second billing. Recognize quantity contracts, never vendor families or
+// reference-input notes. Unknown contracts retain a fractional, inexact forecast.
+const WHOLE_SECOND_BILLING = new Set([
+  "duration rounded up to whole seconds, then clamped to the minimum and maximum billable duration",
+  "verified source-video duration, rounded up to whole seconds",
+  "verified source-video duration, rounded up to whole seconds and clamped to the minimum and maximum billable duration",
+  "verified source-video duration, rounded up to whole seconds; longer videos are trimmed to 10 minutes",
+  "per generated second (source length rounded up to whole seconds), multiplied by num_samples",
+]);
+const FRAME_LIMIT_BILLING = "rate × ceil(min(measured source seconds, (frame limit − 2) / fps)); 60 fps doubles the rate; turbo has no surcharge";
+const billingRule = (p) => String(p.billing || "").trim().toLowerCase();
+const clampSeconds = (seconds, lo, hi) => Math.min(_num(hi) ?? seconds, Math.max(_num(lo) ?? seconds, seconds));
+function perSecondQuantity(pricing, seconds) {
+  const p = pricing || {};
+  return WHOLE_SECOND_BILLING.has(billingRule(p))
+    ? clampSeconds(Math.ceil(seconds), p.minimum_billable_duration, p.maximum_billable_duration)
+    : seconds;
+}
+function frameLimitedBilling(pricing, fields, seconds) {
+  const p = pricing || {}, f = fields || {}, opts = f.modelOpts || {};
+  if (billingRule(p) !== FRAME_LIMIT_BILLING) return null;
+  // This FPS is the requested output setting, not an inferred source-frame rate.
+  const fps = _num(opts.fps ?? p.default_fps);
+  const res = opts.target_resolution ?? opts.resolution ?? f.resolution;
+  const frames = pickByRes(p.frame_limits_by_resolution, res, p.default_resolution);
+  if (!(fps > 0) || !(frames > 2) || (Array.isArray(p.supported_fps) && !p.supported_fps.some((x) => _num(x) === fps))) return null;
+  const multiplier = fps === 60 ? _num(p.high_fps_multiplier) : 1;
+  if (!(multiplier > 0)) return null;
+  return { seconds: Math.ceil(Math.min(seconds, (frames - 2) / fps)), multiplier, resolution: res };
+}
+
 // A LoRA row counts only once it carries a URL. loraParams sends nothing for a
 // blank row, so a blank row must not flip the estimate onto the LoRA tier.
 function videoLoraOn(fields) {
@@ -152,26 +184,28 @@ function videoBaseUsd(pricing, fields, audioOn, refOn) {
   const f = fields || {};
   const res = f.resolution, defRes = p.default_resolution ?? raw.defaultResolution;
   const dur = pickDur(p, raw, f);
-  const rp = (m) => pickByRes(m, res, defRes);
+  const frameBill = frameLimitedBilling(p, f, dur);
+  const billDur = frameBill ? frameBill.seconds * frameBill.multiplier : perSecondQuantity(p, dur);
+  const rp = (m) => pickByRes(m, frameBill ? frameBill.resolution : res, defRes);
   let v;
-  if ((v = rp(p.per_second_by_resolution)) != null) return v * dur;
-  if ((v = rp(p.standard_prices_per_second)) != null) return v * dur;
+  if ((v = rp(p.per_second_by_resolution)) != null) return v * billDur;
+  if ((v = rp(p.standard_prices_per_second)) != null) return v * billDur;
   if (p.per_second_by_mode) {
     const mm = p.per_second_by_mode;
     v = refOn ? (_num(mm.reference_to_video_image) ?? _num(mm.reference_to_video_video)) : null;
     if (v == null) v = _num(mm.text_to_video) ?? pickByRes(mm);
-    if (v != null) return v * dur;
+    if (v != null) return v * billDur;
   }
   if (audioOn) {
     for (const k of ["text_image_with_audio_per_second", "image_to_video_with_audio_per_second", "text_to_video_with_audio_per_second", "per_second_with_audio"]) {
-      if (p[k] != null) { v = (typeof p[k] === "object") ? rp(p[k]) : _num(p[k]); if (v != null) return v * dur; }
+      if (p[k] != null) { v = (typeof p[k] === "object") ? rp(p[k]) : _num(p[k]); if (v != null) return v * billDur; }
     }
   }
   for (const k of ["text_to_video_per_second", "text_image_without_audio_per_second", "image_to_video_without_audio_per_second", "per_second_without_audio"]) {
-    if (p[k] != null) { v = (typeof p[k] === "object") ? rp(p[k]) : _num(p[k]); if (v != null) return v * dur; }
+    if (p[k] != null) { v = (typeof p[k] === "object") ? rp(p[k]) : _num(p[k]); if (v != null) return v * billDur; }
   }
-  if (p.base_price_per_second != null) { const m = p.resolution_multipliers ? (rp(p.resolution_multipliers) ?? 1) : 1; v = _num(p.base_price_per_second); if (v != null) return v * dur * m; }
-  if (p.per_second != null) { v = _num(p.per_second); if (v != null) return v * dur; }
+  if (p.base_price_per_second != null) { const m = p.resolution_multipliers ? (rp(p.resolution_multipliers) ?? 1) : 1; v = _num(p.base_price_per_second); if (v != null) return v * billDur * m; }
+  if (p.per_second != null) { v = _num(p.per_second); if (v != null) return v * billDur; }
   if (p.per_duration) { const dk = String(Math.round(dur)); v = _num(p.per_duration[dk]) ?? _num(p.per_duration[String(dur)]) ?? pickByRes(p.per_duration); if (v != null) return v; }
   if (p.without_audio != null || p.with_audio != null) { v = audioOn ? (_num(p.with_audio) ?? _num(p.without_audio)) : (_num(p.without_audio) ?? _num(p.with_audio)); if (v != null) return v; }
   if (p.base_prices_by_resolution) {
@@ -184,9 +218,9 @@ function videoBaseUsd(pricing, fields, audioOn, refOn) {
     if (base != null) return base * mult;
   }
   if ((v = rp(p.per_resolution)) != null) return v;
-  if (p.base_price != null && p.per_extra_second != null) { const bd = _num(p.base_duration) || 0; return _num(p.base_price) + Math.max(0, dur - bd) * _num(p.per_extra_second); }
+  if (p.base_price != null && p.per_extra_second != null) { const bd = _num(p.base_duration) || 0; return _num(p.base_price) + Math.max(0, billDur - bd) * _num(p.per_extra_second); }
   if (p.per_video != null) { v = _num(p.per_video); if (v != null) return v; }
-  if (p.per_target_megapixel_second != null) { const mp = _num(p.default_target_megapixels) || 1; v = _num(p.per_target_megapixel_second) * mp * dur; return Math.max(v, _num(p.minimum_price) || 0); }
+  if (p.per_target_megapixel_second != null) { const mp = _num(p.default_target_megapixels) || 1; v = _num(p.per_target_megapixel_second) * mp * billDur; return Math.max(v, _num(p.minimum_price) || 0); }
   if (p.per_frame_unit != null) { const fpu = _num(p.frames_per_unit) || 1; return (dur * EST.videoFps / fpu) * _num(p.per_frame_unit); }
   if (p.base_price != null) { v = _num(p.base_price); if (v != null) return v; }
   if (Object.keys(raw).length) {
@@ -194,16 +228,16 @@ function videoBaseUsd(pricing, fields, audioOn, refOn) {
       if (raw.referenceToVideoPrices) { const inner = pickObjByRes(raw.referenceToVideoPrices, res, defRes); if (inner) { const dk = String(Math.round(dur)); v = _num(inner[dk]) ?? pickByRes(inner); if (v != null) return v; } }
       for (const k of ["textToVideoWithReferenceVideoPricesPerSecond", "standardTextToVideoWithReferenceVideoPricesPerSecond", "turboTextToVideoWithReferenceVideoPricesPerSecond",
         "standardReferenceVideoPricesPerSecond", "fastReferenceVideoPricesPerSecond"]) {
-        if (raw[k]) { v = pickByRes(raw[k], res, defRes); if (v != null) return v * dur; }
+        if (raw[k]) { v = pickByRes(raw[k], res, defRes); if (v != null) return v * billDur; }
       }
     }
     if (audioOn) {
-      if (raw.withAudioPricesPerSecond) { v = pickByRes(raw.withAudioPricesPerSecond, res, defRes); if (v != null) return v * dur; }
+      if (raw.withAudioPricesPerSecond) { v = pickByRes(raw.withAudioPricesPerSecond, res, defRes); if (v != null) return v * billDur; }
       if (raw.withAudioPrices) { const inner = pickObjByRes(raw.withAudioPrices, res, defRes); if (inner) { const dk = String(Math.round(dur)); v = _num(inner[dk]) ?? pickByRes(inner); if (v != null) return v; } }
     }
     for (const k of ["pricesPerSecond", "textToVideoPricesPerSecond", "withoutAudioPricesPerSecond",
       "standardPricesPerSecond", "standardTextToVideoPricesPerSecond", "outputPricesPerSecond", "fastPricesPerSecond"]) {
-      if (raw[k]) { v = pickByRes(raw[k], res, defRes); if (v != null) return v * dur; }
+      if (raw[k]) { v = pickByRes(raw[k], res, defRes); if (v != null) return v * billDur; }
     }
     for (const k of ["withoutAudioPrices", "withAudioPrices", "referenceToVideoPrices"]) {
       if (raw[k]) { const inner = pickObjByRes(raw[k], res, defRes); if (inner) { const dk = String(Math.round(dur)); v = _num(inner[dk]) ?? pickByRes(inner); if (v != null) return v; } }
@@ -221,12 +255,11 @@ function videoBaseUsd(pricing, fields, audioOn, refOn) {
   // once refs are wired. The per-ref surcharge is added in videoUnitUsd.
   if (p.output_per_second != null && p.lora && typeof p.lora === "object" && videoLoraOn(f)) {
     const L = p.lora;
-    const billSecs = (d, lo, hi) => Math.min(_num(hi) ?? d, Math.max(_num(lo) ?? d, d));
     const tbl = (refOn && L.reference_per_second) ? L.reference_per_second : L.text_or_image_per_second;
     v = (tbl && typeof tbl === "object") ? rp(tbl) : _num(tbl);
-    if (v != null) return v * billSecs(dur, L.min_duration, L.max_duration);
+    if (v != null) return v * perSecondQuantity(L.billing ? L : p, clampSeconds(dur, L.min_duration, L.max_duration));
   }
-  return genericScanUsd(p, dur);
+  return genericScanUsd(p, billDur);
 }
 // Last resort so a never-seen pricing shape estimates SOMETHING rather than
 // blanking: the smallest per-second number scaled by duration, else the
@@ -254,7 +287,7 @@ function audioUnitUsd(pricing, chars, seconds) {
   if (p.per_thousand_chars != null) { let cost = _num(p.per_thousand_chars) * (c / 1000); if (p.per_generation != null) cost += _num(p.per_generation); return Math.max(cost, _num(p.minimum) || 0); }
   if (p.per_prompt_char_block != null) { const bs = _num(p.prompt_char_block_size) || 1; return Math.max(Math.ceil(c / bs) * _num(p.per_prompt_char_block), _num(p.minimum) || 0); }
   if (p.per_generation != null) return _num(p.per_generation);
-  if (p.per_second != null) return Math.max(_num(p.per_second) * secs, _num(p.minimum) || 0);
+  if (p.per_second != null) return Math.max(_num(p.per_second) * perSecondQuantity(p, secs), _num(p.minimum) || 0);
   // per started billing interval (ElevenLabs Music / VEED Clean Audio: $/started minute)
   if (p.per_billing_interval != null) {
     const iv = _num(p.billing_interval_seconds) || 60;
@@ -277,6 +310,25 @@ function imageUsd(pricing, size, count) {
   const per = (pricing && pricing.per_image) || {};
   const v = per[size] ?? per.square ?? per.square_hd ?? Object.values(per)[0];
   return (v != null && isFinite(+v)) ? +v * (count || 1) : null;
+}
+
+// TRELLIS.2 publishes an explicit resolution tier and a 4K-texture surcharge
+// tier. Keep this mapping scoped to its documented contract; arbitrary variant
+// labels on other models must not be guessed from unrelated option values.
+function model3dVariantPrice(model, fields) {
+  if (model.id !== "wavespeed-ai/trellis-2/image-to-3d") return null;
+  const p = model.pricing || {}, by = p.per_run_by_variant;
+  if (!by || typeof by !== "object") return null;
+  const sp = model.supported_parameters || {}, defs = sp.defaults || {}, params = sp.parameters || {};
+  const opts = (fields && fields.modelOpts) || {};
+  const pick = (key) => opts[key] ?? defs[key] ?? (params[key] && params[key].default);
+  const resolution = pick("resolution") ?? p.default_variant;
+  const texture = pick("texture_size");
+  // Unknown sizes are not certified as a known variant, even if they would
+  // happen to select an existing base-resolution entry.
+  if (!["1024", "2048", "4096"].includes(String(texture))) return null;
+  const key = String(resolution) + (String(texture) === "4096" ? "+4k-texture" : "");
+  return Object.hasOwn(by, key) ? _num(by[key]) : null;
 }
 
 /** Which pricing kinds a graph touches — so a caller fetches only the catalogs it needs. */
@@ -311,7 +363,7 @@ function nodeUnitUsd(node, catItem, graph) {
     const u = videoUnitUsd(pricing, f, refCount, audioCtx);
     return (u != null && isFinite(u)) ? u : null;
   }
-  if (kind === "model3d") return _num(pricing && pricing.per_run);
+  if (kind === "model3d") return model3dVariantPrice(m, f) ?? _num(pricing && pricing.per_run);
   if (node.type === "decide") {
     // input tokens only (twin of the editor's Decide estimate); pick asks twice (in order + reversed)
     const imgs = (graph && Array.isArray(graph.links))
@@ -375,7 +427,7 @@ export function estimateGraphCost(graph, catalogs = {}) {
       const by = m.pricing && m.pricing.per_run_by_variant;
       if (by && typeof by === "object") {
         const vals = Object.values(by).map(_num).filter((v) => v != null);
-        if (vals.length && Math.min(...vals) !== Math.max(...vals)) exact = false;
+        if (vals.length && Math.min(...vals) !== Math.max(...vals) && model3dVariantPrice(m, n.fields) == null) exact = false;
       }
     } else if (kind !== "image") exact = false;
   }

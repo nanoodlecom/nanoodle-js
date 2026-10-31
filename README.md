@@ -298,6 +298,39 @@ generation.
 - `result.costUsd` — total of prices NanoGPT returned
 - `result.costExact` — `false` if any call omitted a price (total is then a floor)
 - `result.remainingBalance` — freshest balance the API reported
+- `result.nodes[nodeId].runId` — provider job ID for async video, 3D, and audio
+  jobs, or `null`. Available on failures too through `RunError.result`; an
+  `onProgress` event `{ type: "node-run-id", nodeId, name, runId }` reports it
+  immediately after submit, before polling.
+
+`estimateGraphCost()` follows recognized per-model billing contracts in the
+NanoGPT catalog. Explicit whole-second contracts round up and apply their
+billable-duration bounds; P-Video Upscale also applies its documented frame cap
+and output-FPS rate. Fractional and unspecified per-second contracts preserve
+fractions. Flat, frame, and explicit billing-interval prices retain their own
+units. Audio/video estimates remain forecasts: the provider verifies source
+media duration, and actual generated duration and pricing can differ.
+
+Hosted media downloads (`MediaRef.bytes()` / `.save()` and media inputs) retry
+connection or response-body interruptions up to three total GET attempts. Final
+failures are `NanoodleError`s with signed URL queries omitted. HTTP rejections
+and cancellation stop immediately. Generation requests are never retried by
+this download policy.
+
+`MediaRef.save("splat")` adds the detected media extension and returns the actual
+saved path (for example, `splat.ply`). An explicit filename extension is preserved.
+Generic binary downloads are sniffed before naming; unknown formats use `.bin`.
+
+**0.x migration note:** previously, an extensionless string path passed to
+`save()` was the literal output path. It now gets a detected extension; use the returned path
+instead of assuming the argument names the saved file. Explicit extensions stay
+unchanged. If you require an exact extensionless path in Node.js, write the bytes
+yourself: `await writeFile(exactPath, await media.bytes())`, with `writeFile` from
+`node:fs/promises`.
+
+The Idol 3D node returns its Gaussian splat PLY, while mesh models retain their
+GLB output. TRELLIS.2 estimates use the selected geometry resolution and texture
+size, including the catalog's 4K-texture variant prices.
 
 A price of `0` means known-included (subscription), not unknown. `inspect`
 and loading/validating workflows never call the API. No telemetry, no

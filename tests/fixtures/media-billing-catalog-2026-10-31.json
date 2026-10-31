@@ -1,0 +1,824 @@
+{
+  "sources": {
+    "video": {
+      "url": "https://nano-gpt.com/api/v1/video-models",
+      "generated_at": "2026-10-31T18:16:15.599Z"
+    },
+    "audio": {
+      "url": "https://nano-gpt.com/api/v1/audio-models",
+      "generated_at": "2026-10-31T18:16:16.401Z"
+    }
+  },
+  "video": [
+    {
+      "id": "minimax-h3",
+      "pricing": {
+        "currency": "USD",
+        "output_per_second": 0.14,
+        "reference_video_input_per_second": 0.14,
+        "extra_reference_image": 0.05,
+        "included_reference_images": 5,
+        "reference_video_billing": "each reference clip is billed for 2-15 s, 15 s combined, rounded up",
+        "video_edit_per_second_by_resolution": {
+          "480p": 0.05,
+          "768p": 0.125
+        },
+        "video_extend_per_second_by_resolution": {
+          "480p": 0.04,
+          "768p": 0.08
+        },
+        "video_edit_reference_fee": 0.02,
+        "default_duration": 5,
+        "min_duration": 5,
+        "max_duration": 15,
+        "supported_durations": [
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15
+        ],
+        "lora": {
+          "text_or_image_per_second": {
+            "480p": 0.05,
+            "540p": 0.075,
+            "768p": 0.1,
+            "1080p": 0.2
+          },
+          "reference_per_second": {
+            "480p": 0.06,
+            "540p": 0.09,
+            "768p": 0.135,
+            "1080p": 0.27
+          },
+          "reference_video_input": "Same per-second rate as output; rounded up, capped at 15 seconds.",
+          "reference_image_or_audio": 0.02,
+          "min_duration": 3,
+          "max_duration": 15
+        }
+      },
+      "supported_parameters": {
+        "max_prompt_characters": 4000,
+        "prompt_length": {
+          "status": "known",
+          "unit": "utf16_code_units",
+          "trim_whitespace": true
+        },
+        "parameters": {
+          "mode": {
+            "type": "select",
+            "label": "Mode",
+            "default": "auto",
+            "options": [
+              {
+                "value": "auto",
+                "label": "Auto-detect"
+              },
+              {
+                "value": "reference-to-video",
+                "label": "Reference to Video"
+              },
+              {
+                "value": "video-edit",
+                "label": "Edit Video"
+              },
+              {
+                "value": "video-extend",
+                "label": "Extend Video"
+              }
+            ]
+          },
+          "duration": {
+            "type": "select",
+            "label": "Duration (seconds)",
+            "default": "5",
+            "options": [
+              {
+                "value": "3",
+                "label": "3"
+              },
+              {
+                "value": "4",
+                "label": "4"
+              },
+              {
+                "value": "5",
+                "label": "5"
+              },
+              {
+                "value": "6",
+                "label": "6"
+              },
+              {
+                "value": "7",
+                "label": "7"
+              },
+              {
+                "value": "8",
+                "label": "8"
+              },
+              {
+                "value": "9",
+                "label": "9"
+              },
+              {
+                "value": "10",
+                "label": "10"
+              },
+              {
+                "value": "11",
+                "label": "11"
+              },
+              {
+                "value": "12",
+                "label": "12"
+              },
+              {
+                "value": "13",
+                "label": "13"
+              },
+              {
+                "value": "14",
+                "label": "14"
+              },
+              {
+                "value": "15",
+                "label": "15"
+              }
+            ]
+          },
+          "aspect_ratio": {
+            "type": "select",
+            "label": "Aspect Ratio",
+            "description": "Auto uses 16:9 for LoRA generation.",
+            "default": "auto",
+            "options": [
+              {
+                "value": "auto",
+                "label": "auto"
+              },
+              {
+                "value": "21:9",
+                "label": "21:9"
+              },
+              {
+                "value": "16:9",
+                "label": "16:9"
+              },
+              {
+                "value": "4:3",
+                "label": "4:3"
+              },
+              {
+                "value": "1:1",
+                "label": "1:1"
+              },
+              {
+                "value": "3:4",
+                "label": "3:4"
+              },
+              {
+                "value": "9:16",
+                "label": "9:16"
+              },
+              {
+                "value": "9:21",
+                "label": "9:21"
+              }
+            ]
+          },
+          "resolution": {
+            "type": "select",
+            "label": "LoRA / Edit / Extend Resolution",
+            "description": "LoRA generation supports all listed resolutions; edit/extend support 480p and 768p. Generation without LoRAs remains 2K.",
+            "default": "480p",
+            "options": [
+              {
+                "value": "480p",
+                "label": "480p"
+              },
+              {
+                "value": "540p",
+                "label": "540p"
+              },
+              {
+                "value": "768p",
+                "label": "768p"
+              },
+              {
+                "value": "1080p",
+                "label": "1080p"
+              }
+            ]
+          },
+          "reference_images": {
+            "type": "text",
+            "label": "Reference image URLs",
+            "description": "Optional URL, one URL per line, or a JSON array of URLs.",
+            "default": ""
+          },
+          "reference_videos": {
+            "type": "text",
+            "label": "Reference video URLs",
+            "description": "Optional URL, one URL per line, or a JSON array of URLs.",
+            "default": ""
+          },
+          "reference_audios": {
+            "type": "text",
+            "label": "Reference audio URLs",
+            "description": "Optional URL, one URL per line, or a JSON array of URLs.",
+            "default": ""
+          },
+          "lora_url_1": {
+            "type": "text",
+            "label": "LoRA 1 URL",
+            "description": "HTTPS URL of a compatible LoRA weights file.",
+            "default": ""
+          },
+          "lora_scale_1": {
+            "type": "number",
+            "label": "LoRA 1 strength",
+            "default": 1,
+            "min": 0,
+            "max": 4,
+            "step": 0.1
+          },
+          "lora_url_2": {
+            "type": "text",
+            "label": "LoRA 2 URL",
+            "description": "HTTPS URL of a compatible LoRA weights file.",
+            "default": ""
+          },
+          "lora_scale_2": {
+            "type": "number",
+            "label": "LoRA 2 strength",
+            "default": 1,
+            "min": 0,
+            "max": 4,
+            "step": 0.1
+          },
+          "lora_url_3": {
+            "type": "text",
+            "label": "LoRA 3 URL",
+            "description": "HTTPS URL of a compatible LoRA weights file.",
+            "default": ""
+          },
+          "lora_scale_3": {
+            "type": "number",
+            "label": "LoRA 3 strength",
+            "default": 1,
+            "min": 0,
+            "max": 4,
+            "step": 0.1
+          },
+          "generate_audio": {
+            "type": "switch",
+            "label": "Generate Edit Audio",
+            "default": true
+          },
+          "seed": {
+            "type": "number",
+            "label": "Seed",
+            "description": "Applies to editing, extension and LoRA generation. Use -1 for a random seed.",
+            "default": -1,
+            "min": -1,
+            "max": 2147483647,
+            "step": 1
+          }
+        },
+        "defaults": {
+          "mode": "auto",
+          "duration": "5",
+          "aspect_ratio": "auto",
+          "resolution": "480p",
+          "reference_images": "",
+          "reference_videos": "",
+          "reference_audios": "",
+          "lora_url_1": "",
+          "lora_scale_1": 1,
+          "lora_url_2": "",
+          "lora_scale_2": 1,
+          "lora_url_3": "",
+          "lora_scale_3": 1,
+          "generate_audio": true,
+          "seed": -1
+        }
+      }
+    },
+    {
+      "id": "mirelo-ai/sfx2.0",
+      "pricing": {
+        "currency": "USD",
+        "min_duration": 1,
+        "max_duration": 600,
+        "duration_step": 0.1,
+        "default_duration": 10,
+        "per_second": 0.011,
+        "standard_per_second": 0.0165,
+        "multiplier_parameter": "num_samples",
+        "multiplier_min": 1,
+        "multiplier_max": 4,
+        "multiplier_default": 2,
+        "promotion": {
+          "starts_at": "2026-10-14T00:00:00.000Z",
+          "ends_at": "2026-12-14T00:00:00.000Z",
+          "per_second": 0.011,
+          "calendar_timezone": "UTC"
+        },
+        "billing": "Output sound seconds per sample. Video sound duration clamps to source length verified from media bytes. Fractional seconds are preserved."
+      },
+      "supported_parameters": {
+        "max_prompt_characters": 2000,
+        "prompt_length": {
+          "status": "known",
+          "unit": "utf16_code_units",
+          "trim_whitespace": true
+        },
+        "parameters": {
+          "duration": {
+            "type": "number",
+            "label": "Sound duration (seconds)",
+            "description": "Text defaults to 30s; video defaults to 10s and clamps to source length. Video requires at least 1s.",
+            "default": 10,
+            "min": 1,
+            "max": 600,
+            "step": 0.1
+          },
+          "num_samples": {
+            "type": "number",
+            "label": "Samples",
+            "description": "Each sample is billed separately.",
+            "default": 2,
+            "min": 1,
+            "max": 4,
+            "step": 1
+          },
+          "preserve_speech": {
+            "type": "boolean",
+            "label": "Preserve speech",
+            "default": true,
+            "description": "Keep speech from the source video while generating the surrounding soundtrack."
+          },
+          "negative_prompt": {
+            "type": "string",
+            "label": "Negative prompt",
+            "description": "Sounds to exclude (up to 1000 characters).",
+            "default": "",
+            "maxLength": 1000
+          },
+          "seed": {
+            "type": "number",
+            "label": "Seed",
+            "default": -1,
+            "min": -1,
+            "max": 9007199254740988,
+            "step": 1
+          }
+        },
+        "defaults": {
+          "duration": 10,
+          "num_samples": 2,
+          "preserve_speech": true,
+          "negative_prompt": "",
+          "seed": -1
+        }
+      }
+    },
+    {
+      "id": "video-upscaler",
+      "pricing": {
+        "currency": "USD",
+        "per_second_by_resolution": {
+          "720p": 0.015,
+          "1080p": 0.0225,
+          "2k": 0.03,
+          "4k": 0.0375
+        },
+        "default_duration": 5,
+        "default_resolution": "1080p"
+      },
+      "supported_parameters": {
+        "max_prompt_characters": null,
+        "prompt_length": {
+          "status": "not_applicable",
+          "unit": null,
+          "trim_whitespace": null
+        },
+        "parameters": {
+          "resolution": {
+            "label": "Target Resolution",
+            "description": "Choose the desired output resolution",
+            "type": "select",
+            "options": [
+              {
+                "value": "720p",
+                "label": "720p"
+              },
+              {
+                "value": "1080p",
+                "label": "1080p"
+              },
+              {
+                "value": "2k",
+                "label": "2K (1440p)"
+              },
+              {
+                "value": "4k",
+                "label": "4K (2160p)"
+              }
+            ],
+            "default": "1080p"
+          }
+        },
+        "defaults": {
+          "resolution": "1080p"
+        }
+      }
+    },
+    {
+      "id": "seedvr2-video-upscaler",
+      "pricing": {
+        "currency": "USD",
+        "per_second_by_resolution": {
+          "720p": 0.02,
+          "1080p": 0.04,
+          "2k": 0.06,
+          "4k": 0.08
+        },
+        "billing": "Duration rounded up to whole seconds, then clamped to the minimum and maximum billable duration",
+        "minimum_billable_duration": 3,
+        "maximum_billable_duration": 600,
+        "default_duration": 5,
+        "default_resolution": "1080p"
+      },
+      "supported_parameters": {
+        "max_prompt_characters": null,
+        "prompt_length": {
+          "status": "not_applicable",
+          "unit": null,
+          "trim_whitespace": null
+        },
+        "parameters": {
+          "resolution": {
+            "type": "select",
+            "label": "Target Resolution",
+            "default": "1080p",
+            "options": [
+              {
+                "value": "720p",
+                "label": "720p"
+              },
+              {
+                "value": "1080p",
+                "label": "1080p"
+              },
+              {
+                "value": "2k",
+                "label": "2K (1440p)"
+              },
+              {
+                "value": "4k",
+                "label": "4K (2160p)"
+              }
+            ],
+            "description": "Choose the desired output resolution"
+          }
+        },
+        "defaults": {
+          "resolution": "1080p"
+        }
+      }
+    },
+    {
+      "id": "pruna-ai/p-video/upscale",
+      "pricing": {
+        "currency": "USD",
+        "per_second_by_resolution": {
+          "720p": 0.01,
+          "1080p": 0.02,
+          "2k": 0.04,
+          "4k": 0.08
+        },
+        "frame_limits_by_resolution": {
+          "720p": 2400,
+          "1080p": 1200,
+          "2k": 600,
+          "4k": 300
+        },
+        "default_resolution": "1080p",
+        "default_fps": 24,
+        "supported_fps": [
+          24,
+          30,
+          60
+        ],
+        "high_fps_multiplier": 2,
+        "billing": "rate \u00d7 ceil(min(measured source seconds, (frame limit \u2212 2) / fps)); 60 FPS doubles the rate; Turbo has no surcharge"
+      },
+      "supported_parameters": {
+        "max_prompt_characters": null,
+        "prompt_length": {
+          "status": "not_applicable",
+          "unit": null,
+          "trim_whitespace": null
+        },
+        "parameters": {
+          "resolution": {
+            "type": "select",
+            "label": "Target resolution",
+            "default": "1080p",
+            "options": [
+              {
+                "value": "720p",
+                "label": "720p"
+              },
+              {
+                "value": "1080p",
+                "label": "1080p"
+              },
+              {
+                "value": "2k",
+                "label": "2K"
+              },
+              {
+                "value": "4k",
+                "label": "4K"
+              }
+            ]
+          },
+          "fps": {
+            "type": "integer",
+            "label": "Frames per second",
+            "description": "60 FPS doubles the rate per second and shortens the maximum processed duration.",
+            "default": 24,
+            "options": [
+              {
+                "value": "24",
+                "label": "24 FPS"
+              },
+              {
+                "value": "30",
+                "label": "30 FPS"
+              },
+              {
+                "value": "60",
+                "label": "60 FPS"
+              }
+            ],
+            "enum": [
+              24,
+              30,
+              60
+            ]
+          },
+          "turbo": {
+            "type": "boolean",
+            "label": "Turbo",
+            "description": "Faster processing with a quality tradeoff. No price surcharge.",
+            "default": false
+          },
+          "videoUrl": {
+            "type": "string",
+            "required": true,
+            "aliases": [
+              "video",
+              "video_url",
+              "videoDataUrl"
+            ],
+            "description": "MP4 or MOV up to 512 MiB. Duration and size are verified before billing. Long clips are trimmed to (frame limit \u2212 2) / FPS seconds from the beginning."
+          },
+          "videoAttachmentId": {
+            "type": "string",
+            "description": "Authorized video attachment instead of a video URL."
+          },
+          "target_resolution": {
+            "type": "string",
+            "label": "Target resolution",
+            "default": "1080p",
+            "options": [
+              {
+                "value": "720p",
+                "label": "720p"
+              },
+              {
+                "value": "1080p",
+                "label": "1080p"
+              },
+              {
+                "value": "2k",
+                "label": "2K"
+              },
+              {
+                "value": "4k",
+                "label": "4K"
+              }
+            ],
+            "aliases": [
+              "resolution"
+            ],
+            "enum": [
+              "720p",
+              "1080p",
+              "2k",
+              "4k"
+            ]
+          }
+        },
+        "defaults": {
+          "resolution": "1080p",
+          "fps": 24,
+          "turbo": false,
+          "target_resolution": "1080p"
+        }
+      }
+    }
+  ],
+  "audio": [
+    {
+      "id": "elevenlabs/audio-isolation",
+      "pricing": {
+        "per_second": 0.002016666666666667,
+        "minimum": 0.00121,
+        "currency": "USD"
+      },
+      "supported_parameters": {
+        "min_duration": 0.6,
+        "audio": {
+          "type": "string",
+          "format": "uri",
+          "required": true,
+          "aliases": [
+            "audio_url"
+          ]
+        },
+        "duration": {
+          "type": "number",
+          "minimum": 0.6,
+          "maximum": 3600,
+          "required": true,
+          "description": "Source duration estimate for quoting. The server verifies the recording before billing proportionally to its duration."
+        },
+        "max_duration": 3600
+      }
+    },
+    {
+      "id": "veed/clean-audio",
+      "pricing": {
+        "per_billing_interval": 0.013750000000000002,
+        "billing_interval_seconds": 60,
+        "billing_interval_label": "started minute",
+        "minimum": 0.013750000000000002,
+        "currency": "USD"
+      },
+      "supported_parameters": {
+        "min_duration": 0.6,
+        "audio_url": {
+          "type": "string",
+          "format": "uri",
+          "required": true,
+          "aliases": [
+            "audio"
+          ]
+        },
+        "duration": {
+          "type": "number",
+          "minimum": 0.6,
+          "maximum": 1800,
+          "required": true,
+          "description": "Source duration estimate for quoting. Verified before billing; rounded to whole seconds, then up to full minutes."
+        },
+        "strength": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.874
+        },
+        "target_lufs": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": -40,
+          "maximum": -8,
+          "default": -19,
+          "description": "Use null to skip loudness normalization."
+        },
+        "output_format": {
+          "type": "string",
+          "enum": [
+            "flac",
+            "wav"
+          ],
+          "default": "flac"
+        },
+        "max_duration": 1800
+      }
+    },
+    {
+      "id": "mirelo-ai/sfx2.0",
+      "pricing": {
+        "currency": "USD",
+        "min_duration": 0.1,
+        "max_duration": 600,
+        "duration_step": 0.1,
+        "default_duration": 30,
+        "per_second": 0.011,
+        "standard_per_second": 0.0165,
+        "multiplier_parameter": "num_samples",
+        "multiplier_min": 1,
+        "multiplier_max": 4,
+        "multiplier_default": 2,
+        "promotion": {
+          "starts_at": "2026-10-14T00:00:00.000Z",
+          "ends_at": "2026-12-14T00:00:00.000Z",
+          "per_second": 0.011,
+          "calendar_timezone": "UTC"
+        },
+        "billing": "Output sound seconds per sample. Video sound duration clamps to source length verified from media bytes. Fractional seconds are preserved."
+      },
+      "supported_parameters": {
+        "duration": {
+          "label": "Sound duration (seconds)",
+          "type": "number",
+          "min": 0.1,
+          "max": 600,
+          "step": 0.1,
+          "default": 30,
+          "description": "Text defaults to 30s; video defaults to 10s and clamps to source length. Video requires at least 1s."
+        },
+        "num_samples": {
+          "min": 1,
+          "max": 4,
+          "default": 2
+        },
+        "negative_prompt": {
+          "max_length": 1000
+        },
+        "preserve_speech": {
+          "default": true
+        },
+        "seed": {
+          "label": "Seed",
+          "type": "number",
+          "min": -1,
+          "max": 9007199254740988,
+          "step": 1,
+          "default": -1
+        },
+        "video_url": {
+          "label": "Source video URL (optional)",
+          "type": "string",
+          "description": "Supply a video for synchronized audio. Leave empty to generate from text. Video must be at least one second."
+        },
+        "upload_audio_format": {
+          "label": "Audio format",
+          "type": "string",
+          "default": "wav",
+          "options": [
+            {
+              "value": "wav",
+              "label": "WAV"
+            },
+            {
+              "value": "mp3",
+              "label": "MP3"
+            },
+            {
+              "value": "aac",
+              "label": "AAC"
+            },
+            {
+              "value": "flac",
+              "label": "FLAC"
+            }
+          ]
+        },
+        "upload_audio_bitrate_kbps": {
+          "label": "Bitrate (optional)",
+          "type": "number",
+          "min": 32,
+          "max": 320,
+          "step": 1,
+          "description": "Text input only. MP3 accepts standard 32\u2013320 kbps rates; AAC accepts 32\u2013256. Omit for defaults. Unavailable for WAV/FLAC."
+        },
+        "prompt": {
+          "min_length": 1,
+          "max_length": 2000,
+          "required_without_video": true
+        },
+        "min_duration": 0.1,
+        "video_min_duration": 1,
+        "max_duration": 600,
+        "default_text_duration": 30,
+        "default_video_duration": 10,
+        "duration_step": 0.1
+      }
+    }
+  ]
+}
