@@ -81,15 +81,17 @@ export function sleep(ms, signal) {
  * pollIntervals / timeouts are per-media-kind knobs (ms).
  */
 /**
- * GLB URL from a 3D status poll. A completed payload is 3D only when
+ * Model URL from a 3D status poll. A completed payload is 3D only when
  * output.kind is "3d" or output.format is "glb" — a bare video url is not a model.
- * Prefers model_url, then model.url, video.url, then videoUrls[0].
+ * Idol's model_url is only a point-cloud preview: its real Gaussian splat is
+ * model_mesh.url. Other models retain model_url, model.url, video.url, videoUrls[0].
  */
-export function model3dStatusUrl(s) {
+export function model3dStatusUrl(s, model) {
   const out = (s && s.data && s.data.output) || (s && s.output) || {};
   const kind = String(out.kind || "").toLowerCase();
   const format = String(out.format || "").toLowerCase();
   if (kind !== "3d" && format !== "glb") return "";
+  if (model === "speridlabs/idol") return (out.model_mesh && out.model_mesh.url) || "";
   const list = Array.isArray(out.videoUrls) ? out.videoUrls : [];
   const first = list.length ? list[0] : null;
   const fromList = typeof first === "string" ? first : (first && first.url) || "";
@@ -334,7 +336,7 @@ export class NanoClient {
       if (onPoll) onPoll({ status: st, elapsedMs: Date.now() - t0, runId });
       if (st === "COMPLETED" || st === "SUCCEEDED") {
         if (is3d) {
-          const url = model3dStatusUrl(s);
+          const url = model3dStatusUrl(s, model);
           if (!url) throw new NanoodleError("completed but no model url");
           return url;
         }

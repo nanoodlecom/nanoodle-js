@@ -48,7 +48,7 @@ const EXT_MIME = {
   ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg", ".opus": "audio/ogg",
   ".aac": "audio/aac", ".flac": "audio/flac", ".m4a": "audio/mp4",
   ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime", ".mkv": "video/x-matroska",
-  ".glb": "model/gltf-binary",
+  ".glb": "model/gltf-binary", ".ply": "model/ply",
   ".txt": "text/plain", ".json": "application/json",
 };
 
@@ -57,7 +57,7 @@ const MIME_EXT = {
   "audio/mpeg": "mp3", "audio/wav": "wav", "audio/ogg": "ogg", "audio/aac": "aac",
   "audio/flac": "flac", "audio/mp4": "m4a",
   "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov",
-  "model/gltf-binary": "glb",
+  "model/gltf-binary": "glb", "model/ply": "ply", "application/ply": "ply", "application/x-ply": "ply",
   "text/plain": "txt", "application/json": "json",
 };
 
@@ -105,6 +105,7 @@ export function sniffMime(bytes) {
   if (b.length >= 12 && ascii(4, "ftyp")) return "video/mp4";
   if (b.length >= 4 && b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return "video/webm";
   if (b.length >= 4 && ascii(0, "glTF")) return "model/gltf-binary";
+  if (/^ply\r?\nformat (?:ascii|binary_little_endian|binary_big_endian) 1\.0\r?\n/.test(new TextDecoder().decode(b.subarray(0, 64)))) return "model/ply";
   return "application/octet-stream";
 }
 
@@ -196,19 +197,30 @@ export class MediaRef {
 
   /** @returns {Promise<Uint8Array>} the raw media bytes (decodes data:, fetches http(s)). */
   async bytes() {
-    if (this.url.startsWith("data:")) return dataUrlBytes(this.url).bytes;
-    const { bytes, response: r } = await downloadMedia(this.url, { fetch: this._fetch });
-    if (!this._mime) {
-      const ct = r.headers && r.headers.get && r.headers.get("content-type");
-      if (ct) this._mime = ct.split(";")[0].trim();
+    let bytes;
+    if (this.url.startsWith("data:")) bytes = dataUrlBytes(this.url).bytes;
+    else {
+      const downloaded = await downloadMedia(this.url, { fetch: this._fetch });
+      bytes = downloaded.bytes;
+      if (!this._mime) {
+        const r = downloaded.response;
+        const ct = r.headers && r.headers.get && r.headers.get("content-type");
+        if (ct) this._mime = ct.split(";")[0].trim();
+      }
     }
+    // CDNs commonly serve model assets as generic binary. Sniff their actual
+    // format before the CLI or save() chooses a filename extension.
+    if (!this._mime || /^(?:application|binary)\/octet-stream$/i.test(this._mime)) this._mime = sniffMime(bytes);
     return bytes;
   }
 
-  /** Write the media bytes to `path` (Node only); resolves to the path. */
+  /** Write bytes (Node only); append a media extension if absent, and return the saved path. */
   async save(path) {
     const { writeFile } = await import("node:fs/promises");
-    await writeFile(path, await this.bytes());
+    const { extname } = await import("node:path");
+    const bytes = await this.bytes();
+    if (typeof path === "string" && !extname(path)) path += "." + extForMime(this.mime);
+    await writeFile(path, bytes);
     return path;
   }
 }

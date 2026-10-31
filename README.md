@@ -314,6 +314,13 @@ failures are `NanoodleError`s with signed URL queries omitted. HTTP rejections
 and cancellation stop immediately. Generation requests are never retried by
 this download policy.
 
+`MediaRef.save("splat")` adds the detected media extension and returns the actual
+saved path (for example, `splat.ply`). An explicit filename extension is preserved.
+Generic binary downloads are sniffed before naming; unknown formats use `.bin`.
+The Idol 3D node returns its Gaussian splat PLY, while mesh models retain their
+GLB output. TRELLIS.2 estimates use the selected geometry resolution and texture
+size, including the catalog's 4K-texture variant prices.
+
 A price of `0` means known-included (subscription), not unknown. `inspect`
 and loading/validating workflows never call the API. No telemetry, no
 analytics; the API key is never logged.

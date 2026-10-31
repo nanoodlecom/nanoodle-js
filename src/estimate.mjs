@@ -282,6 +282,25 @@ function imageUsd(pricing, size, count) {
   return (v != null && isFinite(+v)) ? +v * (count || 1) : null;
 }
 
+// TRELLIS.2 publishes an explicit resolution tier and a 4K-texture surcharge
+// tier. Keep this mapping scoped to its documented contract; arbitrary variant
+// labels on other models must not be guessed from unrelated option values.
+function model3dVariantPrice(model, fields) {
+  if (model.id !== "wavespeed-ai/trellis-2/image-to-3d") return null;
+  const p = model.pricing || {}, by = p.per_run_by_variant;
+  if (!by || typeof by !== "object") return null;
+  const sp = model.supported_parameters || {}, defs = sp.defaults || {}, params = sp.parameters || {};
+  const opts = (fields && fields.modelOpts) || {};
+  const pick = (key) => opts[key] ?? defs[key] ?? (params[key] && params[key].default);
+  const resolution = pick("resolution") ?? p.default_variant;
+  const texture = pick("texture_size");
+  // Unknown sizes are not certified as a known variant, even if they would
+  // happen to select an existing base-resolution entry.
+  if (!["1024", "2048", "4096"].includes(String(texture))) return null;
+  const key = String(resolution) + (String(texture) === "4096" ? "+4k-texture" : "");
+  return Object.hasOwn(by, key) ? _num(by[key]) : null;
+}
+
 /** Which pricing kinds a graph touches — so a caller fetches only the catalogs it needs. */
 export function graphModelKinds(graph) {
   const kinds = new Set();
@@ -314,7 +333,7 @@ function nodeUnitUsd(node, catItem, graph) {
     const u = videoUnitUsd(pricing, f, refCount, audioCtx);
     return (u != null && isFinite(u)) ? u : null;
   }
-  if (kind === "model3d") return _num(pricing && pricing.per_run);
+  if (kind === "model3d") return model3dVariantPrice(m, f) ?? _num(pricing && pricing.per_run);
   if (node.type === "decide") {
     // input tokens only (twin of the editor's Decide estimate); pick asks twice (in order + reversed)
     const imgs = (graph && Array.isArray(graph.links))
@@ -378,7 +397,7 @@ export function estimateGraphCost(graph, catalogs = {}) {
       const by = m.pricing && m.pricing.per_run_by_variant;
       if (by && typeof by === "object") {
         const vals = Object.values(by).map(_num).filter((v) => v != null);
-        if (vals.length && Math.min(...vals) !== Math.max(...vals)) exact = false;
+        if (vals.length && Math.min(...vals) !== Math.max(...vals) && model3dVariantPrice(m, n.fields) == null) exact = false;
       }
     } else if (kind !== "image") exact = false;
   }
