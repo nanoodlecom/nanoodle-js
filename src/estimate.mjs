@@ -338,6 +338,47 @@ export function graphModelKinds(graph) {
   return kinds;
 }
 
+// 🎬 Avatar / lip-sync models bill the AUDIO's length, not the 5 s video default
+// (twin of the app's avatarAudioEstSeconds, nanoodle #782). Seconds the forecast
+// assumes for the wired audio source: its measured length when known, else its
+// duration knob, else (a Speech/tts node) the words it will speak at ~2.8 words/s —
+// the wired/typed text, or EST.ttsChars at ~15 chars/s when the text isn't known.
+// Whole seconds, rounded up (LongCat billed 14 s for a 13.1 s voice). null =
+// nothing usable wired → keep the model default.
+export function avatarAudioEstSeconds(src, srcText, measuredSecs) {
+  if (!src) return null;
+  const m = +measuredSecs; if (isFinite(m) && m > 0) return Math.max(1, Math.ceil(m - 1e-6));
+  const d = parseFloat(src.fields && src.fields.duration); if (isFinite(d) && d > 0) return Math.max(1, Math.ceil(d - 1e-6));
+  if (src.type !== "tts") return null;
+  const txt = String(srcText || (src.fields && src.fields.prompt) || "").trim();
+  const secs = txt ? txt.split(/\s+/).length / 2.8 : EST.ttsChars / 15;
+  return Math.max(1, Math.ceil(secs - 1e-6));
+}
+// LongCat Avatar bills whole voice seconds clamped to the catalog's minimum/
+// maximum_billable_duration (longcat-avatar-1.5 = 3–30 s); fall back to 3–30 s for
+// longcat-avatar-1.5 when the catalog omits them. Other avatar models: unchanged.
+// (Twin of the app's avatarClampSecs.)
+export function avatarClampSecs(model, secs, pricing) {
+  if (secs == null || !isFinite(secs)) return secs;
+  const p = pricing || {};
+  let lo = +p.minimum_billable_duration, hi = +p.maximum_billable_duration;
+  if (!(lo > 0) || !(hi >= lo)) { if (!/^longcat-avatar-1\.5(?!\/)/i.test(String(model || ""))) return secs; lo = 3; hi = 30; }
+  return Math.min(hi, Math.max(lo, secs));
+}
+// Seconds the wired audio of a lipsync node will run, from the static graph
+// (Node has no media element, so no measured length; a run's actual audio is not inferred).
+function lipsyncAudioSeconds(node, graph) {
+  if (!graph || !Array.isArray(graph.links) || !Array.isArray(graph.nodes)) return null;
+  const byId = (id) => graph.nodes.find((x) => x.id === id);
+  const al = graph.links.find((l) => l.to && l.to.node === node.id && l.to.port === "audio");
+  const src = al && al.from && byId(al.from.node);
+  if (!src) return null;
+  const tl = graph.links.find((l) => l.to && l.to.node === src.id && l.to.port === "prompt");
+  const ts = tl && tl.from && byId(tl.from.node);
+  const txt = ts ? ((ts.out && typeof ts.out.text === "string" && ts.out.text) || (ts.type === "text" && ts.fields && ts.fields.text) || "") : "";
+  return avatarAudioEstSeconds(src, txt, null);
+}
+
 // One node's USD/run from its chosen model + settings. `catItem` is the raw
 // catalog entry for node.fields.model (null → unpriceable). `graph` is needed
 // only to detect wired reference-image ports (video ref tier).
@@ -360,7 +401,12 @@ function nodeUnitUsd(node, catItem, graph) {
       ? graph.links.filter((l) => l.to && l.to.node === node.id && REF_PORT_RE.test(l.to.port)).length
       : 0;
     const audioCtx = { params: (sp.parameters && typeof sp.parameters === "object") ? sp.parameters : {}, defaults: sp.defaults || {} };
-    const u = videoUnitUsd(pricing, f, refCount, audioCtx);
+    let vf = f;
+    if (node.type === "lipsync") {   // 🎬 avatar bills the wired audio's length (see avatarAudioEstSeconds)
+      const secs = lipsyncAudioSeconds(node, graph);
+      if (secs != null) vf = { ...f, duration: avatarClampSecs(id, secs, pricing) };
+    }
+    const u = videoUnitUsd(pricing, vf, refCount, audioCtx);
     return (u != null && isFinite(u)) ? u : null;
   }
   if (kind === "model3d") return model3dVariantPrice(m, f) ?? _num(pricing && pricing.per_run);
