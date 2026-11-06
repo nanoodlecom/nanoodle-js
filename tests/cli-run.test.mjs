@@ -222,3 +222,17 @@ test("CLI contract: a closed ⚖️ Decide gate exits 0 and reports gated, not f
   assert.match(r.stderr, /⤼ LLM \(l\) skipped — gate g said no/);
   assert.ok(srv.requests.every((q) => q.path !== "/api/v1/chat/completions"));
 });
+
+test('CLI failure summary retains accepted job ID for recovery', async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script('POST /api/generate-video', { json: { runId: 'accepted-job', cost: 0.2 } });
+  const cwd = await mkdtemp(join(tmpdir(), 'nanoodle-cli-'));
+  const graphPath = join(cwd, 'g.json');
+  await writeFile(graphPath, JSON.stringify({ nodes: [{ id: 'v', type: 'tvideo', fields: { model: 'test', prompt: 'hi' } }], links: [] }));
+  const r = await runCli(['run', graphPath, '--timeout', '300'], { cwd, env: { NANOGPT_BASE_URL: srv.url } });
+  assert.equal(r.status, 1, r.stderr);
+  const summary = JSON.parse(r.stdout);
+  assert.equal(summary.nodes.v.runId, 'accepted-job');
+  assert.equal(summary.nodes.v.status, 'error');
+});
