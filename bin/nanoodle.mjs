@@ -261,6 +261,7 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
   const dir = outDir ?? "noodle-out";
   let dirMade = false;
   const printable = {};
+  const savedNames = new Set();
   for (const o of wf.outputs) {
     const value = result.outputs[o.key];
     if (value === undefined) { printable[o.key] = null; continue; }
@@ -269,7 +270,15 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
       const safe = o.key.replace(/[^\w.-]+/g, "_");
       // fetch before naming: hosted media only reveals its mime via the response Content-Type
       const data = await value.bytes();
-      const path = join(dir, safe + "." + extForMime(value.mime || sniffMime(data)));
+      const ext = extForMime(value.mime || sniffMime(data));
+      let filename = safe + "." + ext;
+      // Friendly keys can collapse during sanitization ("A B" / "A_B").
+      // Also avoid case-only collisions on case-insensitive filesystems.
+      for (let suffix = 2; savedNames.has(filename.toLowerCase()); suffix++) {
+        filename = safe + "_" + suffix + "." + ext;
+      }
+      savedNames.add(filename.toLowerCase());
+      const path = join(dir, filename);
       await writeFile(path, data);
       printable[o.key] = path;
       if (!quiet) console.error(`${o.key}: saved ${path}`);

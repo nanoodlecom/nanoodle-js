@@ -44,7 +44,8 @@ No paid API calls, wallet sends, production data changes or npm publication.
 8. Duplicate persisted node IDs executed against shared/overwritten scheduler records.
 9. CLI JSON discarded the SDK's retained job IDs on success/failure.
 10. An accepted lipsync job could be trim-retried when a poll error matched the audio-duration rejection message. Poll errors now retain runId and block the retry.
-11. Unreadable/missing-MIME x402 completion was interpreted as settlement-only and could replay generation. It now stops with a payment ID for reconciliation.
+11. CLI sanitization collapsed distinct output names onto one file and silently overwrote paid artifacts. A per-run filename allocator now adds collision-free suffixes, including collisions with already suffixed names and case-insensitive paths. Independently reproduced from the nanoodle-skill audit using local upload nodes; three outputs produced only two distinct paths before the fix.
+12. Unreadable/missing-MIME x402 completion was interpreted as settlement-only and could replay generation. It now stops with a payment ID for reconciliation.
 
 Regression coverage: `tests/state-machine-lifecycle.test.mjs` and a CLI mock-server
 job-recovery test. Seven independently selected tests fail against original main;
@@ -60,7 +61,8 @@ An arbitrary wallet callback already entered cannot be preempted or rolled back.
 Payment/network ambiguity must be reconciled using the retained invoice ID/status;
 there is no safe automatic second payment.
 
-CLI output saving occurs after execution and is not atomic across several files;
+CLI output saving allocates distinct paths within a run, but occurs after execution
+and is not atomic across several files or protected from overwriting earlier runs;
 keep the graph and returned hosted URLs/job IDs when building durable orchestration.
 Infinite video polling is deliberate; callers needing a deadline must configure it.
 Finite client media caps start after submission; Workflow run/node deadlines also

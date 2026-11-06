@@ -236,3 +236,19 @@ test('CLI failure summary retains accepted job ID for recovery', async (t) => {
   assert.equal(summary.nodes.v.runId, 'accepted-job');
   assert.equal(summary.nodes.v.status, 'error');
 });
+
+test('CLI preserves distinct media outputs when sanitized filenames or suffixes collide', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'nanoodle-cli-'));
+  const names = ['A B', 'A_B', 'A_B_2', 'a-b?', 'A-b!'];
+  const bytes = names.map((name) => Buffer.concat([Buffer.from(PNG_B64, 'base64'), Buffer.from(name)]));
+  const graphPath = join(cwd, 'g.json');
+  await writeFile(graphPath, JSON.stringify({ nodes: names.map((name, i) => ({
+    id: `n${i}`, type: 'upload', name, fields: { image: 'data:image/png;base64,' + bytes[i].toString('base64') },
+  })), links: [] }));
+  const r = await runCli(['run', graphPath, '--json'], { cwd });
+  assert.equal(r.status, 0, r.stderr);
+  const summary = JSON.parse(r.stdout);
+  const paths = names.map(name => summary.outputs[name]);
+  assert.equal(new Set(paths.map(path => path.toLowerCase())).size, names.length, 'every output receives a distinct path');
+  for (let i = 0; i < names.length; i++) assert.deepEqual(await readFile(join(cwd, paths[i])), bytes[i], names[i]);
+});
