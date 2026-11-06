@@ -43,7 +43,8 @@ No paid API calls, wallet sends, production data changes or npm publication.
 7. Direct client poll deadlines did not bound a hung fetch/body or an overlong sleep.
 8. Duplicate persisted node IDs executed against shared/overwritten scheduler records.
 9. CLI JSON discarded the SDK's retained job IDs on success/failure.
-10. Unreadable/missing-MIME x402 completion was interpreted as settlement-only and could replay generation. It now stops with a payment ID for reconciliation.
+10. An accepted lipsync job could be trim-retried when a poll error matched the audio-duration rejection message. Poll errors now retain runId and block the retry.
+11. Unreadable/missing-MIME x402 completion was interpreted as settlement-only and could replay generation. It now stops with a payment ID for reconciliation.
 
 Regression coverage: `tests/state-machine-lifecycle.test.mjs` and a CLI mock-server
 job-recovery test. Seven independently selected tests fail against original main;

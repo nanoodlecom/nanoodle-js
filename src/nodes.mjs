@@ -774,7 +774,7 @@ export const RUNNERS = {
       } catch (e) {
         if (attempt > 0) throw e;
         const msg = (e && e.message) || "";
-        if (/^video failed:/i.test(msg)) throw e; // post-submit poll failure: already charged — no second job
+        if ((e && e.runId != null) || /^video failed:/i.test(msg)) throw e; // post-submit poll failure: already charged — no second job
         const cap = /up to\s+(\d+(?:\.\d+)?)\s*second/i.exec(msg);
         if (cap && /INVALID_AUDIO_DURATION|audio.{0,15}duration/i.test(msg)) {
           trimSec = Math.min(60, Math.max(1, parseFloat(cap[1]) - 0.1)); // the model told us its real cap

@@ -361,42 +361,50 @@ export class NanoClient {
       if (onRunId) onRunId(runId);
     }
 
-    const t0 = Date.now();
-    const videoCap = is3d ? this.timeouts.model3d : this.timeouts.video;
-    const pollEvery = is3d ? (this.pollIntervals.model3d || this.pollIntervals.video) : this.pollIntervals.video;
-    // Infinity/non-finite = wait forever (default). Finite ms = headless/CI cap.
-    while (!Number.isFinite(videoCap) || Date.now() - t0 < videoCap) {
-      await sleep(Number.isFinite(videoCap) ? Math.min(pollEvery, Math.max(0, videoCap - (Date.now() - t0))) : pollEvery, signal);
-      if (Number.isFinite(videoCap) && Date.now() - t0 >= videoCap) break;
-      let s;
-      try {
-        s = await this._pollJson("/api/video/status?requestId=" + encodeURIComponent(runId), signal, videoCap - (Date.now() - t0));
-      } catch (e) {
-        if (signal && signal.aborted) throw abortError(signal.reason);
-        if (e.code === "poll-timeout") break;
-        if (e.status >= 400 && e.status < 500 && ![408, 429].includes(e.status)) throw e;
-        continue; // transient poll failure — keep polling until complete or optional cap
-      }
-      const st = String((s.data && s.data.status) || s.status || "").toUpperCase();
-      if (onPoll) onPoll({ status: st, elapsedMs: Date.now() - t0, runId });
-      if (st === "COMPLETED" || st === "SUCCEEDED") {
-        if (is3d) {
-          const url = model3dStatusUrl(s, model);
-          if (!url) throw new NanoodleError("completed but no model url");
+    try {
+      const t0 = Date.now();
+      const videoCap = is3d ? this.timeouts.model3d : this.timeouts.video;
+      const pollEvery = is3d ? (this.pollIntervals.model3d || this.pollIntervals.video) : this.pollIntervals.video;
+      // Infinity/non-finite = wait forever (default). Finite ms = headless/CI cap.
+      while (!Number.isFinite(videoCap) || Date.now() - t0 < videoCap) {
+        await sleep(Number.isFinite(videoCap) ? Math.min(pollEvery, Math.max(0, videoCap - (Date.now() - t0))) : pollEvery, signal);
+        if (Number.isFinite(videoCap) && Date.now() - t0 >= videoCap) break;
+        let s;
+        try {
+          s = await this._pollJson("/api/video/status?requestId=" + encodeURIComponent(runId), signal, videoCap - (Date.now() - t0));
+        } catch (e) {
+          if (signal && signal.aborted) throw abortError(signal.reason);
+          if (e.code === "poll-timeout") break;
+          if (e.status >= 400 && e.status < 500 && ![408, 429].includes(e.status)) throw e;
+          continue; // transient poll failure — keep polling until complete or optional cap
+        }
+        const st = String((s.data && s.data.status) || s.status || "").toUpperCase();
+        if (onPoll) onPoll({ status: st, elapsedMs: Date.now() - t0, runId });
+        if (st === "COMPLETED" || st === "SUCCEEDED") {
+          if (is3d) {
+            const url = model3dStatusUrl(s, model);
+            if (!url) throw new NanoodleError("completed but no model url");
+            return url;
+          }
+          const out = (s.data && s.data.output) || s.output || {};
+          const url = (out.video && out.video.url) || out.url || (Array.isArray(out.video) ? out.video[0] && out.video[0].url : null);
+          if (!url) throw new NanoodleError("completed but no video url");
           return url;
         }
-        const out = (s.data && s.data.output) || s.output || {};
-        const url = (out.video && out.video.url) || out.url || (Array.isArray(out.video) ? out.video[0] && out.video[0].url : null);
-        if (!url) throw new NanoodleError("completed but no video url");
-        return url;
+        if (["FAILED", "ERROR", "CANCELED", "CANCELLED", "CONTENT_POLICY_VIOLATION"].includes(st)) {
+          const why = (s.data && s.data.error) || st;
+          throw new NanoodleError((is3d ? "3D failed: " : "video failed: ") + why);
+        }
       }
-      if (["FAILED", "ERROR", "CANCELED", "CANCELLED", "CONTENT_POLICY_VIOLATION"].includes(st)) {
-        const why = (s.data && s.data.error) || st;
-        throw new NanoodleError((is3d ? "3D failed: " : "video failed: ") + why);
-      }
+      const label = is3d ? "3D" : "video";
+      throw new NanoodleError(`${label} timed out (${Math.round(videoCap / 1000)}s) — the job may still be running on NanoGPT's side`, { code: "timeout" });
+    } catch (e) {
+      if (signal && signal.aborted) throw e;
+      throw new NanoodleError(e && e.message ? e.message : String(e), {
+        ...(e && e.code ? { code: e.code } : {}),
+        ...(e && e.status ? { status: e.status } : {}), runId, cause: e,
+      });
     }
-    const label = is3d ? "3D" : "video";
-    throw new NanoodleError(`${label} timed out (${Math.round(videoCap / 1000)}s) — the job may still be running on NanoGPT's side`, { code: "timeout" });
   }
 
   /**

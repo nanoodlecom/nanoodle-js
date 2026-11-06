@@ -121,3 +121,16 @@ test('expired invoice never reaches payment callback', async () => {
   await assert.rejects(client.chat([], 'test'), e => e.code === 'x402-expired');
   assert.equal(payments, 0);
 });
+
+test('lipsync cannot trim-retry after an accepted job fails polling', async () => {
+  const { RUNNERS } = await import('../src/browser.mjs');
+  let submits = 0, trims = 0;
+  const client = new NanoClient({ apiKey: 'k', pollIntervals: { video: 1 }, fetch: async (url, init) => {
+    if (init.method === 'POST') { submits++; return json({ runId: 'accepted-job' }); }
+    return new Response('INVALID_AUDIO_DURATION audio duration up to 30 seconds', { status: 400 });
+  } });
+  await assert.rejects(RUNNERS.lipsync({ id: 'n', fields: { model: 'test' } }, { image: 'data:image/png;base64,eA==', audio: 'https://cdn.invalid/audio.mp3' }, {
+    video: (...args) => client.video(...args), trimAudio: async () => { trims++; return 'data:audio/wav;base64,eA=='; }
+  }), e => e.runId === 'accepted-job');
+  assert.equal(submits, 1); assert.equal(trims, 0);
+});
