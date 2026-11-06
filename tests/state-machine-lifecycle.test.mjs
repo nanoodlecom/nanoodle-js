@@ -134,3 +134,33 @@ test('lipsync cannot trim-retry after an accepted job fails polling', async () =
   }), e => e.runId === 'accepted-job');
   assert.equal(submits, 1); assert.equal(trims, 0);
 });
+
+test('derived input and output keys stay unique when authored names contain suffixes', async () => {
+  const wf = Workflow.fromJSON({ nodes: ['A', 'A', 'A 2', 'a 2'].map((name, i) => ({ id: `n${i}`, type: 'text', name, fields: { text: `stored${i}` } })), links: [] });
+  assert.equal(new Set(wf.inputs.map(i => i.key.toLowerCase())).size, 4);
+  assert.equal(new Set(wf.outputs.map(o => o.key.toLowerCase())).size, 4);
+  const assigned = Object.fromEntries(wf.inputs.map((input, i) => [input.key, `input${i}`]));
+  const result = await wf.run(assigned);
+  for (let i = 0; i < 4; i++) {
+    assert.equal(result.get(wf.outputs[i].key), `input${i}`);
+    assert.equal(result.get(`n${i}`), `input${i}`);
+  }
+});
+
+test('friendly output keys cannot overwrite another node ID alias', async () => {
+  const wf = Workflow.fromJSON({ nodes: [
+    { id: 'n1', type: 'text', name: 'Out', fields: { text: 'first' } },
+    { id: 'n2', type: 'text', name: 'n1', fields: { text: 'second' } },
+  ], links: [] });
+  const result = await wf.run();
+  assert.equal(result.get('n1'), 'first');
+  assert.equal(result.get(wf.outputs[1].key), 'second');
+});
+
+test('prototype-named node identities and friendly keys are retained as own data', async () => {
+  const wf = Workflow.fromJSON({ nodes: [{ id: '__proto__', type: 'text', name: '__proto__', fields: { text: 'stored' } }], links: [] });
+  const result = await wf.run(JSON.parse('{"__proto__":"supplied"}'));
+  assert.equal(result.get('__proto__'), 'supplied');
+  assert.ok(Object.hasOwn(result.nodes, '__proto__'));
+  assert.ok(Object.hasOwn(result.outputs, '__proto__'));
+});
