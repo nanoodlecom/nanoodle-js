@@ -45,7 +45,9 @@ No paid API calls, wallet sends, production data changes or npm publication.
 9. CLI JSON discarded the SDK's retained job IDs on success/failure.
 10. An accepted lipsync job could be trim-retried when a poll error matched the audio-duration rejection message. Poll errors now retain runId and block the retry.
 11. CLI sanitization collapsed distinct output names onto one file and silently overwrote paid artifacts. A per-run filename allocator now adds collision-free suffixes, including collisions with already suffixed names and case-insensitive paths. Independently reproduced from the nanoodle-skill audit using local upload nodes; three outputs produced only two distinct paths before the fix.
-12. Unreadable/missing-MIME x402 completion was interpreted as settlement-only and could replay generation. It now stops with a payment ID for reconciliation.
+12. Friendly input/output keys also collided before filename allocation when an authored name already contained a generated suffix (`A`, `A`, `A 2`). The shared key allocator now reserves each final case-insensitive key; a regression verifies independent assignment and lookup for every node.
+13. Output friendly keys could overwrite another node ID alias; prototype-named IDs/keys could disappear through object setters. Derived output keys now reserve other node aliases, and record/CLI maps preserve prototype-named keys as own data.
+14. Unreadable/missing-MIME x402 completion was interpreted as settlement-only and could replay generation. It now stops with a payment ID for reconciliation.
 
 Regression coverage: `tests/state-machine-lifecycle.test.mjs` and a CLI mock-server
 job-recovery test. Seven independently selected tests fail against original main;

@@ -223,12 +223,12 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
   }
 
   // ---- run ----
-  const inputs = {};
+  const inputs = Object.create(null);
   for (const arg of inputArgs) {
     const [k, v] = parseKv(arg, "--input");
     inputs[k] = await resolveValue(v);
   }
-  const settings = {};
+  const settings = Object.create(null);
   for (const arg of setArgs) {
     const [k, v] = parseKv(arg, "--set");
     settings[k] = v;
@@ -260,7 +260,7 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
   // media outputs land under --out (default ./noodle-out; created only if there is media to save)
   const dir = outDir ?? "noodle-out";
   let dirMade = false;
-  const printable = {};
+  const printable = Object.create(null);
   const savedNames = new Set();
   for (const o of wf.outputs) {
     const value = result.outputs[o.key];

@@ -252,3 +252,15 @@ test('CLI preserves distinct media outputs when sanitized filenames or suffixes 
   assert.equal(new Set(paths.map(path => path.toLowerCase())).size, names.length, 'every output receives a distinct path');
   for (let i = 0; i < names.length; i++) assert.deepEqual(await readFile(join(cwd, paths[i])), bytes[i], names[i]);
 });
+
+test('CLI accepts and summarizes prototype-named friendly input/output keys', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'nanoodle-cli-'));
+  const graphPath = join(cwd, 'g.json');
+  await writeFile(graphPath, JSON.stringify({ nodes: [{ id: '__proto__', type: 'text', name: '__proto__', fields: { text: 'stored' } }], links: [] }));
+  const r = await runCli(['run', graphPath, '--input', '__proto__=supplied', '--json'], { cwd });
+  assert.equal(r.status, 0, r.stderr);
+  const summary = JSON.parse(r.stdout);
+  assert.ok(Object.hasOwn(summary.outputs, '__proto__'));
+  assert.equal(summary.outputs.__proto__, 'supplied');
+  assert.ok(Object.hasOwn(summary.nodes, '__proto__'));
+});

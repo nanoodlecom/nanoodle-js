@@ -350,7 +350,7 @@ export class Workflow {
     }
 
     const emit = (evt) => { if (onProgress) { try { onProgress(evt); } catch { /* listener errors never kill the run */ } } };
-    const nodesRec = {};
+    const nodesRec = Object.fromEntries(graph.nodes.map(n => [n.id, null]));
     const errors = [];
     const cost = { total: 0, exact: true, balance: null };
     const byId = new Map(graph.nodes.map((n) => [n.id, n]));
@@ -562,15 +562,15 @@ export class Workflow {
       cost.exact = false;
     }
     // ---- result ----
-    const outputsMap = {};
+    const outputEntries = [];
     for (const o of this.outputs) {
       const rec = nodesRec[o.nodeId];
       if (!rec || !(rec.status === "done" || (rec.status === "gated" && rec.out))) continue;
       const primary = o.ports[0];
       const value = this._wrapValue(rec.out[primary.name], primary.type);
-      outputsMap[o.key] = value;
-      outputsMap[o.nodeId] = value;
+      outputEntries.push([o.key, value], [o.nodeId, value]);
     }
+    const outputsMap = Object.fromEntries(outputEntries);
     const result = new RunResult({
       outputs: outputsMap,
       nodes: nodesRec,

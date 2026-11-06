@@ -2,6 +2,15 @@ import { NanoodleError } from "./errors.mjs";
 import { NODE_TYPES, displayName, lockedNode, optionalNode, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
 import { endpointOutPort } from "./endpoint.mjs";
 
+// Allocate the final key, not just a count of the unsuffixed name: an authored
+// "Out 2" can otherwise collide with the suffix generated for a second "Out".
+function uniqueKey(base, used, reserved = new Set()) {
+  let key = base;
+  for (let suffix = 2; used.has(key.toLowerCase()) || reserved.has(key.toLowerCase()); suffix++) key = base + " " + suffix;
+  used.add(key.toLowerCase());
+  return key;
+}
+
 /* ============================== INPUTS ============================== */
 
 /** Which node types contribute user inputs, and with what fields (mirrors play.html INPUT_SPECS). */
@@ -76,19 +85,14 @@ export function deriveInputs(graph) {
   // REQUIRED input (app PR #138) — or exactly one input at all, so an author-optional
   // renamed node (e.g. an optional "Style reference" upload) keeps its name as the key.
   // Otherwise the generic spec label. Dedupe with " 2", " 3".
-  const used = new Map();
+  const used = new Set();
   for (const e of entries) {
     const nodeEntries = entries.filter((x) => x.nodeId === e.nodeId);
     const required = nodeEntries.filter((x) => !x.optional);
     const custom = (e._node.name || "").trim();
     const names = (required.length === 1 && required[0] === e) ||
                   (required.length === 0 && nodeEntries.length === 1);
-    let key = custom && names ? custom : e.label;
-    const lower = key.toLowerCase();
-    const count = (used.get(lower) || 0) + 1;
-    used.set(lower, count);
-    if (count > 1) key = key + " " + count;
-    e.key = key;
+    e.key = uniqueKey(custom && names ? custom : e.label, used);
   }
   for (const e of entries) delete e._node;
   return entries;
@@ -155,13 +159,10 @@ export function deriveOutputs(graph) {
     if (!t.outputs || !t.outputs.length) return false;
     return !graph.links.some((l) => l.from.node === n.id);
   });
-  const used = new Map();
+  const used = new Set();
   return sinks.map((n) => {
-    let key = displayName(n);
-    const lower = key.toLowerCase();
-    const count = (used.get(lower) || 0) + 1;
-    used.set(lower, count);
-    if (count > 1) key = key + " " + count;
+    const aliases = new Set(sinks.filter(other => other.id !== n.id).map(other => other.id.toLowerCase()));
+    const key = uniqueKey(displayName(n), used, aliases);
     const t = NODE_TYPES[n.type];
     let ports = t.outputs.map((p) => ({ ...p }));
     // vframes grows frame1..frameN from max(fields.frames, wired floor) (mirrors browser)
