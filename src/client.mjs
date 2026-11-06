@@ -130,10 +130,12 @@ export class NanoClient {
    * at most once; a second 402 after settling is an error, never a second send.
    */
   async _paidFetch(url, init, signal) {
+    if (signal && signal.aborted) throw abortError(signal.reason);
     const r = await this.fetch(url, init);
     if (r.status !== 402 || !this.payment || this.apiKey) return r;
     const settled = await this._settle402(r, signal);
     if (settled.response) return settled.response; // complete replayed the stored request
+    if (signal && signal.aborted) throw abortError(signal.reason);
     const r2 = await this.fetch(url, { ...init, headers: { ...init.headers, "x-x402-payment-id": settled.paymentId } });
     if (r2.status === 402) {
       throw new NanoodleError(
@@ -153,10 +155,15 @@ export class NanoClient {
         "payment required, but the 402 response offered no usable Nano option" +
         (body ? " — " + JSON.stringify(body).slice(0, 200) : ""), { code: "x402", status: 402 });
     }
+    if (signal && signal.aborted) throw abortError(signal.reason);
+    if (invoice.expiresAt && invoice.expiresAt <= Date.now()) {
+      throw new NanoodleError("payment window expired before payment (" + invoice.paymentId + ", to " + invoice.payTo + ") — request a fresh invoice", { code: "x402-expired", paymentId: invoice.paymentId });
+    }
     await this.payment(invoice); // ← the callback does the actual XNO send
     // The complete endpoint doubles as the poll: 402 = not seen on-chain yet.
     const deadline = invoice.expiresAt || Date.now() + 15 * 60 * 1000;
     while (true) {
+      if (signal && signal.aborted) throw abortError(signal.reason);
       const cr = await this.fetch(invoice.completeUrl, {
         method: "POST", headers: { "Content-Type": "application/json", "x-x402": "true" }, body: "{}", signal,
       });
@@ -184,7 +191,13 @@ export class NanoClient {
             { code: "x402", status: cr.status, paymentId: invoice.paymentId });
         }
         let cj = null;
-        if (ct.includes("json")) { try { cj = await cr.json(); } catch { /* treat as settle-only */ } }
+        if (mime.includes("json")) { try { cj = await cr.json(); } catch { /* fail closed below */ } }
+        if (!cj || typeof cj !== "object") {
+          throw new NanoodleError(
+            "payment " + invoice.paymentId + " was sent, but completion returned no readable JSON receipt — check " +
+            (invoice.statusUrl || "the payment status") + " before paying again",
+            { code: "x402", paymentId: invoice.paymentId });
+        }
         if (looksLikeResult(cj)) {
           // wrap so call sites keep their Response contract (ok/json/text/headers)
           const response = { ok: true, status: 200, headers: cr.headers, json: async () => cj, text: async () => JSON.stringify(cj) };
@@ -215,6 +228,35 @@ export class NanoClient {
       body: payload,
       signal,
     }, signal);
+  }
+
+  async _pollJson(path, signal, remainingMs) {
+    const ac = new AbortController();
+    const onAbort = () => ac.abort(abortError(signal.reason));
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+    const timer = Number.isFinite(remainingMs) ? setTimeout(() => ac.abort(
+      new NanoodleError("poll deadline reached", { code: "poll-timeout" })), Math.max(0, remainingMs)) : null;
+    let rejectAbort;
+    const aborted = new Promise((_, reject) => {
+      rejectAbort = () => reject(ac.signal.reason);
+      ac.signal.addEventListener("abort", rejectAbort, { once: true });
+      if (ac.signal.aborted) rejectAbort();
+    });
+    const work = Promise.resolve().then(async () => {
+      if (ac.signal.aborted) throw ac.signal.reason;
+      const r = await this._get(path, ac.signal);
+      if (!r.ok) throw httpError(r.status, await r.text());
+      return r.json();
+    });
+    try { return await Promise.race([work, aborted]); }
+    finally {
+      if (timer) clearTimeout(timer);
+      if (signal) signal.removeEventListener("abort", onAbort);
+      ac.signal.removeEventListener("abort", rejectAbort);
+    }
   }
 
   async _get(path, signal) {
@@ -324,12 +366,15 @@ export class NanoClient {
     const pollEvery = is3d ? (this.pollIntervals.model3d || this.pollIntervals.video) : this.pollIntervals.video;
     // Infinity/non-finite = wait forever (default). Finite ms = headless/CI cap.
     while (!Number.isFinite(videoCap) || Date.now() - t0 < videoCap) {
-      await sleep(pollEvery, signal);
+      await sleep(Number.isFinite(videoCap) ? Math.min(pollEvery, Math.max(0, videoCap - (Date.now() - t0))) : pollEvery, signal);
+      if (Number.isFinite(videoCap) && Date.now() - t0 >= videoCap) break;
       let s;
       try {
-        s = await (await this._get("/api/video/status?requestId=" + encodeURIComponent(runId), signal)).json();
+        s = await this._pollJson("/api/video/status?requestId=" + encodeURIComponent(runId), signal, videoCap - (Date.now() - t0));
       } catch (e) {
         if (signal && signal.aborted) throw abortError(signal.reason);
+        if (e.code === "poll-timeout") break;
+        if (e.status >= 400 && e.status < 500 && ![408, 429].includes(e.status)) throw e;
         continue; // transient poll failure — keep polling until complete or optional cap
       }
       const st = String((s.data && s.data.status) || s.status || "").toUpperCase();
@@ -345,7 +390,7 @@ export class NanoClient {
         if (!url) throw new NanoodleError("completed but no video url");
         return url;
       }
-      if (["FAILED", "ERROR", "CANCELED"].includes(st)) {
+      if (["FAILED", "ERROR", "CANCELED", "CANCELLED", "CONTENT_POLICY_VIOLATION"].includes(st)) {
         const why = (s.data && s.data.error) || st;
         throw new NanoodleError((is3d ? "3D failed: " : "video failed: ") + why);
       }
@@ -407,12 +452,15 @@ export class NanoClient {
     if (j.isApiRequest != null) qs.set("isApiRequest", String(j.isApiRequest));
     const t0 = Date.now();
     while (Date.now() - t0 < this.timeouts.audio) {
-      await sleep(this.pollIntervals.audio, signal);
+      await sleep(Math.min(this.pollIntervals.audio, Math.max(0, this.timeouts.audio - (Date.now() - t0))), signal);
+      if (Date.now() - t0 >= this.timeouts.audio) break;
       let s;
       try {
-        s = await (await this._get("/api/tts/status?" + qs, signal)).json();
+        s = await this._pollJson("/api/tts/status?" + qs, signal, this.timeouts.audio - (Date.now() - t0));
       } catch (e) {
         if (signal && signal.aborted) throw abortError(signal.reason);
+        if (e.code === "poll-timeout") break;
+        if (e.status >= 400 && e.status < 500 && ![408, 429].includes(e.status)) throw e;
         continue;
       }
       const st = String(s.status || "").toLowerCase();
@@ -422,7 +470,7 @@ export class NanoClient {
         if (!url) throw new NanoodleError("completed but no audio url");
         return url;
       }
-      if (["error", "failed", "content_policy_violation"].includes(st)) {
+      if (["error", "failed", "canceled", "cancelled", "content_policy_violation"].includes(st)) {
         throw new NanoodleError("audio failed: " + (s.error || s.message || st));
       }
     }

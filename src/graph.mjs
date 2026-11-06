@@ -150,8 +150,12 @@ export function materialize(data) {
   }
   const warnings = [];
   const nodes = [];
+  const seenIds = new Set();
   for (const raw of data.nodes) {
     if (!raw || raw.id == null || !raw.type) continue;
+    const id = String(raw.id);
+    if (seenIds.has(id)) throw new NanoodleError(`duplicate node id "${id}" — every node must have a unique id`);
+    seenIds.add(id);
     const type = raw.type === "audio" ? "tts" : raw.type;
     const n = { id: String(raw.id), type, name: raw.name, fields: { ...(raw.fields || {}) } };
     if (!NODE_TYPES[type]) {

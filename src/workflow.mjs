@@ -101,6 +101,18 @@ function throwIfAborted(signal) {
   if (signal && signal.aborted) throw abortReason(signal);
 }
 
+/** Bound an async stage even when injected I/O ignores AbortSignal. Always observe late rejection. */
+function withSignal(work, signal) {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(abortReason(signal));
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve().then(() => {
+      throwIfAborted(signal);
+      return work();
+    }).then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
 /** The outcome of Workflow.run(). Media values are MediaRef; text values plain strings. */
 /** Internal: thrown by a node skipped behind a closed gate, so ITS dependents skip too. Never surfaced. */
 class GateSkip extends Error {
@@ -416,7 +428,7 @@ export class Workflow {
             // resolved (authed redirect → absolute file URL, or inlined bytes)
             // before this node builds videoUrl / videoDataUrl / audio / image.
             inp[l.to.port] = (typeof v === "string" && v && HANDED_MEDIA_PORT.test(l.to.port))
-              ? await this.client.resolveContentUrl(v, { signal: ac.signal })
+              ? await withSignal(() => this.client.resolveContentUrl(v, { signal: ac.signal }), ac.signal)
               : v;
           }
           // Custom endpoint url/mode: a Choice path like "/post" must ride inp so
@@ -460,34 +472,28 @@ export class Workflow {
           warnGraph(`node ${n.id}: prompt trimmed ${fit.trimmed.from} → ${fit.trimmed.to} characters — ` +
             `${fields.model} rejects prompts over ${fit.trimmed.cap}`);
         }
+        throwIfAborted(ac.signal);
         const t0 = Date.now();
-        // Per-node timeout (fields.timeoutMs): a child controller linked to the run signal.
-        // The race guarantees the deadline even if a runner never observes its signal.
+        // The node deadline covers the runner AND publication of provider media.
+        // Race every active stage with cancellation so an injected fetch cannot hold the run open.
         const timeoutMs = Number(fields.timeoutMs);
-        let nodeSignal = ac.signal, deadline = null;
+        let nodeSignal = ac.signal;
         if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
           const nac = new AbortController();
           const onRunAbort = () => nac.abort(ac.signal.reason);
           ac.signal.addEventListener("abort", onRunAbort, { once: true });
           unlinkNode = () => ac.signal.removeEventListener("abort", onRunAbort);
           nodeSignal = nac.signal;
-          deadline = new Promise((_, reject) => {
-            nodeTimer = setTimeout(() => {
-              const err = new NanoodleError(`node timed out after ${timeoutMs}ms`, { code: "timeout" });
-              nac.abort(err);
-              reject(err);
-            }, timeoutMs);
-          });
-          deadline.catch(() => {});
+          nodeTimer = setTimeout(() => nac.abort(new NanoodleError(
+            `node timed out after ${timeoutMs}ms`, { code: "timeout" })), timeoutMs);
         }
         const nodeForRun = { ...n, fields };
-        const work = RUNNERS[n.type](nodeForRun, inp, ctxFor(n, rec, nodeSignal));
-        const rawOut = deadline ? await Promise.race([work, deadline]) : await work;
-        if (deadline) throwIfAborted(nodeSignal);
-        throwIfAborted(ac.signal);
-        // Final outputs of this node are absolute usable URLs, not the relative
-        // content path the provider returned. Downstream reads this same object.
-        const out = await publishNodeMedia(this.client, nodeForRun, rawOut, nodeSignal);
+        const out = await withSignal(async () => {
+          const rawOut = await RUNNERS[n.type](nodeForRun, inp, ctxFor(n, rec, nodeSignal));
+          throwIfAborted(nodeSignal);
+          return publishNodeMedia(this.client, nodeForRun, rawOut, nodeSignal);
+        }, nodeSignal);
+        throwIfAborted(nodeSignal);
         throwIfAborted(ac.signal);
         rec.final = true;
         rec.status = "done";
