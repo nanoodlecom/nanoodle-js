@@ -7,6 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Workflow } from "../src/index.mjs";
+import { RUNNERS } from "../src/nodes.mjs";
 import { startMockServer, mockOpts, chatJson, PNG_B64, PNG_DATA_URL, WAV_DATA_URL } from "./harness/mock-server.mjs";
 
 const one = (srv, nodes, links, extra) => Workflow.fromJSON({ nodes, links: links || [] }, mockOpts(srv, extra));
@@ -404,4 +405,51 @@ test("lipsync catalog miss / no catalog keeps the portrait requirement (OmniHuma
       /no image input/);
   }
   assert.equal(srv.of("POST /api/generate-video").length, 0);
+});
+
+// Omni 1.2 advertises refs ONLY via mode.options, not an array parameter.
+test("Omni 1.2 reference mode keeps six wired refs on tvideo/vedit with and without catalog", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  const model = "google/gemini-omni-flash/v1.2";
+  const catalog = { video: [{ id: model, supported_parameters: { parameters: {
+    mode: { options: [{ value: "auto" }, { value: "reference" }, { value: "edit" }, { value: "extend" }] },
+  } } }] };
+  const refs = Array.from({ length: 7 }, (_, i) => `https://cdn.example/ref${i + 1}.png`);
+  for (const type of ["tvideo", "vedit"]) for (const cat of [catalog, undefined]) {
+    srv.script("POST /api/generate-video", { json: { runId: "omni_" + srv.requests.length, cost: 0 } });
+    srv.script("GET /api/video/status", { json: { data: { status: "COMPLETED", output: { video: { url: "https://cdn.example/v.mp4" } } } } });
+    const nodes = refs.map((image, i) => ({ id: "u" + i, type: "upload", fields: { image } }));
+    nodes.push({ id: "source", type: "vupload", fields: { video: "https://cdn.example/src.mp4" } });
+    nodes.push({ id: "v", type, fields: { model, prompt: "pan", modelOpts: { mode: "reference" } } });
+    const links = refs.map((_, i) => ({ id: "r" + i, from: { node: "u" + i, port: "image" }, to: { node: "v", port: "ref" + (i + 1) } }));
+    if (type === "vedit") links.push({ id: "video", from: { node: "source", port: "video" }, to: { node: "v", port: "video" } });
+    const notes = [];
+    await one(srv, nodes, links, { catalog: cat }).run({}, { onProgress: e => { if (e.type === "node-progress") notes.push(e.message); } });
+    const body = srv.of("POST /api/generate-video").at(-1).json;
+    assert.equal(body.mode, "reference");
+    assert.deepEqual(body.reference_images, refs.slice(0, 6), `${type} ${cat ? "catalog" : "offline"}: all six in order, seventh capped`);
+    assert.ok(notes.some(m => /dropped 1 reference image/.test(m)));
+  }
+});
+
+test("reference mode capability matches word boundary/case and preserves explicit keys/caps", async () => {
+  for (const [value, enabled] of [["reference", true], ["REFERENCE", true], ["reference-to-video", true], ["references", false], ["edit", false]]) {
+    let sent;
+    await RUNNERS.tvideo({ type: "tvideo", fields: { model: "mode-only", prompt: "pan" } }, { ref1: PNG_DATA_URL }, {
+      catalog: { video: [{ id: "mode-only", supported_parameters: { parameters: { mode: { options: [{ value }] } } } }] },
+      video: async (_model, _prompt, opts) => { sent = opts; return "video"; },
+    });
+    assert.equal(sent.refKey, enabled ? "reference_images" : undefined, value);
+    assert.deepEqual(sent.refImages, enabled ? [PNG_DATA_URL] : undefined, value);
+  }
+  let sent;
+  await RUNNERS.tvideo({ type: "tvideo", fields: { model: "google/gemini-omni-flash/v1.2", prompt: "pan" } }, { ref1: PNG_DATA_URL, ref2: PNG_DATA_URL }, {
+    catalog: { video: [{ id: "google/gemini-omni-flash/v1.2", supported_parameters: { parameters: {
+      mode: { options: [{ value: "reference" }] }, reference_image_urls: { maxItems: 1 },
+    } } }] },
+    video: async (_model, _prompt, opts) => { sent = opts; return "video"; },
+  });
+  assert.equal(sent.refKey, "reference_image_urls", "explicit key wins over mode fallback");
+  assert.equal(sent.refImages.length, 1, "explicit max wins over family default");
 });
