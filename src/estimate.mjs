@@ -72,7 +72,7 @@ function pickObjByRes(map, reqRes, defRes) {
 function pickDur(p, raw, fields) {
   const f = parseFloat(fields && fields.duration);
   if (isFinite(f) && f > 0) return f;
-  const d = _num(p.default_duration) ?? _num(raw.defaultDuration);
+  const d = _num(p.default_duration ?? p.default_duration_seconds) ?? _num(raw.defaultDuration);
   if (d != null && d > 0) return d;
   if (p.per_duration) { const k = Object.keys(p.per_duration)[0]; if (k && isFinite(+k)) return +k; }
   if (Array.isArray(p.supported_durations) && p.supported_durations.length) return +p.supported_durations[0];
@@ -95,7 +95,7 @@ const billingRule = (p) => String(p.billing || "").trim().toLowerCase();
 const clampSeconds = (seconds, lo, hi) => Math.min(_num(hi) ?? seconds, Math.max(_num(lo) ?? seconds, seconds));
 function perSecondQuantity(pricing, seconds) {
   const p = pricing || {};
-  return WHOLE_SECOND_BILLING.has(billingRule(p))
+  return (p.unit === "per_verified_source_second_plus_image" || WHOLE_SECOND_BILLING.has(billingRule(p)))
     ? clampSeconds(Math.ceil(seconds), p.minimum_billable_duration, p.maximum_billable_duration)
     : seconds;
 }
@@ -188,6 +188,18 @@ function videoBaseUsd(pricing, fields, audioOn, refOn) {
   const billDur = frameBill ? frameBill.seconds * frameBill.multiplier : perSecondQuantity(p, dur);
   const rp = (m) => pickByRes(m, frameBill ? frameBill.resolution : res, defRes);
   let v;
+  if ((v = rp(p.per_requested_second)) != null) return Math.max(v * dur, _num(p.minimum) || 0);
+  if (p.per_megapixel != null && p.megapixels_by_resolution) {
+    const opts = f.modelOpts || {};
+    const mp = rp(p.megapixels_by_resolution);
+    const fps = _num(opts.frames_per_second ?? opts.fps ?? p.default_frames_per_second) || 24;
+    // LTX generates the terminal frame as well as duration × FPS frames.
+    const frames = Math.round(dur * fps) + 1;
+    const premium = opts.mode === "hdr" || videoLoraOn(f) || [1, 2, 3].some(i => String(opts[`lora_url_${i}`] || "").trim());
+    const rate = _num(premium ? p.hdr_or_lora_per_megapixel : p.per_megapixel);
+    if (mp != null && rate != null) return rate * Math.ceil(frames * mp);
+    return null;
+  }
   if ((v = rp(p.per_second_by_resolution)) != null) return v * billDur;
   if ((v = rp(p.standard_prices_per_second)) != null) return v * billDur;
   if (p.per_second_by_mode) {
@@ -360,7 +372,13 @@ function nodeUnitUsd(node, catItem, graph) {
       ? graph.links.filter((l) => l.to && l.to.node === node.id && REF_PORT_RE.test(l.to.port)).length
       : 0;
     const audioCtx = { params: (sp.parameters && typeof sp.parameters === "object") ? sp.parameters : {}, defaults: sp.defaults || {} };
-    const u = videoUnitUsd(pricing, f, refCount, audioCtx);
+    let u = videoUnitUsd(pricing, f, refCount, audioCtx);
+    // OpenJutsu's primary character/object image is the image port, not a refN.
+    // Count only inputs that this runner forwards, not arbitrary stale ref wires.
+    if (u != null && pricing?.unit === "per_verified_source_second_plus_image") {
+      const imageCount = (graph?.links || []).filter(l => l.to?.node === node.id && l.to.port === "image").length;
+      u += imageCount * (_num(pricing.per_image) || 0);
+    }
     return (u != null && isFinite(u)) ? u : null;
   }
   if (kind === "model3d") return model3dVariantPrice(m, f) ?? _num(pricing && pricing.per_run);
