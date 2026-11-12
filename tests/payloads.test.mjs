@@ -30,7 +30,6 @@ test("llm vision + JSON format + reasoning effort: exact chat payload", async (t
       },
     ],
     temperature: 0.8,
-    max_tokens: 50,
     response_format: { type: "json_object" },
     reasoning_effort: "low",
   });
