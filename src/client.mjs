@@ -268,7 +268,6 @@ export class NanoClient {
     const body = { model, messages };
     // Carbon has no sampling-temperature control; omit it rather than restoring a default.
     if (model !== "google/gemini-4-carbon") body.temperature = opts.temperature != null && opts.temperature !== "" ? +opts.temperature : 0.8;
-    if (opts.max_tokens) body.max_tokens = +opts.max_tokens;
     if (opts.response_format) body.response_format = opts.response_format;
     // Carbon's selected NanoGPT provider rejects explicit thinking controls (HTTP 400).
     // Let the provider use its default rather than forwarding reasoning_effort.

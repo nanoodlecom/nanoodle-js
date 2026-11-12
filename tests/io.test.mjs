@@ -103,11 +103,13 @@ test("settings override applies; wired setting refused; unknown setting lists ke
   srv.script("POST /v1/images/generations", { json: { data: [{ b64_json: PNG_B64 }], cost: 0.01 } });
 
   const wf = await Workflow.load(fixture("starter-graph.json"), mockOpts(srv));
-  await wf.run({}, { settings: { "n3.model": "flux-pro", "n3.size": "2048x2048", "n2.maxTokens": 99 } });
+  await wf.run({}, { settings: { "n3.model": "flux-pro", "n3.size": "2048x2048" } });
   const imgReq = srv.of("POST /v1/images/generations")[0];
   assert.equal(imgReq.json.model, "flux-pro");
   assert.equal(imgReq.json.size, "2048x2048");
-  assert.equal(srv.of("POST /api/v1/chat/completions")[0].json.max_tokens, 99);
+  assert.equal("max_tokens" in srv.of("POST /api/v1/chat/completions")[0].json, false);
+  assert(!wf.settings.some(s => s.field === "maxTokens"));
+  await assert.rejects(wf.run({}, { settings: { "n2.maxTokens": 99 } }), /unknown setting/);
 
   await assert.rejects(wf.run({}, { settings: { "n3.prompt": "sneaky" } }), /wired from another node and can't be overridden/);
   await assert.rejects(wf.run({}, { settings: { nope: 1 } }), /unknown setting "nope".*n3\.model/s);

@@ -393,7 +393,7 @@ function nodeUnitUsd(node, catItem, graph) {
   }
   if (kind === "chat") {
     const inTok = Math.max(200, Math.round(((f.system || "").length + (f.prompt || "").length) / 4) + 200);
-    const outTok = f.maxTokens ? +f.maxTokens : EST.llmOutTokens;
+    const outTok = EST.llmOutTokens; // Estimate only; legacy graph caps are inert.
     return chatUnitUsd(pricing, inTok, outTok);
   }
   if (kind === "audio") {

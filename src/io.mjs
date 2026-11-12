@@ -189,7 +189,6 @@ export const SETTING_SPECS = {
   llm: [
     { f: "model", label: "Model", kind: "model" },
     { f: "temperature", label: "Temperature", kind: "number", def: "0.8" },
-    { f: "maxTokens", label: "Max tokens", kind: "number" },
     { f: "format", label: "Output format", kind: "select", options: ["Text", "JSON"], def: "Text" },
     { f: "reasoningEffort", label: "Reasoning effort", kind: "select", options: ["default", "low", "medium", "high"], def: "default" },
     { f: "showThinking", label: "Show thinking", kind: "boolean" },
