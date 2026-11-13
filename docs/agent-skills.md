@@ -115,7 +115,7 @@ description: <What it does in one clause>. Use when <the situations where an age
 # <Skill title>
 
 Runs the bundled nanoodle workflow `workflows/<file>.noodle-graph.json` against the NanoGPT
-API. Requires Node.js >= 20 and the `nanoodle` npm package (`npx nanoodle` fetches it).
+API. Requires Node.js 22.23.5+, 24.22.3+, or 26.13.1+ and the `nanoodle` npm package (`npx nanoodle` fetches it).
 
 ## API key
 
