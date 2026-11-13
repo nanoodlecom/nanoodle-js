@@ -148,6 +148,23 @@ function videoAudioOn(fields, audioCtx) {
   return false;
 }
 
+// Source-video billing is distinct from a requested output duration. Never use
+// maximum_seconds (an input limit) or the node's legacy five-second default as money.
+function inputVideoPriceFields(pricing, fields, source, measuredSeconds) {
+  if (!pricing || pricing.unit !== "input_video_second") return fields;
+  const measured = _num(measuredSeconds), hint = _num(source && source.fields && source.fields.duration);
+  const seconds = measured > 0 ? measured : (hint > 0 ? hint : null);
+  return Object.assign({}, fields || {}, { inputVideoSeconds: seconds });
+}
+function inputVideoSecondRate(pricing, fields, ctx) {
+  const p = pricing || {}, f = fields || {}, c = ctx || {}, pp = c.params || {};
+  const res = f.resolution || (f.modelOpts || {}).resolution
+    || (pp.resolution && pp.resolution.default) || (c.defaults || {}).resolution || p.default_resolution;
+  const rates = p.per_second_by_output_resolution;
+  const rate = rates && _num(rates[res]);
+  return rate != null && rate >= 0 ? rate : null;
+}
+
 // A video run bills a HIGHER tier when reference images are wired or the model's
 // audio switch is on. refWired comes from the graph wiring; the audio switch /
 // reference mode ride in fields.modelOpts. refWired may be a boolean (legacy
@@ -161,7 +178,7 @@ function videoUnitUsd(pricing, fields, refWired, audioCtx) {
   const audioOn = videoAudioOn(f, audioCtx);
   const refCount = typeof refWired === "number" ? Math.max(0, refWired | 0) : (refWired ? 1 : 0);
   const refOn = refCount > 0 || /reference/i.test(String(opts.mode || ""));
-  let usd = videoBaseUsd(p, f, audioOn, refOn);
+  let usd = videoBaseUsd(p, f, audioOn, refOn, audioCtx);
   if (usd != null && isFinite(usd) && audioOn && p.audio_multiplier != null) usd *= (_num(p.audio_multiplier) ?? 1);
   // MiniMax H3 LoRA: each wired reference image/audio adds
   // pricing.lora.reference_image_or_audio ($0.02). This number is the quote,
@@ -179,10 +196,15 @@ function videoUnitUsd(pricing, fields, refWired, audioCtx) {
   }
   return usd;
 }
-function videoBaseUsd(pricing, fields, audioOn, refOn) {
+function videoBaseUsd(pricing, fields, audioOn, refOn, audioCtx) {
   const p = pricing || {}, raw = (p.raw && typeof p.raw === "object") ? p.raw : {};
   const f = fields || {};
   const res = f.resolution, defRes = p.default_resolution ?? raw.defaultResolution;
+  if (p.unit === "input_video_second") {
+    const seconds = _num(f.inputVideoSeconds), rate = inputVideoSecondRate(p, f, audioCtx);
+    const max = _num(p.maximum_seconds);
+    return seconds > 0 && (max == null || seconds <= max) && rate != null ? seconds * rate : null;
+  }
   const dur = pickDur(p, raw, f);
   const frameBill = frameLimitedBilling(p, f, dur);
   const billDur = frameBill ? frameBill.seconds * frameBill.multiplier : perSecondQuantity(p, dur);
@@ -372,7 +394,10 @@ function nodeUnitUsd(node, catItem, graph) {
       ? graph.links.filter((l) => l.to && l.to.node === node.id && REF_PORT_RE.test(l.to.port)).length
       : 0;
     const audioCtx = { params: (sp.parameters && typeof sp.parameters === "object") ? sp.parameters : {}, defaults: sp.defaults || {} };
-    let u = videoUnitUsd(pricing, f, refCount, audioCtx);
+    const sourceLink = (graph?.links || []).find(l => l.to?.node === node.id && l.to.port === "video");
+    const source = sourceLink && (graph.nodes || []).find(n => n.id === sourceLink.from.node);
+    const quoteFields = inputVideoPriceFields(pricing, f, source, null);
+    let u = videoUnitUsd(pricing, quoteFields, refCount, audioCtx);
     // OpenJutsu's primary character/object image is the image port, not a refN.
     // Count only inputs that this runner forwards, not arbitrary stale ref wires.
     if (u != null && pricing?.unit === "per_verified_source_second_plus_image") {
