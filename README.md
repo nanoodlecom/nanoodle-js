@@ -310,6 +310,10 @@ and output-FPS rate. Fractional and unspecified per-second contracts preserve
 fractions. Flat, frame, and explicit billing-interval prices retain their own
 units. Audio/video estimates remain forecasts: the provider verifies source
 media duration, and actual generated duration and pricing can differ.
+Input-video-second pricing (such as LTX 2.5 Reframe) uses the wired source
+node's `fields.duration` as a seconds hint. With no positive source-duration hint,
+it counts that node as `unpriced`; the returned USD is only a subtotal. The
+estimator never downloads media to measure it.
 
 Hosted media downloads (`MediaRef.bytes()` / `.save()` and media inputs) retry
 connection or response-body interruptions up to three total GET attempts. Final
