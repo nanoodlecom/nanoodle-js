@@ -830,23 +830,32 @@ export const RUNNERS = {
   },
 
   // 🧊 3D model: image and/or text → model asset via the video submit/poll API.
+  // Mesh-processing models (e.g. Hyper3D Rigging) instead take an existing
+  // model on the `model` wire and receive it as the `model_url` parameter.
   async model3d(n, inp, ctx) {
     const model = String((n.fields && n.fields.model) || "").trim() || MODEL3D_IMAGE_DEFAULT;
     const mods = model3dInputMods(ctx && ctx.catalog, model);
     const prompt = promptOf(n, inp);
     let image = mods.image ? (inp.image || "") : "";
+    const mesh = mods.mesh ? (inp.model || "") : "";
     if (inp.image && !mods.image && ctx && ctx.progress) {
       ctx.progress("This model takes text only — the image wire stays, but this run ignores it.");
+    }
+    if (inp.model && !mods.mesh && ctx && ctx.progress) {
+      ctx.progress("This model generates from scratch — the model wire stays, but this run ignores it.");
     }
     if (prompt && !mods.text && ctx && ctx.progress) {
       ctx.progress("This model takes an image only — the prompt stays, but this run ignores it.");
     }
-    if (mods.image && !mods.text && !image) throw new NanoodleError("Connect an image first.");
-    if (mods.text && !mods.image && !prompt) throw new NanoodleError("Add a prompt first.");
-    if (mods.image && mods.text && !image && !prompt) throw new NanoodleError("Add a prompt or connect an image first.");
+    if (mods.mesh && !mesh) throw new NanoodleError("Connect a model first.");
+    if (!mods.mesh && mods.image && !mods.text && !image) throw new NanoodleError("Connect an image first.");
+    if (!mods.mesh && mods.text && !mods.image && !prompt) throw new NanoodleError("Add a prompt first.");
+    if (!mods.mesh && mods.image && mods.text && !image && !prompt) throw new NanoodleError("Add a prompt or connect an image first.");
     if (image) image = await fitImage(image, ctx, "source image");
+    const extra = { ...(n.fields.modelOpts || {}) };
+    if (mesh) extra.model_url = mesh; // the wire wins over a static modelOpts copy
     const url = await ctx.video(model, mods.text ? prompt : "", {
-      extra: n.fields.modelOpts || {},
+      extra,
       mediaKind: "model3d",
     }, image || null);
     return { model: url };
@@ -893,10 +902,10 @@ function model3dInputMods(catalog, id) {
     || (it.architecture && Array.isArray(it.architecture.input_modalities) && it.architecture.input_modalities)
   );
   if (raw && raw.length) {
-    const mods = raw.filter((x) => x === "image" || x === "text");
-    if (mods.length) return { image: mods.includes("image"), text: mods.includes("text") };
+    const mods = raw.filter((x) => x === "image" || x === "text" || x === "3d");
+    if (mods.length) return { image: mods.includes("image"), text: mods.includes("text"), mesh: mods.includes("3d") };
   }
-  if (id === MODEL3D_IMAGE_DEFAULT) return { image: true, text: false };
-  if (id === MODEL3D_TEXT_DEFAULT) return { image: true, text: true };
-  return { image: true, text: true };
+  if (id === MODEL3D_IMAGE_DEFAULT) return { image: true, text: false, mesh: false };
+  if (id === MODEL3D_TEXT_DEFAULT) return { image: true, text: true, mesh: false };
+  return { image: true, text: true, mesh: false };
 }
