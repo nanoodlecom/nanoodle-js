@@ -272,6 +272,11 @@ export class NanoClient {
     // Carbon's selected NanoGPT provider rejects explicit thinking controls (HTTP 400).
     // Let the provider use its default rather than forwarding reasoning_effort.
     if (model !== "google/gemini-4-carbon" && opts.reasoning_effort) body.reasoning_effort = opts.reasoning_effort;
+    // max_tokens is the one token budget forwarded, and only when a runner
+    // explicitly opts in via opts (the graph's maxTokens field, D1 ruling).
+    // The legacy spellings (max_completion_tokens, max_output_tokens,
+    // maxTokens) are never read here, so they can never leak into the body.
+    if (opts.max_tokens != null) body.max_tokens = opts.max_tokens;
     const r = await this._postJson("/api/v1/chat/completions", body, signal);
     if (!r.ok) throw httpError(r.status, await r.text());
     const j = await r.json();

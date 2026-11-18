@@ -129,6 +129,10 @@ function audioInputPart(url) {
 function llmOpts(n) {
   const f = n.fields, o = {};
   if (f.temperature != null && f.temperature !== "") o.temperature = +f.temperature;
+  // maxTokens is opt-in (D1 ruling, 2026-11-18): absent by default, honored
+  // exactly when the node sets it — twin of nanoodle-py _run_llm (truthy +
+  // numeric → int(float(v)); non-numeric degrades gracefully, sends nothing).
+  if (f.maxTokens && Number.isFinite(+f.maxTokens)) o.max_tokens = Math.trunc(+f.maxTokens);
   if (f.format === "JSON") o.response_format = { type: "json_object" };
   if (f.reasoningEffort && f.reasoningEffort !== "default") o.reasoning_effort = f.reasoningEffort;
   if (f.showThinking === true || f.showThinking === "true") o.showThinking = true;

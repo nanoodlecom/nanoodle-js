@@ -393,7 +393,9 @@ function nodeUnitUsd(node, catItem, graph) {
   }
   if (kind === "chat") {
     const inTok = Math.max(200, Math.round(((f.system || "").length + (f.prompt || "").length) / 4) + 200);
-    const outTok = EST.llmOutTokens; // Estimate only; legacy graph caps are inert.
+    // An explicit maxTokens cap prices the output at the cap (D1 ruling);
+    // absent, the default estimate applies — twin of nanoodle-py estimate.py.
+    const outTok = f.maxTokens && Number.isFinite(+f.maxTokens) ? Math.trunc(+f.maxTokens) : EST.llmOutTokens;
     return chatUnitUsd(pricing, inTok, outTok);
   }
   if (kind === "audio") {
