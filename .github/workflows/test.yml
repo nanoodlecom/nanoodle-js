@@ -33,10 +33,12 @@ jobs:
     timeout-minutes: 5
     outputs:
       version: ${{ steps.pack.outputs.version }}
+      source_version: ${{ steps.source.outputs.source_version }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '24.22.1'
@@ -57,6 +59,12 @@ jobs:
           renameSync(join(RUNNER_TEMP, 'distribution', packed.filename), join(RUNNER_TEMP, 'distribution', 'package.tgz'));
           appendFileSync(GITHUB_OUTPUT, `version=${packed.version}\n`);
           JS
+      - name: Check the version change for GitHub Releases
+        id: source
+        env:
+          BEFORE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
+          PACKED_VERSION: ${{ steps.pack.outputs.version }}
+        run: node .github/scripts/publish_source.mjs qualify "$PACKED_VERSION" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         if: github.event_name == 'push'
         with:
@@ -105,3 +113,27 @@ jobs:
               ;;
             *) echo "npm version lookup returned HTTP $status" >&2; exit 1 ;;
           esac
+
+  github-source:
+    name: Publish tested GitHub source release
+    if: ${{ github.repository == 'nanoodlecom/nanoodle-js' && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.package.outputs.source_version != '' }}
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    concurrency:
+      group: github-source-${{ needs.package.outputs.source_version }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.22.1'
+      - name: Tag and release the tested source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_VERSION: ${{ needs.package.outputs.source_version }}
+        run: node .github/scripts/publish_source.mjs publish "$SOURCE_VERSION"
