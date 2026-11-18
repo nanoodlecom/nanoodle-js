@@ -14,7 +14,7 @@ for (const mode of ['run timeout', 'outer abort', 'node timeout during publicati
     const events = [];
     const controller = new AbortController();
     const wf = Workflow.fromJSON(graph(mode.startsWith('node') ? { timeoutMs: 30 } : {}), { apiKey: 'k', fetch: async url => {
-      if (mode.startsWith('node') && String(url).includes('/generations')) return json({ data: [{ url: '/api/content/job' }], cost: 0.2 });
+      if (mode.startsWith('node') && String(url).includes('/generations')) return json({ data: [{ url: '/api/images/content?job=1' }], cost: 0.2 }); // an allowlisted provider content path (CONTENT_API_PATHS) so publication actually fetches it
       started();
       return held;
     } });
