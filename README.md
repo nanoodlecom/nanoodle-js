@@ -417,6 +417,13 @@ Opt-in live probe (spends a fraction of a cent):
 `node scripts/live-spot-check.mjs` (add `--image` to also run the starter
 graph’s image step).
 
+## GitHub source releases
+
+Update the version in `package.json` in the release PR. When that version
+change reaches `main`, the Node tests and npm packaging check qualify the
+exact commit for a GitHub release tagged `v<version>`. npm publishes the
+tested tarball through its own job.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Not affiliated with NanoGPT. Build workflows at
