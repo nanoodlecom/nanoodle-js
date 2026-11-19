@@ -25,6 +25,16 @@ export function httpError(status, bodyText, headers) {
   return new NanoodleError(status + ": " + String(bodyText).slice(0, 160), { code: "http", status });
 }
 
+async function paidResponseError(response, paymentId, stage) {
+  const requestId = response.headers?.get?.("x-request-id");
+  const reference = /^[a-z0-9][a-z0-9._:-]{0,127}$/i.test(requestId || "") ? requestId : null;
+  await response.text().catch(() => {});
+  return new NanoodleError(
+    `NanoGPT x402 ${stage} failed after payment was sent (HTTP ${response.status}${reference ? `, request ${reference}` : ""}). Check the payment status before paying again.`,
+    { code: "x402", status: response.status, paymentId, stage, requestId: reference },
+  );
+}
+
 /**
  * Cost extraction (mirrors the app's costFromJson). USD priority:
  * j.cost (>0) → x_nanogpt_pricing.(costUsd|cost|amount) → metadata.cost → j.cost even when 0.
@@ -142,12 +152,7 @@ export class NanoClient {
     if (settled.response) return settled.response; // complete replayed the stored request
     if (signal && signal.aborted) throw abortError(signal.reason);
     const r2 = await this.fetch(url, { ...init, headers: { ...init.headers, "x-x402-payment-id": settled.paymentId } });
-    if (r2.status === 402) {
-      throw new NanoodleError(
-        "payment " + settled.paymentId + " settled, but the API still answered 402 on retry — " +
-        "check " + (settled.statusUrl || "the payment status") + " before paying again",
-        { code: "x402", status: 402, paymentId: settled.paymentId });
-    }
+    if (!r2.ok) throw await paidResponseError(r2, settled.paymentId, "replay");
     return r2;
   }
 
@@ -210,7 +215,7 @@ export class NanoClient {
         }
         return { paymentId: invoice.paymentId, statusUrl: invoice.statusUrl };
       }
-      if (cr.status !== 402) throw httpError(cr.status, await cr.text(), cr.headers);
+      if (cr.status !== 402) throw await paidResponseError(cr, invoice.paymentId, "completion");
       await cr.text().catch(() => {}); // drain the "not verified yet" body
       if (Date.now() >= deadline) {
         throw new NanoodleError(

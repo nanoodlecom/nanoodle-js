@@ -115,7 +115,8 @@ test("x402: re-POST still 402 after settling → hard error, never a second paym
     return jsonRes(200, { status: "completed" });
   };
   const c = new NanoClient({ payment: async () => { paid++; }, fetch, pollIntervals: { x402: 1 } });
-  await assert.rejects(c.chat([{ role: "user", content: "hi" }], "m"), (e) => e.code === "x402" && /still answered 402/.test(e.message));
+  await assert.rejects(c.chat([{ role: "user", content: "hi" }], "m"),
+    (e) => e.code === "x402" && e.stage === "replay" && e.status === 402);
   assert.equal(paid, 1);
 });
 
@@ -173,12 +174,15 @@ test("x402 tts: complete replays raw audio/mpeg → that IS the result (settle-t
 });
 
 /** Chat-call stub: 402 quote, then the complete call answers `completeRes()`. Counts payments + re-POSTs. */
-function completeStub(completeRes) {
+function completeStub(completeRes, replayRes = () => jsonRes(402, fresh402())) {
   const hits = { paid: 0, posts: 0, rePost: 0, complete: 0 };
   const fetch = async (url, init) => {
     if (url.includes("/chat/completions") || url.includes("/audio/speech")) {
       hits.posts++;
-      if (init.headers && init.headers["x-x402-payment-id"]) hits.rePost++;
+      if (init.headers && init.headers["x-x402-payment-id"]) {
+        hits.rePost++;
+        return replayRes();
+      }
       return jsonRes(402, fresh402());
     }
     hits.complete++;
@@ -188,6 +192,27 @@ function completeStub(completeRes) {
   return { c, hits };
 }
 const rawRes = (status, contentType, text) => new Response(text, { status, headers: { "content-type": contentType } });
+
+test("x402 chat: reports failed completion or replay after one payment", async () => {
+  const providerError = () => jsonRes(500, { error: "Insufficient balance for private prompt" }, { "x-request-id": "req_x402-test" });
+  for (const stage of ["completion", "replay"]) {
+    const completion = stage === "completion" ? providerError : () => jsonRes(200, { status: "completed" });
+    const { c, hits } = completeStub(completion, providerError);
+    await assert.rejects(c.chat([{ role: "user", content: "hi" }], "m"), (error) => {
+      assert.equal(error.code, "x402");
+      assert.equal(error.stage, stage);
+      assert.equal(error.status, 500);
+      assert.equal(error.requestId, "req_x402-test");
+      assert.match(error.paymentId, /^pay_/);
+      assert.match(error.message, /after payment was sent \(HTTP 500, request req_x402-test\)/);
+      assert.doesNotMatch(error.message, /balance|private prompt|top up/i);
+      return true;
+    });
+    assert.equal(hits.paid, 1);
+    assert.equal(hits.complete, 1);
+    assert.equal(hits.rePost, Number(stage === "replay"));
+  }
+});
 
 test("x402: text/plain settlement ack on complete → error, not a result; one payment, no re-POST", async () => {
   const { c, hits } = completeStub(() => rawRes(200, "text/plain; charset=utf-8", "OK settled"));
