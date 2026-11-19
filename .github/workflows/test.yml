@@ -41,7 +41,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
-          node-version: '24.22.1'
+          node-version: '24.22.3'
       - name: Pack and validate the release archive
         id: pack
         run: |
@@ -89,7 +89,7 @@ jobs:
     steps:
       - uses: actions/setup-node@v4
         with:
-          node-version: '24.22.1'
+          node-version: '24.22.3'
           registry-url: https://registry.npmjs.org
       - uses: actions/download-artifact@v4
         with:
@@ -131,7 +131,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: '24.22.1'
+          node-version: '24.22.3'
       - name: Tag and release the tested source
         env:
           GH_TOKEN: ${{ github.token }}
