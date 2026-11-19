@@ -71,7 +71,14 @@ export function parseNanoInvoice(body, baseUrl) {
 
 const RESULT_KEYS = ["choices", "data", "output", "runId", "url", "audioUrl", "transcription", "text"];
 
-/** Does a complete-endpoint body already carry the replayed API result? */
+/**
+ * Does a complete-endpoint body already carry the replayed API result?
+ * A paid decision comes back as { answers, usage }. That is success. Treating
+ * it as a bare receipt makes the client resend the original request, and the
+ * API answers 402 because the payment was already consumed.
+ */
 export function looksLikeResult(j) {
-  return !!j && typeof j === "object" && RESULT_KEYS.some((k) => j[k] != null);
+  if (!j || typeof j !== "object") return false;
+  if (RESULT_KEYS.some((k) => j[k] != null)) return true;
+  return j.answers != null && j.usage != null && typeof j.usage === "object";
 }

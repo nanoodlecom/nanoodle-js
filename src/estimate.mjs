@@ -43,7 +43,7 @@ function pricedModelId(node) {
 // that cannot happen. It contributes $0 and is not counted as `unpriced`,
 // because "we could not price it" is the wrong report — it is not billable.
 const PRICE_KIND = {
-  llm: "chat", vision: "chat", decide: "chat",
+  llm: "chat", vision: "chat", decide: "decision", "decide-branch": "decision",
   image: "image", edit: "image", inpaint: "image",
   tvideo: "video", ivideo: "video", vedit: "video", lipsync: "video",
   music: "audio", remix: "audio", tts: "audio", transcribe: "audio", cleanvoice: "audio",
@@ -407,18 +407,20 @@ function nodeUnitUsd(node, catItem, graph) {
     return (u != null && isFinite(u)) ? u : null;
   }
   if (kind === "model3d") return model3dVariantPrice(m, f) ?? _num(pricing && pricing.per_run);
-  if (node.type === "decide") {
+  if (node.type === "decide" || node.type === "decide-branch") {
     // input tokens only (twin of the editor's Decide estimate); pick asks twice (in order + reversed)
     const imgs = (graph && Array.isArray(graph.links))
       ? graph.links.filter((l) => l.to && l.to.node === node.id && /^img\d+$/.test(l.to.port)).length : 0;
     const inTok = 120 + Math.round(((f.question || "").length + (f.options || "").length + (f.levels || "").length) / 4) + 250 + imgs * 400;
     const u = chatUnitUsd(pricing, inTok, 0);
-    const pick = !(f.mode === "choose" || f.mode === "score" || f.mode === "yesno");
+    const pick = !(node.type === "decide-branch" || f.branch === true || f.mode === "choose" || f.mode === "score" || f.mode === "yesno");
     return u == null ? null : u * (pick ? 2 : 1);
   }
   if (kind === "chat") {
     const inTok = Math.max(200, Math.round(((f.system || "").length + (f.prompt || "").length) / 4) + 200);
-    const outTok = EST.llmOutTokens; // Estimate only; legacy graph caps are inert.
+    // An explicit maxTokens cap prices the output at the cap (D1 ruling);
+    // absent, the default estimate applies — twin of nanoodle-py estimate.py.
+    const outTok = f.maxTokens && Number.isFinite(+f.maxTokens) ? Math.trunc(+f.maxTokens) : EST.llmOutTokens;
     return chatUnitUsd(pricing, inTok, outTok);
   }
   if (kind === "audio") {
@@ -443,7 +445,7 @@ function nodeUnitUsd(node, catItem, graph) {
  * Forecast a graph's per-run cost from the public catalog.
  *
  * @param {{nodes:Array, links?:Array}} graph  a materialized graph (Workflow#graph)
- * @param {{chat?:Array, image?:Array, video?:Array, audio?:Array, model3d?:Array}} catalogs
+ * @param {{chat?:Array, decision?:Array, image?:Array, video?:Array, audio?:Array, model3d?:Array}} catalogs
  *        raw catalog arrays (as /api/v1/*-models return them, `.data`), indexed here by model id
  * @returns {{usd:number, exact:boolean, priced:number, unpriced:number}}
  *          usd = sum over priced billable nodes; exact = every priced node was image
@@ -452,7 +454,7 @@ function nodeUnitUsd(node, catItem, graph) {
 export function estimateGraphCost(graph, catalogs = {}) {
   const nodes = (graph && Array.isArray(graph.nodes)) ? graph.nodes : [];
   const byKind = {};
-  for (const kind of ["chat", "image", "video", "audio", "model3d"]) {
+  for (const kind of ["chat", "decision", "image", "video", "audio", "model3d"]) {
     const arr = Array.isArray(catalogs[kind]) ? catalogs[kind] : [];
     const map = new Map();
     for (const m of arr) if (m && m.id != null) map.set(String(m.id), m);

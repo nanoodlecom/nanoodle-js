@@ -6,6 +6,9 @@ import { NanoClient } from "../src/client.mjs";
 // Google's Carbon guide says remove sampling controls; don't let a default
 // reintroduce temperature on its NanoGPT route. Its selected provider also
 // rejects thinking controls, despite catalog-advertised reasoning levels. No live inference.
+// max_tokens is not a sampling control: since the D1 ruling (2026-11-18) an
+// explicitly provided budget is forwarded for every model, Carbon included
+// (twin of nanoodle-py, which never carved Carbon out of max_tokens).
 for (const temperature of [undefined, "", 0, 0.8, 2]) {
   test("Carbon omits temperature " + JSON.stringify(temperature), async () => {
     let body;
@@ -16,7 +19,7 @@ for (const temperature of [undefined, "", 0, 0.8, 2]) {
     }});
     assert.equal(await client.chat([{role:"user",content:"fixture"}], "google/gemini-4-carbon",
       {temperature, max_tokens:1536, reasoning_effort:"medium"}), "fixture");
-    assert.equal("max_tokens" in body,false);
+    assert.equal(body.max_tokens, 1536); // explicit budget forwarded (D1 opt-in)
     assert.equal("reasoning_effort" in body,false);
     assert.equal("thinking" in body,false);
   });
@@ -45,7 +48,7 @@ for (const reasoning_effort of [undefined, "default", "low", "medium", "high"]) 
       return new Response(JSON.stringify({choices:[{message:{content:"fixture"}}]}));
     }});
     await client.chat([],"google/gemini-4-carbon",{reasoning_effort,max_tokens:1536});
-    assert.equal("max_tokens" in body,false);
+    assert.equal(body.max_tokens, 1536); // explicit budget forwarded (D1 opt-in)
     await client.chat([],"google/gemini-4-argon",{reasoning_effort});
   });
 }
