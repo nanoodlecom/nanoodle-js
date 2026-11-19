@@ -75,31 +75,28 @@ test("deriveSettings: vframes frames min rises to wired floor", () => {
 
 /* ---------- timeout / abort ---------- */
 
-test("timeoutMs fails a long local-media run", async (t) => {
-  if (!hasFfmpeg) return t.skip("ffmpeg not on PATH");
-  const dir = await mkdtemp(join(tmpdir(), "nn-hard-"));
-  const long = join(dir, "long.mp4");
-  const gen = spawnSync("ffmpeg", [
-    "-y", "-f", "lavfi", "-i", "color=c=red:s=320x180:d=4",
-    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-t", "4", long,
-  ], { stdio: "ignore" });
-  if (gen.status !== 0) return t.skip("could not generate test video");
-  const vid = await mediaFromFile(long);
+test("timeoutMs aborts a pending local-media download", { timeout: 3000 }, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const url = "https://example.test/video.mp4";
+  const started = Promise.withResolvers();
+  const fetch = (requested, { signal }) => {
+    assert.equal(requested, url);
+    started.resolve();
+    return new Promise((_, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+  };
   const wf = Workflow.fromJSON({
     nodes: [
-      { id: "v", type: "vupload", fields: {} },
+      { id: "v", type: "vupload", fields: { video: url } },
       { id: "f", type: "vframes", name: "F", fields: { frames: "6", gap: "0.3", dir: "start" } },
     ],
     links: [{ from: { node: "v", port: "video" }, to: { node: "f", port: "video" } }],
-  }, { apiKey: null });
-  const t0 = Date.now();
-  await assert.rejects(
-    () => wf.run({ Video: vid }, { timeoutMs: 80 }),
-    (err) => {
-      assert.match(err.message || "", /timed out|aborted/i);
-      assert.ok(Date.now() - t0 < 3000, "should not run full extract after timeout");
-      return true;
-    });
+  }, { apiKey: null, fetch });
+  const rejection = assert.rejects(wf.run({}, { timeoutMs: 80 }), /run timed out after 80ms/);
+  await Promise.race([started.promise, rejection.then(() => assert.fail("Media download never started"))]);
+  t.mock.timers.tick(80);
+  await rejection;
 });
 
 test("AbortSignal cancels local-media run", async (t) => {
