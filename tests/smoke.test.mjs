@@ -74,7 +74,7 @@ test("smoke: starter graph — load, derive IO, run with overridden Text, exact 
   assert.equal(imgReq.headers.authorization, "Bearer test-key");
   assert.equal(imgReq.headers["x-api-key"], "test-key");
   assert.deepEqual(imgReq.json, {
-    model: "nano-banana-2-lite",
+    model: "nano-banana-2-fast",
     size: "1k",
     n: 1,
     response_format: "b64_json",

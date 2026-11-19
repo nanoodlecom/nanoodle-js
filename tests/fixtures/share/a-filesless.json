@@ -1,6 +1,6 @@
 {
   "name": "a-filesless",
-  "url": "https://nanoodle.com/play.html#a=H4sIAAAAAAAAA4VSWW7bMBC9yuB9064kxy3AA_QART8aFPmYWhOZCTUkRHqRDQE9RE_YkxT0AiVAgH5yeevMGXvY2qAbOG5hz7ejhlYS7M8zXAsLrWGQxyiwyHLMMDjCfq4MRth6VRk8O_FtKgSXdwumTTiNNHAvSmkbIgUlpoGdjqSu22ZMBgfYpqkmc9dpZh3v-6vM6uGq8-WdTB9a8bA4sVuEofvU-X6xXhZ8GlOWHhaPYUeHwWUh13MnFIfQx5yW9H03KOWtkGuFyWkOFFRo7_auNdRKZuelfYeiv7__UNqIiiFf3DvtDPUhtIZSHr0s6ZtEP9LB5e2F-4YL6sflPeq6MkjuJJcEd591U01zA6u5gYv-rer1revqwxKUNSx-sbLyoll4lwusCMGifoXBngfH2QVN5Wa2Mz0ZeKevb2bty6yfh9AXgbIH9_nHMOT7_CeDHN5-aOYP1-CYM_nmA8bmf4yrDxifDLRQrovrFvbBYO_kUGCR9QdsWZXI-nhdzrRhL7D1NBko94X2qzvm3SDEMcLAs3aweGFM_wC5O4BcCQMAAA",
+  "url": "https://nanoodle.com/play.html#a=H4sIAAAAAAAAA4VSWW7bMBC9yuB9U64kxy3AA_QART8aFPmYWrTMhBoSJL3IhoAeoifsSQp6gRLAQD-5zFvnjD10o9BHDlvo8-0ovjMJ-ucZtoOGNFDIYzDQyOaYoXCE_lwrjNDNslbYWOO6VAAu7xpMa38aKfJghNLWB_JCTJGtjCS232ZMCgfotq0ndedpZx7nhivN8unK8-UDzeA746BxYlv52H_q3VCtFmU-jSmbARrPfkeHaLMhO3BvKEQ_hJwW9H0XhfLWkO0Mk5XsyYuhvd3bTlFnMltnug9T9Pf3H0prI0aRK-qt9IoG7ztFKY_OLOibCW6kg83bC_ZtzosbF3erq1oh2ZO5OLjrbNp6mhNYzglc-G9Rr25Z1w9DEBZf_WJh4aqtNpxKQ4UIGs0bFPYcLWfrJZWbWc70ouCsvL3r2pWuN9EPhaDswb3_4GO-9z8pZP_-Qzt_uBrH7Mm1DxDb_yEuHyC-KEiBXBXVHfSTwt6aQxkLLD-gy6oElufrcqY1OwPdTJOC8FBgv9pj3kVDHAIUHEsPjVfG9A9dUIv_CQMAAA",
   "graph": {
     "v": 1,
     "nodes": [
@@ -34,7 +34,7 @@
         "x": 650,
         "y": 100,
         "fields": {
-          "model": "nano-banana-2-lite",
+          "model": "nano-banana-2-fast",
           "size": "1k",
           "variations": "1"
         },
