@@ -74,6 +74,22 @@ test("media connection failures retry, HTTP rejections and aborts do not", async
   }
 });
 
+test("media reads preserve the caller's cancellation reason and stop after one request", async () => {
+  const controller = new AbortController();
+  const deadline = new Error("Hosted deadline exceeded");
+  let gets = 0;
+  const ref = new MediaRef(cdn, { fetch: async (_url, init) => {
+    gets++;
+    assert.equal(init.signal, controller.signal);
+    return { ok: true, arrayBuffer: async () => {
+      controller.abort(deadline);
+      throw terminated();
+    } };
+  } });
+  await assert.rejects(ref.bytes({ signal: controller.signal }), (error) => error === deadline);
+  assert.equal(gets, 1);
+});
+
 test("inline, transcription, and local media downloads recover without repeating a paid POST", async () => {
   for (const mode of ["inline", "transcribe", "local"]) {
     let gets = 0, posts = 0;

@@ -195,12 +195,13 @@ export class MediaRef {
   toString() { return this.url; }
   toJSON() { return this.url; }
 
-  /** @returns {Promise<Uint8Array>} the raw media bytes (decodes data:, fetches http(s)). */
-  async bytes() {
+  /** Read the raw media bytes, optionally cancelling the download with a signal. */
+  async bytes({ signal } = {}) {
+    signal?.throwIfAborted();
     let bytes;
     if (this.url.startsWith("data:")) bytes = dataUrlBytes(this.url).bytes;
     else {
-      const downloaded = await downloadMedia(this.url, { fetch: this._fetch });
+      const downloaded = await downloadMedia(this.url, { fetch: this._fetch, signal });
       bytes = downloaded.bytes;
       if (!this._mime) {
         const r = downloaded.response;

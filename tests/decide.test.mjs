@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { Workflow } from "../src/index.mjs";
 import { decideRun, decideQuestionFor, decideMergeOrders, decideImageLimits, DECIDE_IMG_FALLBACK } from "../src/decide.mjs";
-import { estimateGraphCost } from "../src/estimate.mjs";
+import { estimateGraphCost, graphModelKinds } from "../src/estimate.mjs";
 import { startMockServer, mockOpts, PNG_DATA_URL } from "./harness/mock-server.mjs";
 
 const hasFfmpeg = !spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).error
@@ -192,11 +192,17 @@ test("decide: pick shrinks wired images to JPEG within the decision budget (ffmp
   assert.ok(Math.abs(result.costUsd - 0.00002) < 1e-12);
 });
 
-test("decide: estimate bills input tokens only, ×2 for pick", () => {
-  const catalog = { chat: [{ id: "m", pricing: { prompt: 0.04, completion: 0 } }] };
+test("decide: estimate uses the decision catalog and bills input tokens twice for pick", () => {
+  const models = [{ id: "m", pricing: { prompt: 0.04, completion: 0 } }];
+  const catalog = { decision: models };
   const g = (mode) => ({ nodes: [{ id: "d", type: "decide", fields: { model: "m", mode } }], links: [] });
   const one = estimateGraphCost(g("yesno"), catalog);
   const pick = estimateGraphCost(g("pick"), catalog);
   assert.ok(one.usd > 0 && one.usd < 0.0001);
   assert.ok(Math.abs(pick.usd - 2 * one.usd) < 1e-15);
+  const branch = g("yesno");
+  branch.nodes[0].type = "decide-branch";
+  assert.deepEqual([...graphModelKinds(branch)], ["decision"]);
+  assert.equal(estimateGraphCost(branch, catalog).usd, one.usd);
+  assert.equal(estimateGraphCost(branch, { chat: models }).unpriced, 1);
 });

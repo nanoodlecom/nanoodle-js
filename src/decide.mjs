@@ -11,6 +11,7 @@ export const DECIDE_SCALE_DEFAULT = "poor\nokay\ngood\ngreat";
 export const DECIDE_IMG_FALLBACK = { maxImages: 4, maxDimension: 512, maxEncodedBytes: 240000 };
 
 export function decideMode(f) {
+  if (f?.branch === true) return "yesno";
   const m = f && f.mode;
   return (m === "choose" || m === "score" || m === "yesno") ? m : "pick";
 }
@@ -154,7 +155,17 @@ export async function decideRun(f, model, text, imgs, lim, send, fit) {
   } else {
     j = await send({ model, state: decideState(text, sent), questions: { answer: q } });
   }
-  const out = decideOutputs(mode, j && j.answers && j.answers.answer, q, imgs, j && j.usage, model);
+  const answer = j?.answers?.answer;
+  const branching = f?.branch === true;
+  if (branching && (answer?.type !== "noul" || !Number.isFinite(answer.noul) || answer.noul < 0 || answer.noul > 1)) {
+    throw new NanoodleError("Decide needs a valid yes/no answer to select a branch", { code: "decide-branch" });
+  }
+  const out = decideOutputs(mode, answer, q, imgs, j && j.usage, model);
+  if (branching) {
+    out.decision.branch = out.text;
+    out[out.text] = text || out.text;
+    return out;
+  }
   if (mode === "yesno" && (f.gate === true || f.gate === "true") && out.decision.yes < 0.5) throw decideGateError(out.decision, out);
   return out;
 }

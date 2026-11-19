@@ -7,6 +7,7 @@ import { MediaRef, coerceMediaInput } from "./media.mjs";
 import { RUNNERS } from "./nodes.mjs";
 import { learnPromptCap, withFittedPrompt } from "./prompt-caps.mjs";
 import { decodeShareUrl, isShareRef } from "./share.mjs";
+import { isBranchDecider, planBranches } from "./branches.mjs";
 
 /** Env / process access — safe when `process` is missing (browsers, some workers). */
 function envApiKey() {
@@ -292,6 +293,7 @@ export class Workflow {
     }
 
     const order = topoSort(graph); // throws naming cyclic nodes
+    const branches = planBranches(graph, order.map(n => n.id));
 
     // Local-only graphs never POST media — skip the ~4 MB inline cap on inputs.
     // Mixed/network graphs keep the cap so we fail before spending on an oversize body.
@@ -407,7 +409,17 @@ export class Workflow {
       let nodeTimer = null, unlinkNode = null;
       try {
         throwIfAborted(ac.signal);
-        const inbound = graph.links.filter((l) => l.to.node === n.id);
+        let inbound = graph.links.filter((l) => l.to.node === n.id);
+        if (branches) {
+          await Promise.allSettled(inbound.map(l => promises.get(l.from.node)));
+          inbound = branches.activeLinks(n.id, id => nodesRec[id]?.status === "done" ? nodesRec[id].out : null);
+          if (inbound === null) {
+            rec.status = "skipped";
+            rec.skipReason = "branch";
+            emit({ type: "node-skipped", nodeId: n.id, name: displayName(n), reason: "branch" });
+            return {};
+          }
+        }
         const inp = {};
         let fields = effFields.get(n.id);
         let upstreamFail = null, gatedBy = null, skippedIn = 0;
@@ -462,6 +474,7 @@ export class Workflow {
         // prompt at the route, and in a graph the prompt is WRITTEN by an upstream LLM — so a
         // caller has nothing to shorten. Trim it to fit rather than send a request certain to 400,
         // and report it below. The graph's own prompts are never rewritten to avoid this.
+        if (n.type === "decide" && fields.branch !== n.fields.branch) fields = { ...fields, branch: n.fields.branch };
         const fit = withFittedPrompt(n, fields, { catalog: this.catalog, learned: this._promptCaps });
         fields = fit.fields;
         rec.started = true;
@@ -524,7 +537,7 @@ export class Workflow {
         // fields.onError:"skip" — a failed (or timed-out) node is recorded and skipped; its
         // dependents see undefined ports. A run-level abort/timeout is never skipped.
         const onError = (effFields.get(n.id) || {}).onError;
-        if (onError === "skip" && !ac.signal.aborted) {
+        if (onError === "skip" && !isBranchDecider(n) && !ac.signal.aborted) {
           rec.status = "skipped";
           rec.skippedOnError = true;
           rec.out = {};

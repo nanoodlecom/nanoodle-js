@@ -250,6 +250,24 @@ The pieces are exported if you orchestrate graphs yourself:
 `promptCap`, `fitPromptText`, `isPromptTooLong`, `promptCapFromError`,
 `PROMPT_CAPS`.
 
+### Conditional Decide branches
+
+A saved node with `type: "decide-branch"` uses the Decide model and question with a typed
+yes/no answer. Wire its `yes` and `no` ports to the corresponding branch entries. The
+selected port forwards the input text, or the answer if no text was supplied. Ordinary
+`text` and `image` outputs remain data outputs.
+
+Branch nodes and their downstream work start only after their controls resolve. A shared
+prerequisite can run once and feed both branches. A join runs when any of its routed
+inputs is active and receives only active inputs. An invalid or missing answer fails the
+decision and opens neither port. Skipped branch nodes have `status: "skipped"` and
+`skipReason: "branch"`. They contribute no provider cost. A legacy `decide` node and its
+optional yes/no gate retain their existing behavior.
+
+Use an executor that supports `decide-branch` for new branch graphs. The
+[shared offline fixture](tests/fixtures/decider-branches.json) covers both picks, nested
+decisions, joins, retries, and an existing gate.
+
 ## Supported nodes
 
 | runs | node types |
@@ -398,6 +416,13 @@ npm test
 Opt-in live probe (spends a fraction of a cent):
 `node scripts/live-spot-check.mjs` (add `--image` to also run the starter
 graph’s image step).
+
+## GitHub source releases
+
+Update the version in `package.json` in the release PR. When that version
+change reaches `main`, the Node tests and npm packaging check qualify the
+exact commit for a GitHub release tagged `v<version>`. npm publishes the
+tested tarball through its own job.
 
 ## License
 
