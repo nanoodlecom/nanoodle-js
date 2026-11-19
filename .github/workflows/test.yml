@@ -74,7 +74,7 @@ jobs:
 
   publish:
     name: Publish tested npm distribution
-    if: github.repository == 'nanoodlecom/nanoodle-js' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: ${{ github.repository == 'nanoodlecom/nanoodle-js' && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.package.outputs.source_version != '' }}
     needs: package
     runs-on: ubuntu-latest
     timeout-minutes: 5

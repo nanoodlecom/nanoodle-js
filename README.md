@@ -422,7 +422,8 @@ graph’s image step).
 Update the version in `package.json` in the release PR. When that version
 change reaches `main`, the Node tests and npm packaging check qualify the
 exact commit for a GitHub release tagged `v<version>`. npm publishes the
-tested tarball through its own job.
+tested tarball through its own job. If that job fails, rerun it from the
+version-changing workflow run to publish the same artifact.
 
 ## License
 
