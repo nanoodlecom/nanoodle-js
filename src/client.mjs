@@ -10,7 +10,12 @@ const AUDIO_PROMPT_MODEL_RE = /(?:^|\/)(?:prompt-to-song|generate-bgm)$|(?:^|\/)
 const AUDIO_STYLE_MODEL_RE = /yue2-3b\/(?:text|music)-to-music$/i;
 
 /** Map an HTTP failure to an actionable error (mirrors the app's httpRunError). Never leaks the key. */
-export function httpError(status, bodyText) {
+export function httpError(status, bodyText, headers) {
+  if (status === 403 && (headers?.get?.("x-vercel-mitigated") === "challenge" ||
+      (/^\s*<(?:!doctype\s+html\b|html\b)/i.test(bodyText) &&
+       /<title>\s*Vercel Security Checkpoint\s*<\/title>/i.test(bodyText)))) {
+    return new NanoodleError("NanoGPT's automated traffic protection challenged this request (HTTP 403).", { code: "blocked", status });
+  }
   if (status === 401 || status === 403) {
     return new NanoodleError(`API key rejected (HTTP ${status}) — check your NanoGPT key / NANOGPT_API_KEY`, { code: "auth", status });
   }
@@ -205,7 +210,7 @@ export class NanoClient {
         }
         return { paymentId: invoice.paymentId, statusUrl: invoice.statusUrl };
       }
-      if (cr.status !== 402) throw httpError(cr.status, await cr.text());
+      if (cr.status !== 402) throw httpError(cr.status, await cr.text(), cr.headers);
       await cr.text().catch(() => {}); // drain the "not verified yet" body
       if (Date.now() >= deadline) {
         throw new NanoodleError(
@@ -248,7 +253,7 @@ export class NanoClient {
     const work = Promise.resolve().then(async () => {
       if (ac.signal.aborted) throw ac.signal.reason;
       const r = await this._get(path, ac.signal);
-      if (!r.ok) throw httpError(r.status, await r.text());
+      if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
       return r.json();
     });
     try { return await Promise.race([work, aborted]); }
@@ -278,7 +283,7 @@ export class NanoClient {
     // maxTokens) are never read here, so they can never leak into the body.
     if (opts.max_tokens != null) body.max_tokens = opts.max_tokens;
     const r = await this._postJson("/api/v1/chat/completions", body, signal);
-    if (!r.ok) throw httpError(r.status, await r.text());
+    if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
     const j = await r.json();
     if (onCost) onCost(costWithHeaders(j, r));
     const msg = (j.choices && j.choices[0] && j.choices[0].message) || {};
@@ -299,7 +304,7 @@ export class NanoClient {
    */
   async decide(body, { onCost, signal } = {}) {
     const r = await this._postJson("/api/v1/decisions", body, signal);
-    if (!r.ok) throw httpError(r.status, await r.text());
+    if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
     const j = await r.json();
     const c = j && j.usage && typeof j.usage.cost === "number" ? j.usage.cost : null;
     if (onCost) onCost(costWithHeaders(c != null ? { ...j, cost: c } : j, r));
@@ -314,7 +319,7 @@ export class NanoClient {
     if (maskDataUrl) body.maskDataUrl = maskDataUrl; // white = repaint
     Object.assign(body, imageModelOpts(extra));
     const r = await this._postJson("/v1/images/generations", body, signal);
-    if (!r.ok) throw httpError(r.status, await r.text());
+    if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
     const j = await r.json();
     const urls = (j.data || [])
       .map((d) => (d.b64_json ? "data:" + b64ImageMime(d.b64_json) + ";base64," + d.b64_json : d.url))
@@ -360,7 +365,7 @@ export class NanoClient {
     let runId = resume || null;
     if (!runId) {
       const r = await this._postJson("/api/generate-video", body, signal);
-      if (!r.ok) throw httpError(r.status, await r.text());
+      if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
       const j = await r.json();
       if (onCost) onCost(costWithHeaders(j, r));
       runId = j.runId || j.id;
@@ -436,7 +441,7 @@ export class NanoClient {
       delete body.prompt;
     }
     const r = await this._postJson("/api/v1/audio/speech", body, signal);
-    if (!r.ok) throw httpError(r.status, await r.text());
+    if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
     const ct = (r.headers && r.headers.get && r.headers.get("content-type")) || "";
     if (ct.includes("application/json")) {
       const j = await r.json();
@@ -513,7 +518,7 @@ export class NanoClient {
     if (language) fd.append("language", language);
     // no explicit Content-Type — fetch sets the multipart boundary
     const r = await this._paidFetch(this.baseUrl + "/api/v1/audio/transcriptions", { method: "POST", headers: this._auth(), body: fd, signal }, signal);
-    if (!r.ok) throw httpError(r.status, await r.text());
+    if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
     const j = await r.json();
     if (onCost) onCost(costWithHeaders(j, r));
     const txt = j.transcription != null ? j.transcription
@@ -561,7 +566,7 @@ export class NanoClient {
   /** Optional helper: POST /api/check-balance → { usd_balance }. */
   async checkBalance(signal) {
     const r = await this._postJson("/api/check-balance", {}, signal);
-    if (!r.ok) throw httpError(r.status, await r.text());
+    if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
     return r.json();
   }
 }
