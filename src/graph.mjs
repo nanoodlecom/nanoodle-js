@@ -52,7 +52,7 @@ export const NODE_TYPES = {
   decide:  { title: "Decide",          inputs: ["text"], outputs: [{ name: "text", type: "text" }, { name: "image", type: "image" }], network: true }, // img1… candidates (IMG_PORT_RE)
   tvideo:  { title: "Text→Video",      inputs: [], outputs: [{ name: "video", type: "video" }], network: true },
   ivideo:  { title: "Image→Video",     inputs: ["image"], outputs: [{ name: "video", type: "video" }], network: true },
-  model3d: { title: "3D model",        inputs: ["image"], outputs: [{ name: "model", type: "model3d" }], network: true },
+  model3d: { title: "3D model",        inputs: ["image", "model"], outputs: [{ name: "model", type: "model3d" }], network: true },
   vedit:   { title: "Video edit",      inputs: ["video"], outputs: [{ name: "video", type: "video" }], network: true },
   vframes: { title: "Video → frames",  inputs: ["video"], outputs: [{ name: "frame1", type: "image" }], local: true, framesOut: true }, // dynamic frame1..N
   combine: { title: "Combine videos",  inputs: [], outputs: [{ name: "video", type: "video" }], local: true },
@@ -150,10 +150,15 @@ export function materialize(data) {
   }
   const warnings = [];
   const nodes = [];
+  const seenIds = new Set();
   for (const raw of data.nodes) {
     if (!raw || raw.id == null || !raw.type) continue;
-    const type = raw.type === "audio" ? "tts" : raw.type;
+    const id = String(raw.id);
+    if (seenIds.has(id)) throw new NanoodleError(`duplicate node id "${id}" — every node must have a unique id`);
+    seenIds.add(id);
+    const type = raw.type === "audio" ? "tts" : raw.type === "decide-branch" ? "decide" : raw.type;
     const n = { id: String(raw.id), type, name: raw.name, fields: { ...(raw.fields || {}) } };
+    if (raw.type === "decide-branch") n.fields.branch = true;
     if (!NODE_TYPES[type]) {
       n.unknown = true;
       warnings.push(`unknown node type "${raw.type}" (node ${n.id}) — kept, but running this workflow will fail; you may need a newer nanoodle library`);

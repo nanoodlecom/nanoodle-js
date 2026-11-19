@@ -223,12 +223,12 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
   }
 
   // ---- run ----
-  const inputs = {};
+  const inputs = Object.create(null);
   for (const arg of inputArgs) {
     const [k, v] = parseKv(arg, "--input");
     inputs[k] = await resolveValue(v);
   }
-  const settings = {};
+  const settings = Object.create(null);
   for (const arg of setArgs) {
     const [k, v] = parseKv(arg, "--set");
     settings[k] = v;
@@ -260,7 +260,8 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
   // media outputs land under --out (default ./noodle-out; created only if there is media to save)
   const dir = outDir ?? "noodle-out";
   let dirMade = false;
-  const printable = {};
+  const printable = Object.create(null);
+  const savedNames = new Set();
   for (const o of wf.outputs) {
     const value = result.outputs[o.key];
     if (value === undefined) { printable[o.key] = null; continue; }
@@ -269,7 +270,15 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
       const safe = o.key.replace(/[^\w.-]+/g, "_");
       // fetch before naming: hosted media only reveals its mime via the response Content-Type
       const data = await value.bytes();
-      const path = join(dir, safe + "." + extForMime(value.mime || sniffMime(data)));
+      const ext = extForMime(value.mime || sniffMime(data));
+      let filename = safe + "." + ext;
+      // Friendly keys can collapse during sanitization ("A B" / "A_B").
+      // Also avoid case-only collisions on case-insensitive filesystems.
+      for (let suffix = 2; savedNames.has(filename.toLowerCase()); suffix++) {
+        filename = safe + "_" + suffix + "." + ext;
+      }
+      savedNames.add(filename.toLowerCase());
+      const path = join(dir, filename);
       await writeFile(path, data);
       printable[o.key] = path;
       if (!quiet) console.error(`${o.key}: saved ${path}`);
@@ -289,6 +298,7 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
     gated: result.gated || [],
     nodes: Object.fromEntries(Object.entries(result.nodes).map(([id, r]) => [id, {
       status: r.status, ms: r.ms, costUsd: r.costUsd, error: r.error,
+      ...(r.runId != null ? { runId: r.runId } : {}),
       ...(r.gate ? { gate: r.gate } : {}), ...(r.gatedBy ? { gatedBy: r.gatedBy } : {}),
     }])),
   }, null, 2));

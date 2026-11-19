@@ -8,6 +8,8 @@ const LONGCAT_BILLING = "Duration rounded up to whole seconds, then clamped to t
 const video = [
   { id: "longcat-avatar-1.5", pricing: { currency: "USD", per_second_by_resolution: { "480p": 0.04, "720p": 0.08 }, billing: LONGCAT_BILLING, minimum_billable_duration: 3, maximum_billable_duration: 30, default_duration: 5, default_resolution: "480p" } },
   { id: "longcat-avatar", pricing: { currency: "USD", per_second_by_resolution: { "480p": 0.04, "720p": 0.08 }, billing: LONGCAT_BILLING, minimum_billable_duration: 3, maximum_billable_duration: 120, default_duration: 5, default_resolution: "480p" } },
+  // Single-audio pricing in the public video catalog on 2026-11-19.
+  { id: "longcat-avatar-1.6", pricing: { currency: "USD", unit: "USD/input_audio_second", per_second_by_resolution: { "480p": 0.04, "720p": 0.08 }, minimum_billable_duration: 3, maximum_billable_duration: 64, default_resolution: "480p" } },
   // same model with the billing limits stripped: avatarClampSecs' 3–30 s fallback must still apply
   { id: "longcat-avatar-1.5-bare", pricing: { per_second_by_resolution: { "480p": 0.04 }, default_duration: 5, default_resolution: "480p" } },
 ];
@@ -74,6 +76,11 @@ test("lipsync forecast clamps to LongCat's billable window", () => {
 test("lipsync wired to a source with a duration knob bills that length", () => {
   const src = { id: "m", type: "music", fields: { model: "x", duration: "20" } };
   near(lipsyncUsd(avatarGraph({ src })), 20 * 0.04);
+});
+
+test("the current LongCat 1.6 single-audio price follows its catalog rates and ceiling", () => {
+  const src = { id: "m", type: "music", fields: { model: "x", duration: "64.2" } };
+  near(lipsyncUsd(avatarGraph({ model: "longcat-avatar-1.6", resolution: "720p", src })), 64 * 0.08);
 });
 
 test("lipsync with nothing usable wired keeps the model default (unchanged behavior)", () => {

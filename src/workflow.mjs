@@ -7,6 +7,7 @@ import { MediaRef, coerceMediaInput } from "./media.mjs";
 import { RUNNERS } from "./nodes.mjs";
 import { learnPromptCap, withFittedPrompt } from "./prompt-caps.mjs";
 import { decodeShareUrl, isShareRef } from "./share.mjs";
+import { isBranchDecider, planBranches } from "./branches.mjs";
 
 /** Env / process access — safe when `process` is missing (browsers, some workers). */
 function envApiKey() {
@@ -99,6 +100,18 @@ function abortReason(signal) {
 
 function throwIfAborted(signal) {
   if (signal && signal.aborted) throw abortReason(signal);
+}
+
+/** Bound an async stage even when injected I/O ignores AbortSignal. Always observe late rejection. */
+function withSignal(work, signal) {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(abortReason(signal));
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve().then(() => {
+      throwIfAborted(signal);
+      return work();
+    }).then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
 }
 
 /** The outcome of Workflow.run(). Media values are MediaRef; text values plain strings. */
@@ -280,6 +293,7 @@ export class Workflow {
     }
 
     const order = topoSort(graph); // throws naming cyclic nodes
+    const branches = planBranches(graph, order.map(n => n.id));
 
     // Local-only graphs never POST media — skip the ~4 MB inline cap on inputs.
     // Mixed/network graphs keep the cap so we fail before spending on an oversize body.
@@ -338,7 +352,7 @@ export class Workflow {
     }
 
     const emit = (evt) => { if (onProgress) { try { onProgress(evt); } catch { /* listener errors never kill the run */ } } };
-    const nodesRec = {};
+    const nodesRec = Object.fromEntries(graph.nodes.map(n => [n.id, null]));
     const errors = [];
     const cost = { total: 0, exact: true, balance: null };
     const byId = new Map(graph.nodes.map((n) => [n.id, n]));
@@ -395,7 +409,17 @@ export class Workflow {
       let nodeTimer = null, unlinkNode = null;
       try {
         throwIfAborted(ac.signal);
-        const inbound = graph.links.filter((l) => l.to.node === n.id);
+        let inbound = graph.links.filter((l) => l.to.node === n.id);
+        if (branches) {
+          await Promise.allSettled(inbound.map(l => promises.get(l.from.node)));
+          inbound = branches.activeLinks(n.id, id => nodesRec[id]?.status === "done" ? nodesRec[id].out : null);
+          if (inbound === null) {
+            rec.status = "skipped";
+            rec.skipReason = "branch";
+            emit({ type: "node-skipped", nodeId: n.id, name: displayName(n), reason: "branch" });
+            return {};
+          }
+        }
         const inp = {};
         let fields = effFields.get(n.id);
         let upstreamFail = null, gatedBy = null, skippedIn = 0;
@@ -416,7 +440,7 @@ export class Workflow {
             // resolved (authed redirect → absolute file URL, or inlined bytes)
             // before this node builds videoUrl / videoDataUrl / audio / image.
             inp[l.to.port] = (typeof v === "string" && v && HANDED_MEDIA_PORT.test(l.to.port))
-              ? await this.client.resolveContentUrl(v, { signal: ac.signal })
+              ? await withSignal(() => this.client.resolveContentUrl(v, { signal: ac.signal }), ac.signal)
               : v;
           }
           // Custom endpoint url/mode: a Choice path like "/post" must ride inp so
@@ -450,6 +474,7 @@ export class Workflow {
         // prompt at the route, and in a graph the prompt is WRITTEN by an upstream LLM — so a
         // caller has nothing to shorten. Trim it to fit rather than send a request certain to 400,
         // and report it below. The graph's own prompts are never rewritten to avoid this.
+        if (n.type === "decide" && fields.branch !== n.fields.branch) fields = { ...fields, branch: n.fields.branch };
         const fit = withFittedPrompt(n, fields, { catalog: this.catalog, learned: this._promptCaps });
         fields = fit.fields;
         rec.started = true;
@@ -460,34 +485,28 @@ export class Workflow {
           warnGraph(`node ${n.id}: prompt trimmed ${fit.trimmed.from} → ${fit.trimmed.to} characters — ` +
             `${fields.model} rejects prompts over ${fit.trimmed.cap}`);
         }
+        throwIfAborted(ac.signal);
         const t0 = Date.now();
-        // Per-node timeout (fields.timeoutMs): a child controller linked to the run signal.
-        // The race guarantees the deadline even if a runner never observes its signal.
+        // The node deadline covers the runner AND publication of provider media.
+        // Race every active stage with cancellation so an injected fetch cannot hold the run open.
         const timeoutMs = Number(fields.timeoutMs);
-        let nodeSignal = ac.signal, deadline = null;
+        let nodeSignal = ac.signal;
         if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
           const nac = new AbortController();
           const onRunAbort = () => nac.abort(ac.signal.reason);
           ac.signal.addEventListener("abort", onRunAbort, { once: true });
           unlinkNode = () => ac.signal.removeEventListener("abort", onRunAbort);
           nodeSignal = nac.signal;
-          deadline = new Promise((_, reject) => {
-            nodeTimer = setTimeout(() => {
-              const err = new NanoodleError(`node timed out after ${timeoutMs}ms`, { code: "timeout" });
-              nac.abort(err);
-              reject(err);
-            }, timeoutMs);
-          });
-          deadline.catch(() => {});
+          nodeTimer = setTimeout(() => nac.abort(new NanoodleError(
+            `node timed out after ${timeoutMs}ms`, { code: "timeout" })), timeoutMs);
         }
         const nodeForRun = { ...n, fields };
-        const work = RUNNERS[n.type](nodeForRun, inp, ctxFor(n, rec, nodeSignal));
-        const rawOut = deadline ? await Promise.race([work, deadline]) : await work;
-        if (deadline) throwIfAborted(nodeSignal);
-        throwIfAborted(ac.signal);
-        // Final outputs of this node are absolute usable URLs, not the relative
-        // content path the provider returned. Downstream reads this same object.
-        const out = await publishNodeMedia(this.client, nodeForRun, rawOut, nodeSignal);
+        const out = await withSignal(async () => {
+          const rawOut = await RUNNERS[n.type](nodeForRun, inp, ctxFor(n, rec, nodeSignal));
+          throwIfAborted(nodeSignal);
+          return publishNodeMedia(this.client, nodeForRun, rawOut, nodeSignal);
+        }, nodeSignal);
+        throwIfAborted(nodeSignal);
         throwIfAborted(ac.signal);
         rec.final = true;
         rec.status = "done";
@@ -518,7 +537,7 @@ export class Workflow {
         // fields.onError:"skip" — a failed (or timed-out) node is recorded and skipped; its
         // dependents see undefined ports. A run-level abort/timeout is never skipped.
         const onError = (effFields.get(n.id) || {}).onError;
-        if (onError === "skip" && !ac.signal.aborted) {
+        if (onError === "skip" && !isBranchDecider(n) && !ac.signal.aborted) {
           rec.status = "skipped";
           rec.skippedOnError = true;
           rec.out = {};
@@ -556,15 +575,15 @@ export class Workflow {
       cost.exact = false;
     }
     // ---- result ----
-    const outputsMap = {};
+    const outputEntries = [];
     for (const o of this.outputs) {
       const rec = nodesRec[o.nodeId];
       if (!rec || !(rec.status === "done" || (rec.status === "gated" && rec.out))) continue;
       const primary = o.ports[0];
       const value = this._wrapValue(rec.out[primary.name], primary.type);
-      outputsMap[o.key] = value;
-      outputsMap[o.nodeId] = value;
+      outputEntries.push([o.key, value], [o.nodeId, value]);
     }
+    const outputsMap = Object.fromEntries(outputEntries);
     const result = new RunResult({
       outputs: outputsMap,
       nodes: nodesRec,

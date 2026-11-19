@@ -129,7 +129,10 @@ function audioInputPart(url) {
 function llmOpts(n) {
   const f = n.fields, o = {};
   if (f.temperature != null && f.temperature !== "") o.temperature = +f.temperature;
-  if (f.maxTokens) o.max_tokens = +f.maxTokens;
+  // maxTokens is opt-in (D1 ruling, 2026-11-18): absent by default, honored
+  // exactly when the node sets it — twin of nanoodle-py _run_llm (truthy +
+  // numeric → int(float(v)); non-numeric degrades gracefully, sends nothing).
+  if (f.maxTokens && Number.isFinite(+f.maxTokens)) o.max_tokens = Math.trunc(+f.maxTokens);
   if (f.format === "JSON") o.response_format = { type: "json_object" };
   if (f.reasoningEffort && f.reasoningEffort !== "default") o.reasoning_effort = f.reasoningEffort;
   if (f.showThinking === true || f.showThinking === "true") o.showThinking = true;
@@ -165,6 +168,7 @@ function normalizeLoraUrl(raw) {
 function loraFamily(model) {
   const m = String(model || "");
   if (/spicy/i.test(m)) return null;
+  if (/p-h3-image/i.test(m)) return "ph3"; // wavespeed p-h3-image: lora_url_1..3 (ids lack "lora")
   if (/p-image/i.test(m)) return "pimage";
   if (/klein/i.test(m)) return "flux2klein";
   if (/flux-2/i.test(m)) return "flux2dev";
@@ -188,6 +192,7 @@ function imageTakesLora(id) {
   if (/flux-2-klein/i.test(id)) return true;
   if (/flux-3\/klein\/(base\/)?text-to-image/i.test(id)) return true;
   if (/minimax-h3\/(text-to-image|image-edit)/i.test(id)) return true;
+  if (/p-h3-image/i.test(id)) return true; // Pruna P-H3 Image (2026-11-05): lora_url_1..3
   return /(^|[-\/])lora($|[-\/])/i.test(id);
 }
 
@@ -201,7 +206,7 @@ function modelTakesLora(kind, id) {
 function loraCap(model) {
   switch (loraFamily(model)) {
     case "flux2dev": return 4;
-    case "flux2klein": case "zimage": case "ltx": case "krea": case "h3": case "anima": case "qwen21": return 3;
+    case "flux2klein": case "zimage": case "ltx": case "krea": case "h3": case "anima": case "qwen21": case "ph3": return 3;
     default: return 1; // flux-lora, pimage — single slot
   }
 }
@@ -217,7 +222,7 @@ function nodeLoras(n) {
 function loraBodyFor(model, items) {
   const fam = loraFamily(model), sc = (v) => (isNaN(v) ? 1 : v);
   if (fam === "pimage") return { lora_weights: items[0].url, lora_scale: sc(items[0].scale) };
-  if (fam === "flux2dev" || fam === "flux2klein" || fam === "zimage" || fam === "ltx" || fam === "krea" || fam === "h3" || fam === "anima" || fam === "qwen21") {
+  if (fam === "flux2dev" || fam === "flux2klein" || fam === "zimage" || fam === "ltx" || fam === "krea" || fam === "h3" || fam === "anima" || fam === "qwen21" || fam === "ph3") {
     const b = {};
     items.forEach((it, i) => { b["lora_url_" + (i + 1)] = it.url; b["lora_scale_" + (i + 1)] = sc(it.scale); });
     return b;
@@ -336,6 +341,7 @@ function refMaxFor(model, pricing) {
   const id = String(model || "");
   if (/seedance/i.test(id)) return 9;
   if (/minimax-h3/i.test(id)) return 9; // upstream cap; the first 5 are included, 6-9 bill extra_reference_image each
+  if (/gemini-omni-flash\/v1\.2/i.test(id)) return 6;
   if (/luma|ray/i.test(id)) return 4;
   const inc = pricing && +pricing.included_reference_images;
   if (inc > 0) return inc; // no family entry: the included count is the only number the catalog gives us
@@ -352,8 +358,12 @@ function modelRefSpec(model, ctx) {
   const m = catItem(ctx && ctx.catalog, "video", model);
   if (!m) return { key: "reference_images", cap: refMaxFor(model) };
   const sp = m.supported_parameters || {}, pp = sp.parameters || sp;
-  const key = keys.find((k) => k in pp) || (pricingAdvertisesRefs(m.pricing) ? "reference_images" : null);
-  if (!key) return null; // known model with no ref-image param and no ref pricing
+  const modeOptions = pp.mode && pp.mode.options;
+  const referenceMode = Array.isArray(modeOptions) && modeOptions.some((o) =>
+    o && /^reference\b/i.test(String(o.value != null ? o.value : "")));
+  const key = keys.find((k) => k in pp) ||
+    (referenceMode || pricingAdvertisesRefs(m.pricing) ? "reference_images" : null);
+  if (!key) return null; // known model with no ref-image param, reference mode, or ref pricing
   const d = pp[key];
   let cap = null;
   if (d && typeof d === "object") {
@@ -774,7 +784,7 @@ export const RUNNERS = {
       } catch (e) {
         if (attempt > 0) throw e;
         const msg = (e && e.message) || "";
-        if (/^video failed:/i.test(msg)) throw e; // post-submit poll failure: already charged — no second job
+        if ((e && e.runId != null) || /^video failed:/i.test(msg)) throw e; // post-submit poll failure: already charged — no second job
         const cap = /up to\s+(\d+(?:\.\d+)?)\s*second/i.exec(msg);
         if (cap && /INVALID_AUDIO_DURATION|audio.{0,15}duration/i.test(msg)) {
           trimSec = Math.min(60, Math.max(1, parseFloat(cap[1]) - 0.1)); // the model told us its real cap
@@ -824,23 +834,32 @@ export const RUNNERS = {
   },
 
   // 🧊 3D model: image and/or text → model asset via the video submit/poll API.
+  // Mesh-processing models (e.g. Hyper3D Rigging) instead take an existing
+  // model on the `model` wire and receive it as the `model_url` parameter.
   async model3d(n, inp, ctx) {
     const model = String((n.fields && n.fields.model) || "").trim() || MODEL3D_IMAGE_DEFAULT;
     const mods = model3dInputMods(ctx && ctx.catalog, model);
     const prompt = promptOf(n, inp);
     let image = mods.image ? (inp.image || "") : "";
+    const mesh = mods.mesh ? (inp.model || "") : "";
     if (inp.image && !mods.image && ctx && ctx.progress) {
       ctx.progress("This model takes text only — the image wire stays, but this run ignores it.");
+    }
+    if (inp.model && !mods.mesh && ctx && ctx.progress) {
+      ctx.progress("This model generates from scratch — the model wire stays, but this run ignores it.");
     }
     if (prompt && !mods.text && ctx && ctx.progress) {
       ctx.progress("This model takes an image only — the prompt stays, but this run ignores it.");
     }
-    if (mods.image && !mods.text && !image) throw new NanoodleError("Connect an image first.");
-    if (mods.text && !mods.image && !prompt) throw new NanoodleError("Add a prompt first.");
-    if (mods.image && mods.text && !image && !prompt) throw new NanoodleError("Add a prompt or connect an image first.");
+    if (mods.mesh && !mesh) throw new NanoodleError("Connect a model first.");
+    if (!mods.mesh && mods.image && !mods.text && !image) throw new NanoodleError("Connect an image first.");
+    if (!mods.mesh && mods.text && !mods.image && !prompt) throw new NanoodleError("Add a prompt first.");
+    if (!mods.mesh && mods.image && mods.text && !image && !prompt) throw new NanoodleError("Add a prompt or connect an image first.");
     if (image) image = await fitImage(image, ctx, "source image");
+    const extra = { ...(n.fields.modelOpts || {}) };
+    if (mesh) extra.model_url = mesh; // the wire wins over a static modelOpts copy
     const url = await ctx.video(model, mods.text ? prompt : "", {
-      extra: n.fields.modelOpts || {},
+      extra,
       mediaKind: "model3d",
     }, image || null);
     return { model: url };
@@ -887,10 +906,10 @@ function model3dInputMods(catalog, id) {
     || (it.architecture && Array.isArray(it.architecture.input_modalities) && it.architecture.input_modalities)
   );
   if (raw && raw.length) {
-    const mods = raw.filter((x) => x === "image" || x === "text");
-    if (mods.length) return { image: mods.includes("image"), text: mods.includes("text") };
+    const mods = raw.filter((x) => x === "image" || x === "text" || x === "3d");
+    if (mods.length) return { image: mods.includes("image"), text: mods.includes("text"), mesh: mods.includes("3d") };
   }
-  if (id === MODEL3D_IMAGE_DEFAULT) return { image: true, text: false };
-  if (id === MODEL3D_TEXT_DEFAULT) return { image: true, text: true };
-  return { image: true, text: true };
+  if (id === MODEL3D_IMAGE_DEFAULT) return { image: true, text: false, mesh: false };
+  if (id === MODEL3D_TEXT_DEFAULT) return { image: true, text: true, mesh: false };
+  return { image: true, text: true, mesh: false };
 }

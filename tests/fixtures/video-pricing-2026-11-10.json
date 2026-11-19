@@ -1,0 +1,644 @@
+[
+  {
+    "id": "tbc/mischief-1",
+    "object": "model",
+    "created": 1793318400,
+    "owned_by": "unknown",
+    "name": "TBC Mischief 1",
+    "description": "Animate one image with a prompt of up to 2000 characters. Images may be up to 25 MiB and 100 megapixels; large images are re-encoded to fit the render budget.",
+    "architecture": {
+      "modality": "image->video",
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "video"
+      ]
+    },
+    "pricing": {
+      "currency": "USD",
+      "per_requested_second": {
+        "480p": 0.005,
+        "720p": 0.01
+      },
+      "minimum": 0.015,
+      "durations_seconds": [
+        3,
+        5
+      ],
+      "default_duration_seconds": 5,
+      "default_resolution": "720p",
+      "note": "Billing uses requested seconds, not the slightly longer rendered clip."
+    },
+    "capabilities": {
+      "video_generation": true,
+      "text_to_video": false,
+      "image_to_video": true,
+      "video_to_video": false,
+      "audio_input": false,
+      "audio_generation": false,
+      "nsfw": false
+    },
+    "supported_parameters": {
+      "max_prompt_characters": 2000,
+      "prompt_length": {
+        "status": "known",
+        "unit": "utf16_code_units",
+        "trim_whitespace": true
+      },
+      "parameters": {
+        "duration": {
+          "type": "select",
+          "label": "Duration",
+          "default": "5",
+          "options": [
+            {
+              "value": "3",
+              "label": "3 seconds"
+            },
+            {
+              "value": "5",
+              "label": "5 seconds"
+            }
+          ]
+        },
+        "resolution": {
+          "type": "select",
+          "label": "Resolution",
+          "default": "720p",
+          "options": [
+            {
+              "value": "480p",
+              "label": "480p (832 \u00d7 480)"
+            },
+            {
+              "value": "720p",
+              "label": "720p (1280 \u00d7 720)"
+            }
+          ]
+        },
+        "image_transform": {
+          "type": "select",
+          "label": "Image fit",
+          "default": "center_crop",
+          "options": [
+            {
+              "value": "center_crop",
+              "label": "Center crop"
+            },
+            {
+              "value": "resize",
+              "label": "Stretch to fit"
+            }
+          ]
+        },
+        "prompt_processing": {
+          "type": "select",
+          "label": "Prompt processing",
+          "description": "Choose original with a fixed seed for reproducible renders. Enhanced rewriting is not controlled by the seed.",
+          "default": "enhanced",
+          "options": [
+            {
+              "value": "enhanced",
+              "label": "Enhance prompt"
+            },
+            {
+              "value": "original",
+              "label": "Use original prompt"
+            }
+          ]
+        },
+        "seed": {
+          "type": "number",
+          "label": "Seed",
+          "description": "Use -1 for random.",
+          "default": -1,
+          "min": -1,
+          "max": 2147483647,
+          "step": 1
+        },
+        "prompt": {
+          "type": "string",
+          "required": true,
+          "max": 2000,
+          "description": "Describe motion in 1\u20132000 characters."
+        },
+        "imageUrl": {
+          "type": "string",
+          "required": true,
+          "aliases": [
+            "image",
+            "image_url",
+            "imageDataUrl",
+            "imageAttachmentId"
+          ],
+          "description": "One starting image, at most 25 MiB and 100 megapixels. An attachment ID may be supplied instead of a URL."
+        }
+      },
+      "defaults": {
+        "duration": "5",
+        "resolution": "720p",
+        "image_transform": "center_crop",
+        "prompt_processing": "enhanced",
+        "seed": -1
+      }
+    },
+    "tags": [
+      "video",
+      "image-to-video"
+    ],
+    "category": "video"
+  },
+  {
+    "id": "openjutsu",
+    "object": "model",
+    "created": 1793491200,
+    "owned_by": "unknown",
+    "name": "OpenJutsu",
+    "description": "Swap characters, change objects, or replace the background in a video. Character swap accepts 1\u20134 images with optional matching descriptions of who to replace; one image without a description replaces the prominent person. Object change uses a target and a description or optional reference image. Background mode keeps the named target and changes its surroundings. Use a single shot; character swaps need a person visible in the first frame. Processes at most the first 15 seconds and aims to retain motion and original audio; results can be shorter. Choose 480p or 768p and an optional seed.",
+    "architecture": {
+      "modality": "image+video->video",
+      "input_modalities": [
+        "image",
+        "video"
+      ],
+      "output_modalities": [
+        "video"
+      ]
+    },
+    "pricing": {
+      "currency": "USD",
+      "unit": "per_verified_source_second_plus_image",
+      "per_second_by_resolution": {
+        "480p": 0.05,
+        "768p": 0.1
+      },
+      "per_image": 0.01,
+      "character_images": {
+        "min": 1,
+        "max": 4
+      },
+      "object_images": {
+        "min": 0,
+        "max": 1
+      },
+      "minimum_billable_duration": 3,
+      "maximum_billable_duration": 15,
+      "default_resolution": "768p",
+      "billing": "max(3, min(15, ceil(verified source seconds))) \u00d7 resolution rate + $0.01 per supplied image",
+      "note": "Current public promotional tariff, verified 2026-11-01. Text-only object edits have no image fee. Output may be shorter than source. No seed surcharge."
+    },
+    "capabilities": {
+      "video_generation": true,
+      "text_to_video": false,
+      "image_to_video": true,
+      "video_to_video": true,
+      "audio_input": false,
+      "audio_generation": false,
+      "nsfw": true
+    },
+    "supported_parameters": {
+      "max_prompt_characters": null,
+      "prompt_length": {
+        "status": "not_applicable",
+        "unit": null,
+        "trim_whitespace": null
+      },
+      "parameters": {
+        "swap_type": {
+          "type": "select",
+          "label": "Edit type",
+          "default": "character",
+          "options": [
+            {
+              "value": "character",
+              "label": "Character swap"
+            },
+            {
+              "value": "object",
+              "label": "Object or background"
+            }
+          ]
+        },
+        "mode": {
+          "type": "select",
+          "label": "Object edit",
+          "default": "change",
+          "options": [
+            {
+              "value": "change",
+              "label": "Change target"
+            },
+            {
+              "value": "background",
+              "label": "Change surroundings; keep target"
+            }
+          ],
+          "showWhen": {
+            "swap_type": "object"
+          }
+        },
+        "target": {
+          "type": "text",
+          "label": "Target",
+          "description": "Name what to change, or what to keep in background mode. Separate multiple items with commas.",
+          "default": "",
+          "showWhen": {
+            "swap_type": "object"
+          }
+        },
+        "change_to": {
+          "type": "text",
+          "label": "New appearance",
+          "description": "Describe the replacement object or surroundings. Required unless a reference image is supplied.",
+          "default": "",
+          "showWhen": {
+            "swap_type": "object"
+          }
+        },
+        "role_1": {
+          "type": "text",
+          "label": "Person to replace with image 1",
+          "description": "Optional short description of the person in the source video. Image order starts with the primary character image, then additional images. Empty descriptions are allowed.",
+          "default": "",
+          "showWhen": {
+            "swap_type": "character"
+          }
+        },
+        "role_2": {
+          "type": "text",
+          "label": "Person to replace with image 2",
+          "description": "Optional short description of the person in the source video. Image order starts with the primary character image, then additional images. Empty descriptions are allowed.",
+          "default": "",
+          "showWhen": {
+            "swap_type": "character"
+          }
+        },
+        "role_3": {
+          "type": "text",
+          "label": "Person to replace with image 3",
+          "description": "Optional short description of the person in the source video. Image order starts with the primary character image, then additional images. Empty descriptions are allowed.",
+          "default": "",
+          "showWhen": {
+            "swap_type": "character"
+          }
+        },
+        "role_4": {
+          "type": "text",
+          "label": "Person to replace with image 4",
+          "description": "Optional short description of the person in the source video. Image order starts with the primary character image, then additional images. Empty descriptions are allowed.",
+          "default": "",
+          "showWhen": {
+            "swap_type": "character"
+          }
+        },
+        "resolution": {
+          "type": "select",
+          "label": "Resolution",
+          "default": "768p",
+          "options": [
+            {
+              "value": "480p",
+              "label": "480p"
+            },
+            {
+              "value": "768p",
+              "label": "768p"
+            }
+          ]
+        },
+        "seed": {
+          "type": "integer",
+          "label": "Seed",
+          "description": "Any negative integer selects a random seed.",
+          "default": -1,
+          "step": 1
+        },
+        "videoUrl": {
+          "type": "string",
+          "required": true,
+          "aliases": [
+            "video",
+            "video_url",
+            "videoDataUrl",
+            "videoAttachmentId"
+          ],
+          "description": "Required source video. The first 15 seconds are used; duration is verified before billing."
+        },
+        "images": {
+          "type": "array",
+          "max_items": 4,
+          "description": "Character mode: 1\u20134 ordered image URLs or data URLs. Use images or imageAttachmentIds. Existing single-image aliases remain supported."
+        },
+        "imageAttachmentIds": {
+          "type": "array",
+          "max_items": 4,
+          "description": "Character mode: 1\u20134 authorized image attachment IDs instead of images."
+        },
+        "roles": {
+          "type": "array",
+          "max_items": 4,
+          "description": "Optional character-mode descriptions in image order. Exactly one string per supplied image, including empty strings for unspecified people."
+        },
+        "imageUrl": {
+          "type": "string",
+          "aliases": [
+            "image",
+            "image_url",
+            "imageDataUrl",
+            "imageAttachmentId"
+          ],
+          "description": "Single-image character compatibility input, or optional object/background appearance reference. Each supplied image adds $0.01."
+        }
+      },
+      "defaults": {
+        "swap_type": "character",
+        "mode": "change",
+        "target": "",
+        "change_to": "",
+        "role_1": "",
+        "role_2": "",
+        "role_3": "",
+        "role_4": "",
+        "resolution": "768p",
+        "seed": -1
+      }
+    },
+    "label": "NEW",
+    "tags": [
+      "video-to-video",
+      "character-swap",
+      "object-edit",
+      "background-edit"
+    ],
+    "category": "video"
+  },
+  {
+    "id": "ltx-2.3-quality",
+    "object": "model",
+    "created": 1780358400,
+    "owned_by": "lightricks",
+    "name": "LTX-2.3 Quality",
+    "description": "LTX-2.3 Quality routes text, image, audio, reference video, extend-video, video-to-HDR, and optional LoRA inputs to the appropriate generation mode. Supports output sizes such as landscape, portrait, square, and auto with native synchronized audio.",
+    "architecture": {
+      "modality": "text+image+video->video",
+      "input_modalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output_modalities": [
+        "video"
+      ]
+    },
+    "pricing": {
+      "currency": "USD",
+      "per_megapixel": 0.002408,
+      "hdr_or_lora_per_megapixel": 0.002708,
+      "megapixels_by_resolution": {
+        "auto": 1.048576,
+        "landscape_16_9": 0.9216,
+        "portrait_16_9": 0.9216,
+        "landscape_4_3": 0.786432,
+        "portrait_4_3": 0.786432,
+        "square_hd": 1.048576,
+        "square": 0.262144,
+        "480p": 0.3072,
+        "720p": 0.9216,
+        "1080p": 2.0736,
+        "4k+": 8.2944
+      },
+      "billing": "rate x ceil(frames x megapixels per frame); auto resolution in HDR, reference and extend modes uses the source video size; HDR mode and LoRA inputs use hdr_or_lora_per_megapixel",
+      "default_duration": 6,
+      "default_resolution": "landscape_16_9",
+      "default_frames_per_second": 24,
+      "default_num_frames": 145
+    },
+    "capabilities": {
+      "video_generation": true,
+      "text_to_video": true,
+      "image_to_video": true,
+      "video_to_video": true,
+      "audio_input": false,
+      "audio_generation": true,
+      "nsfw": false
+    },
+    "supported_parameters": {
+      "max_prompt_characters": 3000,
+      "prompt_length": {
+        "status": "known",
+        "unit": "utf16_code_units",
+        "trim_whitespace": true,
+        "notes": "With mode=extend and a nonempty context, the maximum counts the trimmed prompt, two newline characters, and the trimmed context together."
+      },
+      "parameters": {
+        "mode": {
+          "type": "select",
+          "label": "Input Mode",
+          "default": "auto",
+          "options": [
+            {
+              "value": "auto",
+              "label": "Auto"
+            },
+            {
+              "value": "extend",
+              "label": "Extend Video"
+            },
+            {
+              "value": "hdr",
+              "label": "HDR"
+            }
+          ],
+          "description": "Auto picks the endpoint from uploaded media; Extend continues an uploaded source video."
+        },
+        "resolution": {
+          "type": "select",
+          "label": "Output Size",
+          "default": "landscape_16_9",
+          "options": [
+            {
+              "value": "auto",
+              "label": "Auto"
+            },
+            {
+              "value": "landscape_16_9",
+              "label": "Landscape (16:9)"
+            },
+            {
+              "value": "portrait_16_9",
+              "label": "Portrait (9:16)"
+            },
+            {
+              "value": "landscape_4_3",
+              "label": "Landscape (4:3)"
+            },
+            {
+              "value": "portrait_4_3",
+              "label": "Portrait (3:4)"
+            },
+            {
+              "value": "square_hd",
+              "label": "Square HD"
+            },
+            {
+              "value": "square",
+              "label": "Square"
+            }
+          ],
+          "description": "Output size and aspect ratio"
+        },
+        "duration": {
+          "type": "select",
+          "label": "Duration",
+          "default": "6",
+          "options": [
+            {
+              "value": "5",
+              "label": "5 seconds"
+            },
+            {
+              "value": "6",
+              "label": "6 seconds"
+            },
+            {
+              "value": "8",
+              "label": "8 seconds"
+            },
+            {
+              "value": "10",
+              "label": "10 seconds"
+            },
+            {
+              "value": "12",
+              "label": "12 seconds"
+            },
+            {
+              "value": "14",
+              "label": "14 seconds"
+            },
+            {
+              "value": "16",
+              "label": "16 seconds"
+            },
+            {
+              "value": "18",
+              "label": "18 seconds"
+            },
+            {
+              "value": "20",
+              "label": "20 seconds"
+            }
+          ],
+          "description": "Clip length"
+        },
+        "frames_per_second": {
+          "type": "select",
+          "label": "Frames Per Second",
+          "default": "24",
+          "options": [
+            {
+              "value": "24",
+              "label": "24 FPS"
+            }
+          ],
+          "description": "Frames per second"
+        },
+        "generateAudio": {
+          "type": "switch",
+          "label": "Generate Audio",
+          "description": "Enable synchronized audio when supported",
+          "default": true
+        },
+        "lora_url_1": {
+          "type": "text",
+          "label": "LoRA 1 URL",
+          "description": "Optional LoRA weights URL (max 3 total).",
+          "default": ""
+        },
+        "lora_scale_1": {
+          "type": "number",
+          "label": "LoRA 1 Scale",
+          "description": "Strength of LoRA 1 (0.0-2.0).",
+          "default": 1,
+          "min": 0,
+          "max": 2,
+          "step": 0.1
+        },
+        "lora_url_2": {
+          "type": "text",
+          "label": "LoRA 2 URL",
+          "description": "Optional second LoRA weights URL.",
+          "default": ""
+        },
+        "lora_scale_2": {
+          "type": "number",
+          "label": "LoRA 2 Scale",
+          "description": "Strength of LoRA 2 (0.0-2.0).",
+          "default": 1,
+          "min": 0,
+          "max": 2,
+          "step": 0.1
+        },
+        "lora_url_3": {
+          "type": "text",
+          "label": "LoRA 3 URL",
+          "description": "Optional third LoRA weights URL.",
+          "default": ""
+        },
+        "lora_scale_3": {
+          "type": "number",
+          "label": "LoRA 3 Scale",
+          "description": "Strength of LoRA 3 (0.0-2.0).",
+          "default": 1,
+          "min": 0,
+          "max": 2,
+          "step": 0.1
+        },
+        "extend_mode": {
+          "label": "Extend Direction",
+          "description": "Choose whether to generate after the source video or before it.",
+          "type": "select",
+          "options": [
+            {
+              "value": "end",
+              "label": "Forward"
+            },
+            {
+              "value": "start",
+              "label": "Backward"
+            }
+          ],
+          "default": "end",
+          "showWhen": {
+            "mode": "extend"
+          }
+        }
+      },
+      "defaults": {
+        "mode": "auto",
+        "resolution": "landscape_16_9",
+        "duration": "5",
+        "frames_per_second": "24",
+        "generateAudio": true,
+        "lora_url_1": "",
+        "lora_scale_1": 1,
+        "lora_url_2": "",
+        "lora_scale_2": 1,
+        "lora_url_3": "",
+        "lora_scale_3": 1
+      }
+    },
+    "icon_url": "/icons/Lightricks.png",
+    "tags": [
+      "lightricks",
+      "ltx",
+      "audio-sync",
+      "lora",
+      "reference-video",
+      "extend-video"
+    ],
+    "category": "More"
+  }
+]

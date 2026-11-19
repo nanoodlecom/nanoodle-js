@@ -130,10 +130,12 @@ export class NanoClient {
    * at most once; a second 402 after settling is an error, never a second send.
    */
   async _paidFetch(url, init, signal) {
+    if (signal && signal.aborted) throw abortError(signal.reason);
     const r = await this.fetch(url, init);
     if (r.status !== 402 || !this.payment || this.apiKey) return r;
     const settled = await this._settle402(r, signal);
     if (settled.response) return settled.response; // complete replayed the stored request
+    if (signal && signal.aborted) throw abortError(signal.reason);
     const r2 = await this.fetch(url, { ...init, headers: { ...init.headers, "x-x402-payment-id": settled.paymentId } });
     if (r2.status === 402) {
       throw new NanoodleError(
@@ -153,10 +155,15 @@ export class NanoClient {
         "payment required, but the 402 response offered no usable Nano option" +
         (body ? " — " + JSON.stringify(body).slice(0, 200) : ""), { code: "x402", status: 402 });
     }
+    if (signal && signal.aborted) throw abortError(signal.reason);
+    if (invoice.expiresAt && invoice.expiresAt <= Date.now()) {
+      throw new NanoodleError("payment window expired before payment (" + invoice.paymentId + ", to " + invoice.payTo + ") — request a fresh invoice", { code: "x402-expired", paymentId: invoice.paymentId });
+    }
     await this.payment(invoice); // ← the callback does the actual XNO send
     // The complete endpoint doubles as the poll: 402 = not seen on-chain yet.
     const deadline = invoice.expiresAt || Date.now() + 15 * 60 * 1000;
     while (true) {
+      if (signal && signal.aborted) throw abortError(signal.reason);
       const cr = await this.fetch(invoice.completeUrl, {
         method: "POST", headers: { "Content-Type": "application/json", "x-x402": "true" }, body: "{}", signal,
       });
@@ -184,7 +191,13 @@ export class NanoClient {
             { code: "x402", status: cr.status, paymentId: invoice.paymentId });
         }
         let cj = null;
-        if (ct.includes("json")) { try { cj = await cr.json(); } catch { /* treat as settle-only */ } }
+        if (mime.includes("json")) { try { cj = await cr.json(); } catch { /* fail closed below */ } }
+        if (!cj || typeof cj !== "object") {
+          throw new NanoodleError(
+            "payment " + invoice.paymentId + " was sent, but completion returned no readable JSON receipt — check " +
+            (invoice.statusUrl || "the payment status") + " before paying again",
+            { code: "x402", paymentId: invoice.paymentId });
+        }
         if (looksLikeResult(cj)) {
           // wrap so call sites keep their Response contract (ok/json/text/headers)
           const response = { ok: true, status: 200, headers: cr.headers, json: async () => cj, text: async () => JSON.stringify(cj) };
@@ -217,6 +230,35 @@ export class NanoClient {
     }, signal);
   }
 
+  async _pollJson(path, signal, remainingMs) {
+    const ac = new AbortController();
+    const onAbort = () => ac.abort(abortError(signal.reason));
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+    const timer = Number.isFinite(remainingMs) ? setTimeout(() => ac.abort(
+      new NanoodleError("poll deadline reached", { code: "poll-timeout" })), Math.max(0, remainingMs)) : null;
+    let rejectAbort;
+    const aborted = new Promise((_, reject) => {
+      rejectAbort = () => reject(ac.signal.reason);
+      ac.signal.addEventListener("abort", rejectAbort, { once: true });
+      if (ac.signal.aborted) rejectAbort();
+    });
+    const work = Promise.resolve().then(async () => {
+      if (ac.signal.aborted) throw ac.signal.reason;
+      const r = await this._get(path, ac.signal);
+      if (!r.ok) throw httpError(r.status, await r.text());
+      return r.json();
+    });
+    try { return await Promise.race([work, aborted]); }
+    finally {
+      if (timer) clearTimeout(timer);
+      if (signal) signal.removeEventListener("abort", onAbort);
+      ac.signal.removeEventListener("abort", rejectAbort);
+    }
+  }
+
   async _get(path, signal) {
     return this.fetch(this.baseUrl + path, { headers: this._auth(), signal });
   }
@@ -224,10 +266,17 @@ export class NanoClient {
   /** POST /api/v1/chat/completions (non-streaming). Returns the assistant text. */
   async chat(messages, model, opts = {}, { onCost, signal } = {}) {
     const body = { model, messages };
-    body.temperature = opts.temperature != null && opts.temperature !== "" ? +opts.temperature : 0.8;
-    if (opts.max_tokens) body.max_tokens = +opts.max_tokens;
+    // Carbon has no sampling-temperature control; omit it rather than restoring a default.
+    if (model !== "google/gemini-4-carbon") body.temperature = opts.temperature != null && opts.temperature !== "" ? +opts.temperature : 0.8;
     if (opts.response_format) body.response_format = opts.response_format;
-    if (opts.reasoning_effort) body.reasoning_effort = opts.reasoning_effort;
+    // Carbon's selected NanoGPT provider rejects explicit thinking controls (HTTP 400).
+    // Let the provider use its default rather than forwarding reasoning_effort.
+    if (model !== "google/gemini-4-carbon" && opts.reasoning_effort) body.reasoning_effort = opts.reasoning_effort;
+    // max_tokens is the one token budget forwarded, and only when a runner
+    // explicitly opts in via opts (the graph's maxTokens field, D1 ruling).
+    // The legacy spellings (max_completion_tokens, max_output_tokens,
+    // maxTokens) are never read here, so they can never leak into the body.
+    if (opts.max_tokens != null) body.max_tokens = opts.max_tokens;
     const r = await this._postJson("/api/v1/chat/completions", body, signal);
     if (!r.ok) throw httpError(r.status, await r.text());
     const j = await r.json();
@@ -319,39 +368,50 @@ export class NanoClient {
       if (onRunId) onRunId(runId);
     }
 
-    const t0 = Date.now();
-    const videoCap = is3d ? this.timeouts.model3d : this.timeouts.video;
-    const pollEvery = is3d ? (this.pollIntervals.model3d || this.pollIntervals.video) : this.pollIntervals.video;
-    // Infinity/non-finite = wait forever (default). Finite ms = headless/CI cap.
-    while (!Number.isFinite(videoCap) || Date.now() - t0 < videoCap) {
-      await sleep(pollEvery, signal);
-      let s;
-      try {
-        s = await (await this._get("/api/video/status?requestId=" + encodeURIComponent(runId), signal)).json();
-      } catch (e) {
-        if (signal && signal.aborted) throw abortError(signal.reason);
-        continue; // transient poll failure — keep polling until complete or optional cap
-      }
-      const st = String((s.data && s.data.status) || s.status || "").toUpperCase();
-      if (onPoll) onPoll({ status: st, elapsedMs: Date.now() - t0, runId });
-      if (st === "COMPLETED" || st === "SUCCEEDED") {
-        if (is3d) {
-          const url = model3dStatusUrl(s, model);
-          if (!url) throw new NanoodleError("completed but no model url");
+    try {
+      const t0 = Date.now();
+      const videoCap = is3d ? this.timeouts.model3d : this.timeouts.video;
+      const pollEvery = is3d ? (this.pollIntervals.model3d || this.pollIntervals.video) : this.pollIntervals.video;
+      // Infinity/non-finite = wait forever (default). Finite ms = headless/CI cap.
+      while (!Number.isFinite(videoCap) || Date.now() - t0 < videoCap) {
+        await sleep(Number.isFinite(videoCap) ? Math.min(pollEvery, Math.max(0, videoCap - (Date.now() - t0))) : pollEvery, signal);
+        if (Number.isFinite(videoCap) && Date.now() - t0 >= videoCap) break;
+        let s;
+        try {
+          s = await this._pollJson("/api/video/status?requestId=" + encodeURIComponent(runId), signal, videoCap - (Date.now() - t0));
+        } catch (e) {
+          if (signal && signal.aborted) throw abortError(signal.reason);
+          if (e.code === "poll-timeout") break;
+          if (e.status >= 400 && e.status < 500 && ![408, 429].includes(e.status)) throw e;
+          continue; // transient poll failure — keep polling until complete or optional cap
+        }
+        const st = String((s.data && s.data.status) || s.status || "").toUpperCase();
+        if (onPoll) onPoll({ status: st, elapsedMs: Date.now() - t0, runId });
+        if (st === "COMPLETED" || st === "SUCCEEDED") {
+          if (is3d) {
+            const url = model3dStatusUrl(s, model);
+            if (!url) throw new NanoodleError("completed but no model url");
+            return url;
+          }
+          const out = (s.data && s.data.output) || s.output || {};
+          const url = (out.video && out.video.url) || out.url || (Array.isArray(out.video) ? out.video[0] && out.video[0].url : null);
+          if (!url) throw new NanoodleError("completed but no video url");
           return url;
         }
-        const out = (s.data && s.data.output) || s.output || {};
-        const url = (out.video && out.video.url) || out.url || (Array.isArray(out.video) ? out.video[0] && out.video[0].url : null);
-        if (!url) throw new NanoodleError("completed but no video url");
-        return url;
+        if (["FAILED", "ERROR", "CANCELED", "CANCELLED", "CONTENT_POLICY_VIOLATION"].includes(st)) {
+          const why = (s.data && s.data.error) || st;
+          throw new NanoodleError((is3d ? "3D failed: " : "video failed: ") + why);
+        }
       }
-      if (["FAILED", "ERROR", "CANCELED"].includes(st)) {
-        const why = (s.data && s.data.error) || st;
-        throw new NanoodleError((is3d ? "3D failed: " : "video failed: ") + why);
-      }
+      const label = is3d ? "3D" : "video";
+      throw new NanoodleError(`${label} timed out (${Math.round(videoCap / 1000)}s) — the job may still be running on NanoGPT's side`, { code: "timeout" });
+    } catch (e) {
+      if (signal && signal.aborted) throw e;
+      throw new NanoodleError(e && e.message ? e.message : String(e), {
+        ...(e && e.code ? { code: e.code } : {}),
+        ...(e && e.status ? { status: e.status } : {}), runId, cause: e,
+      });
     }
-    const label = is3d ? "3D" : "video";
-    throw new NanoodleError(`${label} timed out (${Math.round(videoCap / 1000)}s) — the job may still be running on NanoGPT's side`, { code: "timeout" });
   }
 
   /**
@@ -407,12 +467,15 @@ export class NanoClient {
     if (j.isApiRequest != null) qs.set("isApiRequest", String(j.isApiRequest));
     const t0 = Date.now();
     while (Date.now() - t0 < this.timeouts.audio) {
-      await sleep(this.pollIntervals.audio, signal);
+      await sleep(Math.min(this.pollIntervals.audio, Math.max(0, this.timeouts.audio - (Date.now() - t0))), signal);
+      if (Date.now() - t0 >= this.timeouts.audio) break;
       let s;
       try {
-        s = await (await this._get("/api/tts/status?" + qs, signal)).json();
+        s = await this._pollJson("/api/tts/status?" + qs, signal, this.timeouts.audio - (Date.now() - t0));
       } catch (e) {
         if (signal && signal.aborted) throw abortError(signal.reason);
+        if (e.code === "poll-timeout") break;
+        if (e.status >= 400 && e.status < 500 && ![408, 429].includes(e.status)) throw e;
         continue;
       }
       const st = String(s.status || "").toLowerCase();
@@ -422,7 +485,7 @@ export class NanoClient {
         if (!url) throw new NanoodleError("completed but no audio url");
         return url;
       }
-      if (["error", "failed", "content_policy_violation"].includes(st)) {
+      if (["error", "failed", "canceled", "cancelled", "content_policy_violation"].includes(st)) {
         throw new NanoodleError("audio failed: " + (s.error || s.message || st));
       }
     }
@@ -474,9 +537,12 @@ export class NanoClient {
   /**
    * Resolve a provider media URL before it is handed to another node or returned
    * as a node output. Relative content paths (Grok Imagine's
-   * `/api/generate-video/content?...`) and same-origin `/api` or `/v1` URLs are
-   * joined onto `baseUrl` and fetched with the API key, redirects manual so the
-   * key is never forwarded to the file host. A redirect Location becomes the
+   * `/api/generate-video/content?...`) and the exact same-origin content paths
+   * in CONTENT_API_PATHS are joined onto `baseUrl` and fetched with the API key,
+   * redirects manual so the key is never forwarded to the file host. Any other
+   * same-origin `/api` or `/v1` URL, including a user-supplied upload URL, is
+   * refused and not fetched — a 200 from those paths must not be inlined with
+   * the caller's credentials. A redirect Location becomes the
    * absolute file URL (presigned queries stay on that URL — the next provider
    * needs them — and are never put in errors). A direct 200 is inlined as a
    * data URL only when it fits MEDIA_INLINE_MAX; an over-cap clip must come
@@ -500,10 +566,31 @@ export class NanoClient {
   }
 }
 
-/** Paths that still need the API key (a content endpoint), not a public file. */
+/**
+ * Exact content paths that return provider media. Credentials are sent only here.
+ * A prefix (`/api/…`, `/v1/…`) is not enough: `/api/v1/models`, an upload URL, or
+ * `/api/generate-video/content/extra` would otherwise be fetched with the key and
+ * a 200 body inlined into the graph output.
+ */
+const CONTENT_API_PATHS = new Set([
+  "/api/generate-video/content",
+  "/api/images/content",
+  "/v1/audio/content",
+]);
+
 function isContentApiPath(pathname) {
+  return CONTENT_API_PATHS.has(pathname);
+}
+
+/** Same-origin API surface. These are not fetched unless the path is allowlisted. */
+function isSameOriginApiPath(pathname) {
   return pathname === "/api" || pathname.startsWith("/api/")
     || pathname === "/v1" || pathname.startsWith("/v1/");
+}
+
+function refuseNonContentApi(pathname) {
+  if (!isSameOriginApiPath(pathname) || isContentApiPath(pathname)) return;
+  throw new NanoodleError("that URL is not a provider content file, so it was not fetched");
 }
 
 function apiBase(baseUrl) {
@@ -571,15 +658,20 @@ export async function resolveProviderMediaUrl(url, { baseUrl, fetch: fetchImpl, 
   try {
     if (/^https?:/i.test(s)) {
       const abs = new URL(s);
-      if (abs.origin !== origin || !isContentApiPath(abs.pathname)) return s;
+      if (abs.origin !== origin) return s;
+      refuseNonContentApi(abs.pathname);
+      if (!isContentApiPath(abs.pathname)) return s;
       start = abs;
     } else if (s.startsWith("/") && !s.startsWith("//")) {
       start = new URL(s, base + "/");
+      refuseNonContentApi(start.pathname);
       if (!isContentApiPath(start.pathname)) return start.href;
     } else {
       return s;
     }
-  } catch {
+  } catch (e) {
+    // A refused /api or /v1 URL must not be swallowed as "leave it unchanged".
+    if (e && e.name === "NanoodleError") throw e;
     return s;
   }
 
@@ -610,6 +702,9 @@ export async function resolveProviderMediaUrl(url, { baseUrl, fetch: fetchImpl, 
       catch { throw new NanoodleError("provider media redirect had no usable location"); }
       // File host or a non-API path: hand back the absolute URL. Do not fetch it
       // (that would pull a multi-megabyte clip and might attach the key).
+      // A same-origin /api or /v1 hop that is not itself a content file is refused
+      // outright — its body must never be inlined with the caller's credentials.
+      if (next.origin === origin) refuseNonContentApi(next.pathname);
       if (next.origin !== origin || !isContentApiPath(next.pathname)) return next.href;
       current = next.href;
       continue;

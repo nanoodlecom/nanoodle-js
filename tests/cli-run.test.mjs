@@ -222,3 +222,45 @@ test("CLI contract: a closed ⚖️ Decide gate exits 0 and reports gated, not f
   assert.match(r.stderr, /⤼ LLM \(l\) skipped — gate g said no/);
   assert.ok(srv.requests.every((q) => q.path !== "/api/v1/chat/completions"));
 });
+
+test('CLI failure summary retains accepted job ID for recovery', async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script('POST /api/generate-video', { json: { runId: 'accepted-job', cost: 0.2 } });
+  const cwd = await mkdtemp(join(tmpdir(), 'nanoodle-cli-'));
+  const graphPath = join(cwd, 'g.json');
+  await writeFile(graphPath, JSON.stringify({ nodes: [{ id: 'v', type: 'tvideo', fields: { model: 'test', prompt: 'hi' } }], links: [] }));
+  const r = await runCli(['run', graphPath, '--timeout', '300'], { cwd, env: { NANOGPT_BASE_URL: srv.url } });
+  assert.equal(r.status, 1, r.stderr);
+  const summary = JSON.parse(r.stdout);
+  assert.equal(summary.nodes.v.runId, 'accepted-job');
+  assert.equal(summary.nodes.v.status, 'error');
+});
+
+test('CLI preserves distinct media outputs when sanitized filenames or suffixes collide', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'nanoodle-cli-'));
+  const names = ['A B', 'A_B', 'A_B_2', 'a-b?', 'A-b!'];
+  const bytes = names.map((name) => Buffer.concat([Buffer.from(PNG_B64, 'base64'), Buffer.from(name)]));
+  const graphPath = join(cwd, 'g.json');
+  await writeFile(graphPath, JSON.stringify({ nodes: names.map((name, i) => ({
+    id: `n${i}`, type: 'upload', name, fields: { image: 'data:image/png;base64,' + bytes[i].toString('base64') },
+  })), links: [] }));
+  const r = await runCli(['run', graphPath, '--json'], { cwd });
+  assert.equal(r.status, 0, r.stderr);
+  const summary = JSON.parse(r.stdout);
+  const paths = names.map(name => summary.outputs[name]);
+  assert.equal(new Set(paths.map(path => path.toLowerCase())).size, names.length, 'every output receives a distinct path');
+  for (let i = 0; i < names.length; i++) assert.deepEqual(await readFile(join(cwd, paths[i])), bytes[i], names[i]);
+});
+
+test('CLI accepts and summarizes prototype-named friendly input/output keys', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'nanoodle-cli-'));
+  const graphPath = join(cwd, 'g.json');
+  await writeFile(graphPath, JSON.stringify({ nodes: [{ id: '__proto__', type: 'text', name: '__proto__', fields: { text: 'stored' } }], links: [] }));
+  const r = await runCli(['run', graphPath, '--input', '__proto__=supplied', '--json'], { cwd });
+  assert.equal(r.status, 0, r.stderr);
+  const summary = JSON.parse(r.stdout);
+  assert.ok(Object.hasOwn(summary.outputs, '__proto__'));
+  assert.equal(summary.outputs.__proto__, 'supplied');
+  assert.ok(Object.hasOwn(summary.nodes, '__proto__'));
+});

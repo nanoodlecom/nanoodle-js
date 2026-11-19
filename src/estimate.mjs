@@ -43,7 +43,7 @@ function pricedModelId(node) {
 // that cannot happen. It contributes $0 and is not counted as `unpriced`,
 // because "we could not price it" is the wrong report — it is not billable.
 const PRICE_KIND = {
-  llm: "chat", vision: "chat", decide: "chat",
+  llm: "chat", vision: "chat", decide: "decision", "decide-branch": "decision",
   image: "image", edit: "image", inpaint: "image",
   tvideo: "video", ivideo: "video", vedit: "video", lipsync: "video",
   music: "audio", remix: "audio", tts: "audio", transcribe: "audio", cleanvoice: "audio",
@@ -72,7 +72,7 @@ function pickObjByRes(map, reqRes, defRes) {
 function pickDur(p, raw, fields) {
   const f = parseFloat(fields && fields.duration);
   if (isFinite(f) && f > 0) return f;
-  const d = _num(p.default_duration) ?? _num(raw.defaultDuration);
+  const d = _num(p.default_duration ?? p.default_duration_seconds) ?? _num(raw.defaultDuration);
   if (d != null && d > 0) return d;
   if (p.per_duration) { const k = Object.keys(p.per_duration)[0]; if (k && isFinite(+k)) return +k; }
   if (Array.isArray(p.supported_durations) && p.supported_durations.length) return +p.supported_durations[0];
@@ -95,7 +95,7 @@ const billingRule = (p) => String(p.billing || "").trim().toLowerCase();
 const clampSeconds = (seconds, lo, hi) => Math.min(_num(hi) ?? seconds, Math.max(_num(lo) ?? seconds, seconds));
 function perSecondQuantity(pricing, seconds) {
   const p = pricing || {};
-  return WHOLE_SECOND_BILLING.has(billingRule(p))
+  return (p.unit === "per_verified_source_second_plus_image" || WHOLE_SECOND_BILLING.has(billingRule(p)))
     ? clampSeconds(Math.ceil(seconds), p.minimum_billable_duration, p.maximum_billable_duration)
     : seconds;
 }
@@ -148,6 +148,23 @@ function videoAudioOn(fields, audioCtx) {
   return false;
 }
 
+// Source-video billing is distinct from a requested output duration. Never use
+// maximum_seconds (an input limit) or the node's legacy five-second default as money.
+function inputVideoPriceFields(pricing, fields, source, measuredSeconds) {
+  if (!pricing || pricing.unit !== "input_video_second") return fields;
+  const measured = _num(measuredSeconds), hint = _num(source && source.fields && source.fields.duration);
+  const seconds = measured > 0 ? measured : (hint > 0 ? hint : null);
+  return Object.assign({}, fields || {}, { inputVideoSeconds: seconds });
+}
+function inputVideoSecondRate(pricing, fields, ctx) {
+  const p = pricing || {}, f = fields || {}, c = ctx || {}, pp = c.params || {};
+  const res = f.resolution || (f.modelOpts || {}).resolution
+    || (pp.resolution && pp.resolution.default) || (c.defaults || {}).resolution || p.default_resolution;
+  const rates = p.per_second_by_output_resolution;
+  const rate = rates && _num(rates[res]);
+  return rate != null && rate >= 0 ? rate : null;
+}
+
 // A video run bills a HIGHER tier when reference images are wired or the model's
 // audio switch is on. refWired comes from the graph wiring; the audio switch /
 // reference mode ride in fields.modelOpts. refWired may be a boolean (legacy
@@ -161,7 +178,7 @@ function videoUnitUsd(pricing, fields, refWired, audioCtx) {
   const audioOn = videoAudioOn(f, audioCtx);
   const refCount = typeof refWired === "number" ? Math.max(0, refWired | 0) : (refWired ? 1 : 0);
   const refOn = refCount > 0 || /reference/i.test(String(opts.mode || ""));
-  let usd = videoBaseUsd(p, f, audioOn, refOn);
+  let usd = videoBaseUsd(p, f, audioOn, refOn, audioCtx);
   if (usd != null && isFinite(usd) && audioOn && p.audio_multiplier != null) usd *= (_num(p.audio_multiplier) ?? 1);
   // MiniMax H3 LoRA: each wired reference image/audio adds
   // pricing.lora.reference_image_or_audio ($0.02). This number is the quote,
@@ -179,15 +196,32 @@ function videoUnitUsd(pricing, fields, refWired, audioCtx) {
   }
   return usd;
 }
-function videoBaseUsd(pricing, fields, audioOn, refOn) {
+function videoBaseUsd(pricing, fields, audioOn, refOn, audioCtx) {
   const p = pricing || {}, raw = (p.raw && typeof p.raw === "object") ? p.raw : {};
   const f = fields || {};
   const res = f.resolution, defRes = p.default_resolution ?? raw.defaultResolution;
+  if (p.unit === "input_video_second") {
+    const seconds = _num(f.inputVideoSeconds), rate = inputVideoSecondRate(p, f, audioCtx);
+    const max = _num(p.maximum_seconds);
+    return seconds > 0 && (max == null || seconds <= max) && rate != null ? seconds * rate : null;
+  }
   const dur = pickDur(p, raw, f);
   const frameBill = frameLimitedBilling(p, f, dur);
   const billDur = frameBill ? frameBill.seconds * frameBill.multiplier : perSecondQuantity(p, dur);
   const rp = (m) => pickByRes(m, frameBill ? frameBill.resolution : res, defRes);
   let v;
+  if ((v = rp(p.per_requested_second)) != null) return Math.max(v * dur, _num(p.minimum) || 0);
+  if (p.per_megapixel != null && p.megapixels_by_resolution) {
+    const opts = f.modelOpts || {};
+    const mp = rp(p.megapixels_by_resolution);
+    const fps = _num(opts.frames_per_second ?? opts.fps ?? p.default_frames_per_second) || 24;
+    // LTX generates the terminal frame as well as duration × FPS frames.
+    const frames = Math.round(dur * fps) + 1;
+    const premium = opts.mode === "hdr" || videoLoraOn(f) || [1, 2, 3].some(i => String(opts[`lora_url_${i}`] || "").trim());
+    const rate = _num(premium ? p.hdr_or_lora_per_megapixel : p.per_megapixel);
+    if (mp != null && rate != null) return rate * Math.ceil(frames * mp);
+    return null;
+  }
   if ((v = rp(p.per_second_by_resolution)) != null) return v * billDur;
   if ((v = rp(p.standard_prices_per_second)) != null) return v * billDur;
   if (p.per_second_by_mode) {
@@ -401,27 +435,37 @@ function nodeUnitUsd(node, catItem, graph) {
       ? graph.links.filter((l) => l.to && l.to.node === node.id && REF_PORT_RE.test(l.to.port)).length
       : 0;
     const audioCtx = { params: (sp.parameters && typeof sp.parameters === "object") ? sp.parameters : {}, defaults: sp.defaults || {} };
-    let vf = f;
-    if (node.type === "lipsync") {   // 🎬 avatar bills the wired audio's length (see avatarAudioEstSeconds)
+    const sourceLink = (graph?.links || []).find(l => l.to?.node === node.id && l.to.port === "video");
+    const source = sourceLink && (graph.nodes || []).find(n => n.id === sourceLink.from.node);
+    let quoteFields = inputVideoPriceFields(pricing, f, source, null);
+    if (node.type === "lipsync") {
       const secs = lipsyncAudioSeconds(node, graph);
-      if (secs != null) vf = { ...f, duration: avatarClampSecs(id, secs, pricing) };
+      if (secs != null) quoteFields = { ...quoteFields, duration: avatarClampSecs(id, secs, pricing) };
     }
-    const u = videoUnitUsd(pricing, vf, refCount, audioCtx);
+    let u = videoUnitUsd(pricing, quoteFields, refCount, audioCtx);
+    // OpenJutsu's primary character/object image is the image port, not a refN.
+    // Count only inputs that this runner forwards, not arbitrary stale ref wires.
+    if (u != null && pricing?.unit === "per_verified_source_second_plus_image") {
+      const imageCount = (graph?.links || []).filter(l => l.to?.node === node.id && l.to.port === "image").length;
+      u += imageCount * (_num(pricing.per_image) || 0);
+    }
     return (u != null && isFinite(u)) ? u : null;
   }
   if (kind === "model3d") return model3dVariantPrice(m, f) ?? _num(pricing && pricing.per_run);
-  if (node.type === "decide") {
+  if (node.type === "decide" || node.type === "decide-branch") {
     // input tokens only (twin of the editor's Decide estimate); pick asks twice (in order + reversed)
     const imgs = (graph && Array.isArray(graph.links))
       ? graph.links.filter((l) => l.to && l.to.node === node.id && /^img\d+$/.test(l.to.port)).length : 0;
     const inTok = 120 + Math.round(((f.question || "").length + (f.options || "").length + (f.levels || "").length) / 4) + 250 + imgs * 400;
     const u = chatUnitUsd(pricing, inTok, 0);
-    const pick = !(f.mode === "choose" || f.mode === "score" || f.mode === "yesno");
+    const pick = !(node.type === "decide-branch" || f.branch === true || f.mode === "choose" || f.mode === "score" || f.mode === "yesno");
     return u == null ? null : u * (pick ? 2 : 1);
   }
   if (kind === "chat") {
     const inTok = Math.max(200, Math.round(((f.system || "").length + (f.prompt || "").length) / 4) + 200);
-    const outTok = f.maxTokens ? +f.maxTokens : EST.llmOutTokens;
+    // An explicit maxTokens cap prices the output at the cap (D1 ruling);
+    // absent, the default estimate applies — twin of nanoodle-py estimate.py.
+    const outTok = f.maxTokens && Number.isFinite(+f.maxTokens) ? Math.trunc(+f.maxTokens) : EST.llmOutTokens;
     return chatUnitUsd(pricing, inTok, outTok);
   }
   if (kind === "audio") {
@@ -446,7 +490,7 @@ function nodeUnitUsd(node, catItem, graph) {
  * Forecast a graph's per-run cost from the public catalog.
  *
  * @param {{nodes:Array, links?:Array}} graph  a materialized graph (Workflow#graph)
- * @param {{chat?:Array, image?:Array, video?:Array, audio?:Array, model3d?:Array}} catalogs
+ * @param {{chat?:Array, decision?:Array, image?:Array, video?:Array, audio?:Array, model3d?:Array}} catalogs
  *        raw catalog arrays (as /api/v1/*-models return them, `.data`), indexed here by model id
  * @returns {{usd:number, exact:boolean, priced:number, unpriced:number}}
  *          usd = sum over priced billable nodes; exact = every priced node was image
@@ -455,7 +499,7 @@ function nodeUnitUsd(node, catItem, graph) {
 export function estimateGraphCost(graph, catalogs = {}) {
   const nodes = (graph && Array.isArray(graph.nodes)) ? graph.nodes : [];
   const byKind = {};
-  for (const kind of ["chat", "image", "video", "audio", "model3d"]) {
+  for (const kind of ["chat", "decision", "image", "video", "audio", "model3d"]) {
     const arr = Array.isArray(catalogs[kind]) ? catalogs[kind] : [];
     const map = new Map();
     for (const m of arr) if (m && m.id != null) map.set(String(m.id), m);

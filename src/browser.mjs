@@ -32,6 +32,7 @@ export { NODE_TYPES, displayName, materialize, topoSort, wiredFramesFloor, MAX_F
 export { RUNNERS, IMG_INPUT_ROLES } from "./nodes.mjs"; // per-node executors — the play delegation shim drives these directly
 export { catItem, chatModelCan } from "./catalog.mjs";
 export { deriveInputs, deriveOutputs, deriveSettings, INPUT_SPECS, SETTING_SPECS } from "./io.mjs";
+export { planBranches } from "./branches.mjs";
 export { decodeShareUrl, decodeShareFragment, isShareRef } from "./share.mjs";
 export { resizePlan, maskToSource, resizeCropImage, encodeWavMono } from "./local-media.mjs";
 export { parseNanoInvoice } from "./x402.mjs";
