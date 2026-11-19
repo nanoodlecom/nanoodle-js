@@ -71,5 +71,5 @@ Display name resolution (play.html `displayName`): `node.name` (trimmed, if set)
 
 ## Canonical fixture
 /home/ntc/dev/nanoodlecom/nanoodle/noodle-graph.json — starter graph: text("a cozy ramen shop on a rainy night")
-→ llm(model "zai-org/glm-5.2", system prompt-writer) → image(model "nano-banana-2-lite", size "1k", variations "1").
+→ llm(model "zai-org/glm-5.2", system prompt-writer) → image(model "nano-banana-2-fast", size "1k", variations "1").
 Wire n1.text→n2.prompt, n2.text→n3.prompt.

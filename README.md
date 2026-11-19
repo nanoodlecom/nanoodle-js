@@ -115,7 +115,7 @@ unrecoverable.
 ```js
 wf.inputs    // [{ key: "Text", nodeId: "n1", field: "text", kind: "textarea", optional: false, def: "..." }]
 wf.outputs   // [{ key: "Image", nodeId: "n3", type: "image", ports: [{ name: "image", type: "image" }] }]
-wf.settings  // [{ key: "n3.model", kind: "model", def: "nano-banana-2-lite" }, ...]
+wf.settings  // [{ key: "n3.model", kind: "model", def: "nano-banana-2-fast" }, ...]
 ```
 
 Input keys are flexible (case-insensitive): the node’s custom name (`"Text"`),

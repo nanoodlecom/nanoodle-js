@@ -1,6 +1,6 @@
 {
   "name": "j-starter",
-  "url": "http://localhost:41593/index.html#j=eyJ2IjoxLCJub2RlcyI6W3siaWQiOiJuMSIsInR5cGUiOiJ0ZXh0IiwieCI6NjAsInkiOjEzMCwiZmllbGRzIjp7InRleHQiOiJhIGNvenkgcmFtZW4gc2hvcCBvbiBhIHJhaW55IG5pZ2h0In0sInciOjIyMH0seyJpZCI6Im4yIiwidHlwZSI6ImxsbSIsIngiOjM0MCwieSI6NzAsImZpZWxkcyI6eyJtb2RlbCI6InphaS1vcmcvZ2xtLTUuMiIsInN5c3RlbSI6IllvdSB3cml0ZSBpbWFnZSBwcm9tcHRzLiBUdXJuIHRoZSBpZGVhIGludG8gb25lIHZpdmlkLCBkZXRhaWxlZCBpbWFnZSBwcm9tcHQg4oCUIHNjZW5lLCBsaWdodGluZywgbW9vZCwgc3R5bGUuIFJlcGx5IHdpdGggdGhlIHByb21wdCBvbmx5LiJ9LCJ3IjoyNTAsInNpemVzIjp7InN5c3RlbSI6MTIwfX0seyJpZCI6Im4zIiwidHlwZSI6ImltYWdlIiwieCI6NjUwLCJ5IjoxMDAsImZpZWxkcyI6eyJtb2RlbCI6Im5hbm8tYmFuYW5hLTItbGl0ZSIsInNpemUiOiIxayIsInZhcmlhdGlvbnMiOiIxIn0sInciOjI1MH1dLCJsaW5rcyI6W3siaWQiOiJsMSIsImZyb20iOnsibm9kZSI6Im4xIiwicG9ydCI6InRleHQifSwidG8iOnsibm9kZSI6Im4yIiwicG9ydCI6InByb21wdCJ9fSx7ImlkIjoibDIiLCJmcm9tIjp7Im5vZGUiOiJuMiIsInBvcnQiOiJ0ZXh0In0sInRvIjp7Im5vZGUiOiJuMyIsInBvcnQiOiJwcm9tcHQifX1dLCJuaWQiOjUsImxpZCI6NCwidmlldyI6eyJwYW5YIjo0MCwicGFuWSI6NjAsInNjYWxlIjoxfX0",
+  "url": "http://localhost:37091/index.html#j=eyJ2IjoxLCJub2RlcyI6W3siaWQiOiJuMSIsInR5cGUiOiJ0ZXh0IiwieCI6NjAsInkiOjEzMCwiZmllbGRzIjp7InRleHQiOiJhIGNvenkgcmFtZW4gc2hvcCBvbiBhIHJhaW55IG5pZ2h0In0sInciOjIyMH0seyJpZCI6Im4yIiwidHlwZSI6ImxsbSIsIngiOjM0MCwieSI6NzAsImZpZWxkcyI6eyJtb2RlbCI6InphaS1vcmcvZ2xtLTUuMiIsInN5c3RlbSI6IllvdSB3cml0ZSBpbWFnZSBwcm9tcHRzLiBUdXJuIHRoZSBpZGVhIGludG8gb25lIHZpdmlkLCBkZXRhaWxlZCBpbWFnZSBwcm9tcHQg4oCUIHNjZW5lLCBsaWdodGluZywgbW9vZCwgc3R5bGUuIFJlcGx5IHdpdGggdGhlIHByb21wdCBvbmx5LiJ9LCJ3IjoyNTAsInNpemVzIjp7InN5c3RlbSI6MTIwfX0seyJpZCI6Im4zIiwidHlwZSI6ImltYWdlIiwieCI6NjUwLCJ5IjoxMDAsImZpZWxkcyI6eyJtb2RlbCI6Im5hbm8tYmFuYW5hLTItZmFzdCIsInNpemUiOiIxayIsInZhcmlhdGlvbnMiOiIxIn0sInciOjI1MH1dLCJsaW5rcyI6W3siaWQiOiJsMSIsImZyb20iOnsibm9kZSI6Im4xIiwicG9ydCI6InRleHQifSwidG8iOnsibm9kZSI6Im4yIiwicG9ydCI6InByb21wdCJ9fSx7ImlkIjoibDIiLCJmcm9tIjp7Im5vZGUiOiJuMiIsInBvcnQiOiJ0ZXh0In0sInRvIjp7Im5vZGUiOiJuMyIsInBvcnQiOiJwcm9tcHQifX1dLCJuaWQiOjUsImxpZCI6NCwidmlldyI6eyJwYW5YIjo0MCwicGFuWSI6NjAsInNjYWxlIjoxfX0",
   "graph": {
     "v": 1,
     "nodes": [
@@ -34,7 +34,7 @@
         "x": 650,
         "y": 100,
         "fields": {
-          "model": "nano-banana-2-lite",
+          "model": "nano-banana-2-fast",
           "size": "1k",
           "variations": "1"
         },
