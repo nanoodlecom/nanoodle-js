@@ -61,6 +61,11 @@ test("looksLikeResult: replayed API bodies yes, settle receipts no", () => {
   assert.ok(looksLikeResult({ data: [{ b64_json: "x" }] }));
   assert.ok(!looksLikeResult({ status: "completed", paymentId: "pay_x" }));
   assert.ok(!looksLikeResult(null));
+  // A paid decision replays as { answers, usage } — that IS the result.
+  // Missing it makes the client resend and the API answer 402 (payment
+  // already consumed). Answers without usage is not a completed decision.
+  assert.ok(looksLikeResult({ answers: { answer: { type: "noul", noul: 0.9 } }, usage: { input_tokens: 12, output_tokens: 0, cost: 0.000002 } }));
+  assert.ok(!looksLikeResult({ answers: { answer: { type: "noul", noul: 0.9 } } }));
 });
 
 test("x402 chat: 402 → payment callback → complete replays the result (no re-POST)", async () => {
