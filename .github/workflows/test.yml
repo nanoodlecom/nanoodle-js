@@ -18,9 +18,51 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      # Soft runtime dep for local media (resize/vframes/combine/… fallback path).
-      # Pure-JS paths run without it; installing here exercises the full suite.
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Restore the pinned FFmpeg archive
+        id: ffmpeg-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        timeout-minutes: 2
+        continue-on-error: true
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: 1
+        with:
+          path: ${{ runner.temp }}/nanoodle-ffmpeg.tar.xz
+          key: ffmpeg-7.0.2-linux-amd64-abda8d77ce8309141f83ab8edf0596834087c52467f6badf376a6a2a4c87cf67
+      # Use the same pinned build as Nanoodle MCP to exercise local media paths.
+      - name: Install FFmpeg and ffprobe for tests
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/nanoodle-ffmpeg.tar.xz"
+          build=ffmpeg-7.0.2-amd64-static
+          url="https://johnvansickle.com/ffmpeg/releases/$build.tar.xz"
+          verify_archive() {
+            printf '%s  %s\n' abda8d77ce8309141f83ab8edf0596834087c52467f6badf376a6a2a4c87cf67 "$archive" | sha256sum --check --status
+          }
+          if [[ ! -f $archive ]] || ! verify_archive; then
+            for attempt in 1 2; do
+              if curl --fail --silent --show-error --location --connect-timeout 10 --max-time 45 \
+                --header 'Cache-Control: no-cache' --output "$archive" "$url" && verify_archive; then
+                break
+              fi
+            done
+          fi
+          if ! verify_archive; then
+            echo 'Unable to verify the pinned FFmpeg archive' >&2
+            exit 1
+          fi
+          tar -xJf "$archive" -C "$RUNNER_TEMP" "$build/ffmpeg" "$build/ffprobe"
+          printf '%s\n' "$RUNNER_TEMP/$build" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/$build/ffmpeg" -hide_banner -version
+          "$RUNNER_TEMP/$build/ffprobe" -hide_banner -version
+      - name: Cache the verified FFmpeg archive
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        timeout-minutes: 2
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/nanoodle-ffmpeg.tar.xz
+          key: ffmpeg-7.0.2-linux-amd64-abda8d77ce8309141f83ab8edf0596834087c52467f6badf376a6a2a4c87cf67
       # offline unit tests only — zero npm deps; the mock harness provides every
       # endpoint. NEVER add live NanoGPT calls here.
       - run: npm test
