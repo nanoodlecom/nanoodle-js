@@ -2,7 +2,7 @@
 export class NanoodleError extends Error {
   /**
    * @param {string} message
-   * @param {object} [props] extra fields (e.g. { code: "auth" | "funds" | "http", status })
+   * @param {object} [props] extra fields (e.g. { code: "auth" | "blocked" | "funds" | "http", status })
    */
   constructor(message, props = {}) {
     super(message);

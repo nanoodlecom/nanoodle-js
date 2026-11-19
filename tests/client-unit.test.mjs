@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { costFromJson, costFromHeaders, costWithHeaders, httpError, sleep } from "../src/client.mjs";
+import { costFromJson, costFromHeaders, costWithHeaders, httpError, NanoClient, sleep } from "../src/client.mjs";
 
 /** Minimal Response-like shim carrying only headers. */
 const res = (headers = {}) => ({ headers: { get: (k) => (k.toLowerCase() in headers ? headers[k.toLowerCase()] : null) } });
@@ -56,12 +56,33 @@ test("costWithHeaders: x-remaining-balance header is canonical — wins over any
   assert.equal(costWithHeaders({ remainingBalance: 9 }, res({})).balance, 9);
 });
 
-test("httpError: 401 and 403 map to key-rejected auth errors", () => {
+test("httpError: ordinary 401 and 403 map to key-rejected auth errors", () => {
   for (const status of [401, 403]) {
     const e = httpError(status, "whatever");
     assert.equal(e.code, "auth");
     assert.match(e.message, new RegExp(`API key rejected \\(HTTP ${status}\\)`));
   }
+});
+
+test("httpError: a Vercel 403 challenge page is reported separately", () => {
+  const page = "<!DOCTYPE html><html><head><title>Vercel Security Checkpoint</title></head></html>";
+  const error = httpError(403, page);
+  assert.equal(error.code, "blocked");
+  assert.equal(error.status, 403);
+  assert.equal(httpError(403, "<html><title>Forbidden</title></html>").code, "auth");
+  assert.equal(httpError(403, '{"reason":"Vercel Security Checkpoint"}').code, "auth");
+});
+
+test("NanoClient: image POST keeps the challenge header and reports a blocked request", async () => {
+  const client = new NanoClient({
+    apiKey: "test-key",
+    fetch: async () => new Response("", { status: 403, headers: { "x-vercel-mitigated": "challenge" } }),
+  });
+  await assert.rejects(client.image({ prompt: "test", model: "test-model" }), {
+    code: "blocked",
+    status: 403,
+    message: /automated traffic protection/,
+  });
 });
 
 test("httpError: 401/403 stay auth even when the body says 'insufficient' (auth owns those statuses)", () => {

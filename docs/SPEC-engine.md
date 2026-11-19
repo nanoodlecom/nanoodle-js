@@ -104,7 +104,8 @@ Balance: header x-remaining-balance (wins) → j.remainingBalance → x_nanogpt_
 Present-but-zero = known-included (subscription), keep 0. Absent → cost unknown (mark total inexact).
 
 ## HTTP errors (922-935)
-- 401/403 → auth error ("API key rejected").
+- A 403 with the Vercel challenge header or the Vercel Security Checkpoint page → `blocked` error.
+- Other 401/403 responses → auth error ("API key rejected").
 - 402 OR body matching /insufficient|balance|funds|not enough|payment required/i → out-of-funds error.
 - else → error "<status>: <body first 160 chars>".
 No streaming retries needed (engine is non-streaming). Poll GET failures: silently continue the loop until timeout.
