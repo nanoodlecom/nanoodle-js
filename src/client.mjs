@@ -316,8 +316,12 @@ export class NanoClient {
     return j;
   }
 
-  /** POST /v1/images/generations (NOTE: not /api/v1). Returns data: / https URL(s). */
-  async image({ prompt, model, size, imageDataUrl, maskDataUrl, extra, n = 1, multi = false }, { onCost, signal } = {}) {
+  /** POST /v1/images/generations (NOTE: not /api/v1). Returns data: / https URL(s).
+   * With multi + items, returns { urls, layers } instead: layers is the per-item
+   * `layer` metadata aligned by index with urls (layer-decomposition models return
+   * { z_index, name, description, bounding_box } per item), or null when no item
+   * carries any. Items with neither b64_json nor url drop out of both arrays. */
+  async image({ prompt, model, size, imageDataUrl, maskDataUrl, extra, n = 1, multi = false, items = false }, { onCost, signal } = {}) {
     const body = { model, size: size || "1024x1024", n, response_format: "b64_json" };
     if (prompt) body.prompt = prompt; // omit when blank — upscalers run with no instruction
     if (imageDataUrl) body.imageDataUrl = imageDataUrl; // string OR array (edit multi-reference)
@@ -326,12 +330,21 @@ export class NanoClient {
     const r = await this._postJson("/v1/images/generations", body, signal);
     if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
     const j = await r.json();
-    const urls = (j.data || [])
-      .map((d) => (d.b64_json ? "data:" + b64ImageMime(d.b64_json) + ";base64," + d.b64_json : d.url))
+    const pairs = (j.data || [])
+      .map((d) => {
+        const url = d.b64_json ? "data:" + b64ImageMime(d.b64_json) + ";base64," + d.b64_json : d.url;
+        return url ? { url, layer: d.layer != null ? d.layer : null } : null;
+      })
       .filter(Boolean);
+    const urls = pairs.map((p) => p.url);
     if (!urls.length) throw new NanoodleError("no image in response");
     if (onCost) onCost(costWithHeaders(j, r));
-    return multi ? urls : urls[0];
+    if (!multi) return urls[0];
+    if (items) {
+      const layers = pairs.map((p) => p.layer);
+      return { urls, layers: layers.some((l) => l != null) ? layers : null };
+    }
+    return urls;
   }
 
   /** POST /api/generate-video then poll GET /api/video/status?requestId= until COMPLETED. */
