@@ -86,14 +86,20 @@ function guardInputRoles(model, inp) {
 }
 
 /**
- * edit/inpaint have a single image output, but some models always bill (and return) a fixed
- * batch — midjourney/text-to-image and higgsfield-soul declare fixed_image_count: 4. Ask with
- * multi so we can SEE the extras and say we dropped them; the return shape stays one url.
+ * edit/inpaint surface EVERY image a model returns. `image` stays the first — the
+ * long-standing single-output contract, unchanged for existing graphs — `images`
+ * carries them all in response order (mirroring the image node's variations
+ * output), and when response items carry layer metadata (layer-decomposition
+ * models), `layers` carries it aligned by index with `images`. Fixed-batch
+ * models (midjourney fixed_image_count: 4) surface their variants the same way;
+ * nothing a model returns is dropped silently anymore.
  */
-function keptFirst(urls, ctx) {
-  if (!Array.isArray(urls)) return urls; // host-injected ctx.image that ignores multi → already one url
-  if (urls.length > 1 && ctx && ctx.progress) ctx.progress(`model returned ${urls.length} images, kept the first`);
-  return urls[0];
+function multiOut(res) {
+  if (typeof res === "string") return { image: res, images: [res] }; // a host-injected ctx.image that ignores multi/items → already one url
+  const urls = Array.isArray(res) ? res : res.urls; // …or one that honors multi but not `items` → bare urls
+  const out = { image: urls[0], images: urls };
+  if (!Array.isArray(res) && res.layers) out.layers = res.layers;
+  return out;
 }
 
 function promptOf(n, inp, errMsg) {
@@ -693,8 +699,7 @@ export const RUNNERS = {
     imgs = await Promise.all(imgs.map((u) => fitImage(u, ctx, "source image")));
     guardRefsSize(imgs);
     const src = imgs.length > 1 ? imgs : imgs[0]; // array → multi-image composite; string → single edit
-    const urls = await ctx.image({ prompt, model: mdl(n), size: n.fields.size || "1024x1024", imageDataUrl: src, extra: imgExtra(n), multi: true });
-    return { image: keptFirst(urls, ctx) };
+    return multiOut(await ctx.image({ prompt, model: mdl(n), size: n.fields.size || "1024x1024", imageDataUrl: src, extra: imgExtra(n), multi: true, items: true }));
   },
 
   async inpaint(n, inp, ctx) {
@@ -707,8 +712,7 @@ export const RUNNERS = {
     // ctx.maskToSource lets a browser host inject its canvas compositor (handles JPEG/WebP
     // sources the pure-PNG path can't, where ffmpeg isn't an option).
     const mask = await (ctx.maskToSource || maskToSource)(rawMask, source, mediaOpts(ctx));
-    const urls = await ctx.image({ prompt, model: mdl(n), size: n.fields.size || "1024x1024", imageDataUrl: source, maskDataUrl: mask, extra: imgExtra(n), multi: true });
-    return { image: keptFirst(urls, ctx) };
+    return multiOut(await ctx.image({ prompt, model: mdl(n), size: n.fields.size || "1024x1024", imageDataUrl: source, maskDataUrl: mask, extra: imgExtra(n), multi: true, items: true }));
   },
 
   async tvideo(n, inp, ctx) {

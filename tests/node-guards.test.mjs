@@ -266,7 +266,7 @@ test("edit role model (vto): refuses any unwired slot before spending, passes wi
     ["data:image/png;base64,AAA1", "data:image/png;base64,AAA2"], "person first, garment second");
 });
 
-test("edit/inpaint: a model that returns more images than asked says it kept the first", async (t) => {
+test("edit/inpaint: a model that returns more images than asked surfaces them all", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());
   const four = { json: { data: Array.from({ length: 4 }, () => ({ b64_json: PNG_B64 })), cost: 0.08 } };
@@ -283,16 +283,17 @@ test("edit/inpaint: a model that returns more images than asked says it kept the
   const result = await wf.run({}, { onProgress: (e) => { if (e.type === "node-progress") notes.push(e.message); } });
 
   assert.equal(srv.requests[0].json.n, 1, "still asks for one");
-  assert.ok(notes.some((m) => /model returned 4 images, kept the first/.test(m)));
-  assert.equal(result.get("Edit").url, PNG_DATA_URL); // output shape unchanged: one image
+  assert.ok(!notes.some((m) => /kept the first/.test(m)), "nothing is kept-first anymore — no drop to disclose");
+  assert.equal(result.get("Edit").url, PNG_DATA_URL); // image stays the first — the standing contract
+  assert.equal(result.nodes.e1.out.images.length, 4); // …and every returned image surfaces
+  assert.ok(!("layers" in result.nodes.e1.out)); // no layer metadata in a variant batch
 
-  // same warning from the inpaint runner (1×1 white opaque PNG = repaint-everywhere mask)
+  // same surfacing from the inpaint runner (1×1 white opaque PNG = repaint-everywhere mask)
   const WHITE_PNG =
     "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==";
-  const inNotes = [];
-  await Workflow.fromJSON({
+  const inResult = await Workflow.fromJSON({
     nodes: [{ id: "p1", type: "inpaint", fields: { model: "higgsfield-soul", image: PNG_DATA_URL, mask: WHITE_PNG } }],
     links: [],
-  }, mockOpts(srv)).run({ "What to paint in": "a hat" }, { onProgress: (e) => { if (e.type === "node-progress") inNotes.push(e.message); } });
-  assert.ok(inNotes.some((m) => /model returned 4 images, kept the first/.test(m)));
+  }, mockOpts(srv)).run({ "What to paint in": "a hat" });
+  assert.equal(inResult.nodes.p1.out.images.length, 4);
 });
