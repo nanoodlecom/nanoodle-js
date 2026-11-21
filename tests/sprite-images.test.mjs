@@ -95,3 +95,43 @@ test("AVIF handles opaque and translucent 4:4:4 and 4:2:0 images at odd dimensio
     }
   }
 });
+
+test("AVIF rotates and mirrors the primary image after any top-left clean aperture", async () => {
+  const original = await decodeSpriteBytes(await fixture("odd-444.avif"));
+  // This is the same coded 37x41 image, with clap, irot and imir on the
+  // primary item. Chromium verified the visual order and both crop cases.
+  const raw = await fixture("presentation.avif");
+  const rotation = raw.indexOf("irot") + 4, mirror = raw.indexOf("imir") + 4, crop = raw.indexOf("clap") + 4;
+  for (const topLeft of [true, false]) {
+    // The second crop remains valid, but is centered away from the origin.
+    raw.writeInt32BE(topLeft ? -11 : 0, crop + 16);
+    raw.writeInt32BE(topLeft ? -12 : 0, crop + 24);
+    const w = topLeft ? 15 : original.width, h = topLeft ? 17 : original.height;
+    for (let angle = 0; angle < 4; angle++) {
+      for (let axis = 0; axis < 2; axis++) {
+        raw[rotation] = angle;
+        raw[mirror] = axis;
+        const { width, height, data } = await decodeSpriteBytes(raw);
+        assert.deepEqual([width, height], angle % 2 ? [h, w] : [w, h]);
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            let [dx, dy] = [[x, y], [y, w - 1 - x], [w - 1 - x, h - 1 - y], [h - 1 - y, x]][angle];
+            if (axis === 0) dy = height - dy - 1;
+            else dx = width - dx - 1;
+            const dst = (dy * width + dx) * 4, src = (y * original.width + x) * 4;
+            assert.deepEqual(data.subarray(dst, dst + 4), original.data.subarray(src, src + 4));
+          }
+        }
+      }
+    }
+  }
+});
+
+test("AVIF rejects a nonessential display property as the editor does", async () => {
+  const raw = await fixture("presentation.avif");
+  const ipma = raw.indexOf("ipma") + 4;
+  const firstEntryCount = raw[ipma + 10];
+  // The last associated property for this primary image is imir.
+  raw[ipma + 10 + firstEntryCount] &= 0x7f;
+  await assert.rejects(decodeSpriteBytes(raw), /display properties must be marked essential/);
+});

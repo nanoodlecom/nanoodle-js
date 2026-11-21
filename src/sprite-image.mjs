@@ -24,6 +24,11 @@ function isAvifImage(bytes) {
   return false;
 }
 
+function checkDimensions(width, height) {
+  if (height > MAX_IMAGE_DIM || width > (height <= 128 ? 16384 : MAX_IMAGE_DIM))
+    throw new Error("dimensions exceed the sprite image limit");
+}
+
 // Node loads the maintained decoder only for formats that need it. Its native
 // binaries are installed with the npm package. The editor uses native bitmaps.
 async function decodeRaster(bytes, format) {
@@ -32,13 +37,12 @@ async function decodeRaster(bytes, format) {
     const limitInputPixels = format === "JPEG" ? 16_777_216 : MAX_IMAGE_DIM ** 2;
     const image = sharp(bytes, { pages: 1, failOn: "error", limitInputPixels });
     const meta = await image.metadata();
-    if (meta.height > MAX_IMAGE_DIM || meta.width > (meta.height <= 128 ? 16384 : MAX_IMAGE_DIM))
-      throw new Error("dimensions exceed the sprite image limit");
+    checkDimensions(meta.width, meta.height);
     // libavif interpolates 4:2:0 chroma the way the editor does. Metadata is
     // bounded above before the WebAssembly decoder allocates its pixel buffer.
     if (format === "AVIF") {
       const { decodeAvif } = await import("./sprite-avif.mjs");
-      return await decodeAvif(bytes);
+      return await decodeAvif(bytes, checkDimensions);
     }
     // JPEG respects EXIF orientation. The editor displays WebP in stored orientation.
     if (format === "JPEG") image.autoOrient();
