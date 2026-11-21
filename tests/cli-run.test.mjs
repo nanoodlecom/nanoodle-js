@@ -10,7 +10,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +36,26 @@ function runCli(args, { env = {}, cwd } = {}) {
     p.on("close", (status) => resolve({ status, stdout, stderr }));
   });
 }
+
+test("CLI runs a saved walking character graph with --input model=@file.glb", async t => {
+  const cwd = await mkdtemp(join(tmpdir(), "nanoodle-cli-model-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  await writeFile(join(cwd, "walk.json"), JSON.stringify({
+    nodes: [
+      { id: "m", type: "mupload", fields: {} },
+      { id: "s", type: "slice-3d", fields: { clip: "Walk", frames: 2, slices: 8, resolution: 16 } },
+    ],
+    links: [{ from: { node: "m", port: "model" }, to: { node: "s", port: "model" } }],
+  }));
+  const model = join(here, "fixtures", "fox", "Fox.glb");
+  const r = await runCli(["run", "walk.json", "--input", "m.model=@" + model, "--json"], { cwd });
+  assert.equal(r.status, 0, r.stderr);
+  const {outputs, errors} = JSON.parse(r.stdout);
+  assert.deepEqual(errors, []);
+  const sheet = await readFile(join(cwd, outputs["Slice 3D"]));
+  const { readStackApng } = await import("../src/sprite-sequence.mjs");
+  assert.equal(readStackApng(sheet).length, 2);
+});
 
 function scriptStarterRoutes(srv) {
   srv.script("POST /api/v1/chat/completions", chatJson("a vivid ramen-shop prompt"));

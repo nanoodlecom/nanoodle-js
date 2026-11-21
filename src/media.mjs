@@ -48,7 +48,7 @@ const EXT_MIME = {
   ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg", ".opus": "audio/ogg",
   ".aac": "audio/aac", ".flac": "audio/flac", ".m4a": "audio/mp4",
   ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime", ".mkv": "video/x-matroska",
-  ".glb": "model/gltf-binary", ".ply": "model/ply",
+  ".glb": "model/gltf-binary", ".gltf": "model/gltf+json", ".ply": "model/ply",
   ".txt": "text/plain", ".json": "application/json",
 };
 
@@ -57,7 +57,7 @@ const MIME_EXT = {
   "audio/mpeg": "mp3", "audio/wav": "wav", "audio/ogg": "ogg", "audio/aac": "aac",
   "audio/flac": "flac", "audio/mp4": "m4a",
   "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov",
-  "model/gltf-binary": "glb", "model/ply": "ply", "application/ply": "ply", "application/x-ply": "ply",
+  "model/gltf-binary": "glb", "model/gltf+json": "gltf", "model/ply": "ply", "application/ply": "ply", "application/x-ply": "ply",
   "text/plain": "txt", "application/json": "json",
 };
 

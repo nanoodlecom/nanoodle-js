@@ -93,6 +93,8 @@ test("CLI inspect: media defaults summarized (never a base64 dump), required med
     nodes: [
       { id: "n1", type: "upload", name: "Prefilled", fields: { image: png } },
       { id: "n2", type: "aupload", name: "Narration", fields: { audio: "[audio goes here]" } },
+      { id: "m", type: "mupload", name: "Character", fields: {} },
+      { id: "g", type: "mupload", name: "Globe", fields: { model: "data:model/gltf-binary;base64,Zm9v" } },
     ],
     links: [],
   }));
@@ -108,5 +110,8 @@ test("CLI inspect: media defaults summarized (never a base64 dump), required med
   assert.ok(!r.stdout.includes(PNG_B64), "inspect must not dump base64 media");
   assert.match(r.stdout, /"Prefilled".*prefilled: inline image\/png \(\d+ KB\)/);
   assert.match(r.stdout, /"Narration".*required.*supply: --input "Narration=@file"/);
+  assert.match(r.stdout, /"Character".*required.*supply: --input "Character=@file"/);
+  assert.match(r.stdout, /"Globe".*prefilled: inline model\/gltf-binary/);
+  assert.ok(!r.stdout.includes("Zm9v"));
   assert.match(r.stdout, /warning: node n2 .*fields\.audio held "\[audio goes here\]"/);
 });

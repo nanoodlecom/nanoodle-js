@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MediaRef, mediaFromFile, Workflow } from "../src/index.mjs";
-import { coerceMediaInput, bytesToDataUrl, sniffMime, MEDIA_INLINE_MAX } from "../src/media.mjs";
+import { coerceMediaInput, bytesToDataUrl, extForMime, sniffMime, MEDIA_INLINE_MAX } from "../src/media.mjs";
 import { startMockServer, mockOpts, PNG_B64, PNG_DATA_URL } from "./harness/mock-server.mjs";
 
 const PNG_BYTES = new Uint8Array(Buffer.from(PNG_B64, "base64"));
@@ -31,6 +31,25 @@ test("MediaRef: https URL fetches lazily with the injected fetch and picks up mi
   assert.equal(ref.mime, null); // unknown until fetched
   assert.deepEqual([...(await ref.bytes())], [...PNG_BYTES]);
   assert.equal(ref.mime, "image/png");
+});
+
+test("3D uploads accept SDK file records, raw GLB bytes and MediaRefs", async t => {
+  const wf = Workflow.fromJSON({nodes: [{id: "m", type: "mupload", fields: {}}], links: []});
+  const dir = await mkdtemp(join(tmpdir(), "nanoodle-model-"));
+  t.after(() => rm(dir, {recursive: true, force: true}));
+  const file = join(dir, "empty.gltf");
+  const json = JSON.stringify({asset: {version: "2.0"}, scenes: [{nodes: []}]});
+  await writeFile(file, json);
+  const uploaded = (await wf.run({"m.model": await mediaFromFile(file)})).get("m");
+  assert.equal(uploaded.mime, "model/gltf+json");
+  assert.equal(extForMime(uploaded.mime), "gltf");
+  assert.equal(new TextDecoder().decode(await uploaded.bytes()), json);
+
+  const glb = await readFile(new URL("./fixtures/fox/Fox.glb", import.meta.url));
+  const binary = (await wf.run(glb)).get("m");
+  assert.equal(binary.mime, "model/gltf-binary");
+  assert.deepEqual(Buffer.from(await binary.bytes()), glb);
+  assert.equal((await wf.run(binary)).get("m").url, binary.url);
 });
 
 test("mediaFromFile: extension mime + bytes; feeds an image input end-to-end", async (t) => {

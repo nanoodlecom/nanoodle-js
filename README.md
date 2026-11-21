@@ -77,6 +77,7 @@ Then run (calls NanoGPT and spends from your balance):
 export NANOGPT_API_KEY=...   # or --key K, or --env-file .env
 npx nanoodle run noodle-graph.json --input Text="a cozy ramen shop on a rainy night"
 npx nanoodle run graph.json --input n2.system=@style.txt --set n3.size=1k --out ./renders
+npx nanoodle run walk.json --input m.model=@character.glb --out ./sprites
 ```
 
 Media outputs are saved under `--out` (default `./noodle-out`, created only

@@ -17,6 +17,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, extname } from "node:path";
 import process from "node:process";
+import { MEDIA_INPUT_KINDS } from "../src/io.mjs";
 import { Workflow, RunError, mediaFromFile } from "../src/index.mjs";
 import { MediaRef, extForMime, sniffMime } from "../src/media.mjs";
 
@@ -180,7 +181,6 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
     const pad = (s, n) => String(s).padEnd(n);
     // Media defaults are data: URLs (megabytes of base64) — summarize instead of dumping,
     // and tell the caller HOW to supply an unfilled media input, right in the listing.
-    const MEDIA_INPUT_KINDS = new Set(["image", "audio", "video"]);
     const fmtSize = (chars) => chars >= 1024 * 1024
       ? (chars / 1024 / 1024).toFixed(1) + " MB" : Math.max(1, Math.round(chars / 1024)) + " KB";
     const describeDefault = (i) => {

@@ -14,6 +14,8 @@ function uniqueKey(base, used, reserved = new Set()) {
 
 /* ============================== INPUTS ============================== */
 
+export const MEDIA_INPUT_KINDS = new Set(["image", "audio", "video", "model3d", "inpaint"]);
+
 /** Which node types contribute user inputs, and with what fields (mirrors play.html INPUT_SPECS). */
 export const INPUT_SPECS = {
   text:    [{ f: "text",   label: "Text",  kind: "textarea" }],

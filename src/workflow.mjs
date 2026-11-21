@@ -1,7 +1,7 @@
 import { NanoodleError, RunError, UnsupportedNodeError } from "./errors.mjs";
 import { NODE_TYPES, displayName, isInputPort, lockedNode, materialize, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
 import { endpointOutPort } from "./endpoint.mjs";
-import { deriveInputs, deriveOutputs, deriveSettings, resolveInputKey, resolveSettingKey } from "./io.mjs";
+import { MEDIA_INPUT_KINDS, deriveInputs, deriveOutputs, deriveSettings, resolveInputKey, resolveSettingKey } from "./io.mjs";
 import { NanoClient } from "./client.mjs";
 import { MediaRef, coerceMediaInput } from "./media.mjs";
 import { RUNNERS } from "./nodes.mjs";
@@ -28,7 +28,6 @@ function warnGraph(msg) {
   if (typeof console !== "undefined" && console.warn) console.warn("[nanoodle]", msg);
 }
 
-const MEDIA_KINDS = new Set(["image", "audio", "video", "inpaint"]);
 /** Ports whose value is media a later node will fetch or inline. */
 const HANDED_MEDIA_PORT = /^(?:video|audio|image|mask|endframe|model)$|^(?:img|image|vid|clip|ref|frame)\d+$/;
 const MEDIA_OUT_TYPES = new Set(["image", "audio", "video", "model3d"]);
@@ -640,13 +639,12 @@ export class Workflow {
   }
 
   _coerceInput(entry, value, mediaOpts) {
-    if (MEDIA_KINDS.has(entry.kind)) {
-      // Plain image inputs skip the load-time inline cap: every image-sending node
-      // downscales an oversized image to the send budget (fitImage), so a big photo
-      // is a shrink, not a refusal. Audio/video (and inpaint, whose mask must keep
-      // the source's dimensions) can't be shrunk that way — keep their early,
-      // before-any-spend guard.
-      const opts = entry.kind === "image" ? { ...mediaOpts, enforceInlineMax: false } : mediaOpts;
+    if (MEDIA_INPUT_KINDS.has(entry.kind)) {
+      // Images may shrink before sending. A model can stay local in Slice 3D
+      // even when another branch uses NanoGPT. The client caps actual POST bodies.
+      if (entry.kind === "model3d" && (value == null || value === "")) return value;
+      const localOrResizable = entry.kind === "model3d" || entry.kind === "image";
+      const opts = localOrResizable ? { ...mediaOpts, enforceInlineMax: false } : mediaOpts;
       return coerceMediaInput(value, `input "${entry.key}"`, opts);
     }
     if (entry.kind === "choice") {
