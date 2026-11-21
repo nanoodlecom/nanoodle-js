@@ -298,7 +298,8 @@ function muxAvc(samples, width, height, seconds, sps, pps) {
   const avc1 = box("avc1", new Uint8Array(6), u16(1), new Uint8Array(16),
     u16(width), u16(height), u32(0x00480000), u32(0x00480000), u32(0),
     u16(1), new Uint8Array(32), u16(24), u16(0xffff), avcC);
-  const timescale = 90000;
+  // Long source animations must also fit the version-0 mdhd duration field.
+  const timescale = Math.min(90000, Math.floor(0xffffffff / seconds));
   const total = Math.round(seconds * timescale);
   const buffers = samples.map(s => s.bytes);
   const entries = samples.map((s, i) => ({

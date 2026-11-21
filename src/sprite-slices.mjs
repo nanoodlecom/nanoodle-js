@@ -1,11 +1,12 @@
-// Grid coordinates are (column, row, layer). Each square tile has the same
-// world-to-pixel scale in both directions; layer thickness is recorded separately.
-function gridFor(model, axis, size, layers) {
-  const axes = { x: [1, 2, 0, -1], y: [0, 2, 1, 1], z: [0, 1, 2, -1] }[axis];
-  if (!axes) throw new Error("Up axis must be auto, x, y or z.");
-  const [u, v, h, sign] = axes,
-    min = [Infinity, Infinity, Infinity],
-    max = min.map(() => -Infinity);
+export const CHARACTER_SLICE_DEFAULTS = { resolution: 128, slices: 80, palette: 0, outline: true };
+
+// A clip uses one world-space grid across its poses so feet, scale and root
+// motion stay aligned. Only the bounds need to be retained between poses.
+export function expandModelBounds(model, bounds = {
+  min: [Infinity, Infinity, Infinity],
+  max: [-Infinity, -Infinity, -Infinity],
+}) {
+  const { min, max } = bounds;
   function grow(x, y, z) {
     min[0] = Math.min(min[0], x);
     min[1] = Math.min(min[1], y);
@@ -24,6 +25,15 @@ function gridFor(model, axis, size, layers) {
     grow(x - a, y - b, z - c);
     grow(x + a, y + b, z + c);
   }
+  return bounds;
+}
+
+// Grid coordinates are (column, row, layer). Each square tile has the same
+// world-to-pixel scale in both directions; layer thickness is recorded separately.
+function gridFor({ min, max }, axis, size, layers) {
+  const axes = { x: [1, 2, 0, -1], y: [0, 2, 1, 1], z: [0, 1, 2, -1] }[axis];
+  if (!axes) throw new Error("Up axis must be auto, x, y or z.");
+  const [u, v, h, sign] = axes;
   const span = Math.max(...min.map((n, i) => max[i] - n));
   if (!(span > 0) || !Number.isFinite(span)) throw new Error("Model bounds have no usable extent.");
   const unit = span / (size - 2),
@@ -279,9 +289,9 @@ function paletteOf(data, limit) {
   );
 }
 
-export function slicePixels(model, { size, layers, axis, palette, outline }, supplied) {
+export function slicePixels(model, { size, layers, axis, palette, outline }, supplied, bounds = expandModelBounds(model)) {
   if (axis === "auto") axis = model.kind === "splat" ? "z" : "y";
-  const grid = gridFor(model, axis, size, layers),
+  const grid = gridFor(bounds, axis, size, layers),
     width = size * layers,
     rgba = new Uint8ClampedArray(width * size * 4);
   const index = (x, y, l) => (y * width + l * size + x) * 4;

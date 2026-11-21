@@ -24,6 +24,16 @@ test("H.264 turntable skips stationary blocks and keeps exact fractional frame t
   await assert.rejects(encodeSpriteMp4([flat, flatFrame(16, 16, [0, 0, 0, 0])], 1), /inconsistent/);
 });
 
+test("long pose delays fit the MP4 media duration", async () => {
+  const frame = flatFrame(16, 16, [96, 32, 8, 255]);
+  const duration = 2 * 65535;
+  const mp4 = await encodeSpriteMp4([frame, frame], duration);
+  const [track] = MP4CAT.parseMp4(mp4).tracks;
+  const ticks = track.samples.reduce((sum, sample) => sum + sample.dur, 0);
+  assert.ok(ticks <= 0xffffffff);
+  assert.equal(ticks / track.timescale, duration);
+});
+
 test("independent AVC decoder reconstructs P_Skip, PCM, directional prediction and cropped edges", async (t) => {
   // FFmpeg is only the independent test oracle. Encoding always uses our own codec.
   if (process.permission && !process.permission.has("child")) return t.skip("external decoder disabled");

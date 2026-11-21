@@ -6,7 +6,10 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Workflow } from "../src/index.mjs";
+import { readFile } from "node:fs/promises";
+import { Workflow, dataUrlBytes } from "../src/index.mjs";
+import { MP4CAT } from "../src/mp4cat.mjs";
+import { readStackApng } from "../src/sprite-sequence.mjs";
 import { startMockServer, mockOpts, PNG_DATA_URL } from "./harness/mock-server.mjs";
 
 const RIG = {
@@ -109,4 +112,45 @@ test("generation model: a model wire is ignored, never sent as model_url", async
   const body = srv.of("POST /api/generate-video")[0].json;
   assert.equal(body.model_url, undefined);
   assert.ok(body.imageDataUrl, "image still sent for the generation model");
+});
+
+test("Idol Max rig output flows through the model and sheet wires into a fixed-view walk", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  const id = "speridlabs/idol/max";
+  const riggedUrl = srv.url + "/out/rigged_character.glb";
+  srv.script("POST /api/generate-video", { json: { runId: "idol-rig" } });
+  // NanoGPT's normalized 3D poll returns the selected asset on model_url.
+  srv.script("GET /api/video/status", { json: { data: {
+    status: "COMPLETED", output: { kind: "3d", format: "glb", model_url: riggedUrl },
+  } } });
+  const rigged = await readFile(new URL("./fixtures/fox/Fox.glb", import.meta.url));
+  srv.script("GET /out/rigged_character.glb", { headers: { "content-type": "model/gltf-binary" }, body: rigged });
+  const nodes = [
+    { id: "photo", type: "upload", fields: { image: PNG_DATA_URL } },
+    { id: "idol", type: "model3d", fields: { model: id, modelOpts: { rig: true } } },
+    { id: "slice", type: "slice-3d", fields: { clip: "Walk", frames: 4, slices: 12, resolution: 24 } },
+    { id: "render", type: "sprite-stack-render", fields: { yaw: 35 } },
+  ];
+  const links = [
+    { id: "l1", from: { node: "photo", port: "image" }, to: { node: "idol", port: "image" } },
+    { id: "l2", from: { node: "idol", port: "model" }, to: { node: "slice", port: "model" } },
+    { id: "l3", from: { node: "slice", port: "sheet" }, to: { node: "render", port: "sheet" } },
+  ];
+  const catalog = { model3d: [{ id, architecture: { input_modalities: ["image"] } }] };
+  const result = await one(srv, nodes, links, { catalog }).run({});
+  const calls = srv.of("POST /api/generate-video");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].json.rig, true);
+  assert.equal(calls[0].json.model, id);
+  assert.equal(calls[0].json.imageDataUrl, PNG_DATA_URL);
+  assert.equal(result.nodes.idol.out.model, riggedUrl);
+  assert.equal(srv.of("GET /out/rigged_character.glb").length, 1);
+  const slice = result.nodes.slice.out;
+  assert.equal(JSON.parse(slice.layout).animation.clip, "Walk");
+  const sheet = readStackApng(dataUrlBytes(slice.sheet).bytes);
+  assert.equal(sheet.length, 4);
+  assert.notDeepEqual(sheet.png(0), sheet.png(2));
+  const track = MP4CAT.parseMp4(dataUrlBytes(result.nodes.render.out.video).bytes).tracks[0];
+  assert.equal(track.samples.length, 4);
 });

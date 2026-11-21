@@ -278,9 +278,19 @@ decisions, joins, retries, and an existing gate.
 | NanoGPT | llm (incl. vision + audio input), image, edit, inpaint*, vision, decide†, tvideo, ivideo, model3d‡, vedit, lipsync, music, remix, tts, transcribe, cleanvoice§ |
 | custom URL | endpoint (POST to a URL in the graph; no NanoGPT key) |
 
-`slice-3d` takes a `model` wire and an optional `paletteImage`. It reads static GLB or self-contained glTF 2 triangle meshes and uncompressed Gaussian PLY splats (ASCII or binary little-endian). Use the original Gaussian PLY for splats. Auto up is Y for meshes and Z for splats. The default is 48 layers of 48 × 48 pixels, 16 colors and an outline. Set `palette` to 0 to preserve source colors.
+`slice-3d` takes a `model` wire and an optional `paletteImage`. Connect a GLB from Idol Max Turbo’s default `model` output directly, including a rigged character. The slicer reads triangle meshes from GLB or self-contained glTF 2, and uncompressed Gaussian PLY splats (ASCII or binary little-endian). Auto up is Y for meshes and Z for splats.
 
-The `sheet` output is a transparent PNG with square tiles ordered from ground at left to top at right. The `layout` text output gives the bounds, axis and sampling dimensions. The `image` output previews the stack at 35° yaw. Wire `sheet` into `sprite-stack-render.sheet` to change yaw, pitch, layer spacing or pixel scale. Enable `turntable` to add a local `video` output with configurable duration, fps, start yaw and end yaw. The editor draws with Canvas 2D. Node.js runs the same graph headlessly. Texture, palette and sheet inputs accept PNG, APNG, JPEG, GIF, WebP, AVIF, BMP, ICO and CUR. Animated inputs use their first displayed frame. A normal npm install supplies the image decoders. Both runtimes encode H.264 MP4 turntables in-process.
+| Slice setting | Effect |
+| --- | --- |
+| `frames: 1` (default) | Slice the model in its rest pose. Set `clip` to an exact name to slice the first pose of that clip. |
+| `frames: 2` through `64` | Sample one complete animation cycle. Set `clip` to an exact name such as `"Walk"`, or leave it blank to use the first clip. The final sample falls just before the clip ends so the loop has no duplicate endpoint. |
+| `preset: "character"` | Use 80 layers of 128 × 128 pixels with source colors and an outline. Explicit `resolution`, `slices`, `palette` and `outline` fields override the preset. The general defaults are 48 layers at 48 × 48 pixels, 16 colors and an outline. |
+
+Wire `slice-3d.sheet` directly to `sprite-stack-render.sheet`. A single pose produces a transparent PNG atlas with square tiles ordered from ground at left to top at right. Multiple poses produce one animated PNG with a full atlas per pose. All poses use the same world-space bounds and ground height. The `layout` text includes the bounds, up axis, tile dimensions and, for animated sheets, the clip name, frame count, duration and sample times in seconds. The `image` output previews the first pose at 35° yaw.
+
+Sprite stack render controls yaw, pitch, layer spacing and scale. An animated sheet produces a fixed-yaw H.264 MP4 of the clip automatically. With `turntable` enabled, `duration`, `fps`, `yawStart` and `yawEnd` control the rotation while the poses loop at their recorded rate. A single-pose sheet also supports the turntable. Raising the pitch shows more of a flat object’s top surface. A higher resolution preserves more narrow details at oblique angles.
+
+Texture, palette and sheet inputs accept PNG, APNG, JPEG, GIF, WebP, AVIF, BMP, ICO and CUR. General animated images supply their first displayed frame. A normal npm install supplies the image decoders, and the browser and Node.js encode sprite videos in-process. [Open the prewired Slice 3D example](https://nanoodle.com/guide/examples/slice-3d).
 
 † `decide` asks a NanoGPT decision model one typed question (`POST /api/v1/decisions`): pick the best of the wired `img1…` images, choose a label, score on a scale, or yes/no. Text-only decisions need nothing extra; wired images are shrunk to the model's limits with ffmpeg. A yes/no gate that answers no is not a failure: that node settles as `gated`, everything downstream is `skipped` unbilled, and the run succeeds (see [Gates](#gates-decide-said-no)).
 

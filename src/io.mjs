@@ -1,6 +1,7 @@
 import { NanoodleError } from "./errors.mjs";
 import { NODE_TYPES, displayName, lockedNode, optionalNode, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
 import { endpointOutPort } from "./endpoint.mjs";
+import { CHARACTER_SLICE_DEFAULTS } from "./sprite-slices.mjs";
 
 // Allocate the final key, not just a count of the unsuffixed name: an authored
 // "Out 2" can otherwise collide with the suffix generated for a second "Out".
@@ -285,6 +286,9 @@ export const SETTING_SPECS = {
   ],
   // local media knobs (play.html SETTING_SPECS) — shape-affecting fields for vframes/combine
   "slice-3d": [
+    { f: "preset", label: "Preset", kind: "select", options: ["default", "character"], def: "default" },
+    { f: "clip", label: "Animation clip", kind: "text", def: "" },
+    { f: "frames", label: "Pose frames", kind: "number", min: 1, max: 64, def: "1" },
     { f: "slices", label: "Slices", kind: "number", min: 8, max: 128, def: "48" },
     { f: "resolution", label: "Tile resolution", kind: "number", min: 16, max: 128, def: "48" },
     { f: "palette", label: "Palette colors", kind: "number", min: 0, max: 64, def: "16" },
@@ -338,16 +342,18 @@ export function deriveSettings(graph) {
     if (n.unknown) continue;
     const specs = SETTING_SPECS[n.type];
     if (!specs) continue;
+    const preset = n.type === "slice-3d" && n.fields.preset === "character" ? CHARACTER_SLICE_DEFAULTS : {};
     for (const s of specs) {
       if (graph.links.some((l) => l.to.node === n.id && l.to.port === s.f)) continue; // wired knob is decided upstream
       const cur = n.fields[s.f];
+      const fallback = s.kind === "number" && preset[s.f] != null ? String(preset[s.f]) : preset[s.f] ?? s.def;
       // vframes frames is shape-affecting — never offer a floor below the highest wired frameK
       const min = (n.type === "vframes" && s.f === "frames")
         ? Math.max(s.min || 1, wiredFramesFloor(graph, n.id))
         : s.min;
       out.push({
         key: `${n.id}.${s.f}`, nodeId: n.id, field: s.f, kind: s.kind, label: s.label,
-        def: cur != null && String(cur) !== "" ? cur : s.def,
+        def: cur != null && String(cur) !== "" ? cur : fallback,
         ...(s.options ? { options: [...s.options] } : {}),
         ...(min != null ? { min } : {}),
         ...(s.max != null ? { max: s.max } : {}),
