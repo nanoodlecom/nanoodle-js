@@ -1,0 +1,188 @@
+import { MediaRef, bytesToDataUrl } from "./media.mjs";
+import { gaussianModel, triangleModel } from "./sprite-model.mjs";
+import { slicePixels } from "./sprite-slices.mjs";
+
+function number(fields, key, fallback, min, max, integer = false) {
+  const value = fields[key] == null || fields[key] === "" ? fallback : Number(fields[key]);
+  if (!Number.isFinite(value) || value < min || value > max || (integer && !Number.isInteger(value)))
+    throw new Error(
+      key + " must be " + (integer ? "an integer " : "") + "between " + min + " and " + max + ".",
+    );
+  return value;
+}
+function flag(value, fallback) {
+  return value == null ? fallback : value === true || value === "true";
+}
+function canvas(width, height) {
+  if (typeof document === "undefined") throw new Error("Sprite stacking requires a browser with Canvas 2D.");
+  const el = document.createElement("canvas");
+  el.width = width;
+  el.height = height;
+  return el;
+}
+async function bitmap(blob) {
+  if (typeof createImageBitmap === "function") return createImageBitmap(blob);
+  const url = URL.createObjectURL(blob),
+    img = new Image();
+  try {
+    img.src = url;
+    await img.decode();
+    return img;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+async function imagePixels(blob) {
+  const img = await bitmap(blob);
+  try {
+    const ctx = canvas(img.width, img.height).getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0);
+    return ctx.getImageData(0, 0, img.width, img.height);
+  } finally {
+    img.close?.();
+  }
+}
+async function readMedia(value, ctx) {
+  const media = new MediaRef(String(value), { fetch: ctx?.fetch });
+  const bytes = await media.bytes({ signal: ctx?.signal });
+  return new Blob([bytes], { type: media.mime || "application/octet-stream" });
+}
+function png(el) {
+  const result = el.toDataURL("image/png");
+  if (!result.startsWith("data:image/png")) throw new Error("The atlas exceeds this browser’s canvas limit.");
+  return result;
+}
+
+function stackView(sheet, fields) {
+  const tile = sheet.height,
+    layers = sheet.width / tile;
+  if (!Number.isInteger(layers) || layers < 8 || layers > 128 || tile < 16 || tile > 128)
+    throw new Error("Expected a horizontal Slice 3D sheet with 8–128 square tiles of 16–128 pixels.");
+  const pitch = (number(fields, "pitch", 30, 0, 90) * Math.PI) / 180,
+    scale = number(fields, "scale", 3, 1, 8);
+  const spacing = (number(fields, "spacing", 1, 0, 4) * (tile - 2)) / layers;
+  const rise = spacing * Math.cos(pitch),
+    squash = Math.max(1 / tile, Math.sin(pitch));
+  // Fixed even bounds for every yaw, including both turntable endpoints.
+  const floor = tile * Math.SQRT2;
+  const w = 2 * Math.ceil((floor * scale + 4) / 2),
+    h = 2 * Math.ceil(((floor * squash + rise * (layers - 1)) * scale + 4) / 2);
+  const el = canvas(w, h),
+    ctx = el.getContext("2d");
+  function draw(yaw) {
+    ctx.resetTransform();
+    ctx.clearRect(0, 0, w, h);
+    ctx.imageSmoothingEnabled = false;
+    const a = (yaw * Math.PI) / 180,
+      c = Math.cos(a) * scale,
+      s = Math.sin(a) * scale;
+    for (let l = 0; l < layers; l++) {
+      ctx.setTransform(c, s * squash, -s, c * squash, w / 2, h / 2 + ((layers - 1) / 2 - l) * rise * scale);
+      ctx.drawImage(sheet, l * tile, 0, tile, tile, -tile / 2, -tile / 2, tile, tile);
+    }
+    ctx.resetTransform();
+  }
+  return { el, draw };
+}
+
+// Match the editor's MP4-first canvas export, falling back to WebM where available.
+async function recordTurntable(view, fields, signal) {
+  if (typeof MediaRecorder === "undefined" || !view.el.captureStream)
+    throw new Error("Turntable export requires MediaRecorder and canvas.captureStream.");
+  const mime = [
+    "video/mp4;codecs=avc1.42E01E",
+    "video/mp4",
+    "video/webm;codecs=vp9",
+    "video/webm;codecs=vp8",
+    "video/webm",
+  ].find((m) => MediaRecorder.isTypeSupported(m));
+  if (!mime) throw new Error("No supported MP4 or WebM recorder in this browser.");
+  const fps = number(fields, "fps", 24, 1, 60, true),
+    duration = number(fields, "duration", 3, 0.25, 30);
+  const from = number(fields, "yawStart", 0, -3600, 3600),
+    to = number(fields, "yawEnd", 360, -3600, 3600);
+  view.draw(from);
+  const frames = Math.max(2, Math.round(duration * fps));
+  let stream = view.el.captureStream(0);
+  if (typeof stream.getVideoTracks()[0]?.requestFrame !== "function") {
+    stream.getTracks().forEach((track) => track.stop());
+    stream = view.el.captureStream(fps);
+  }
+  const [track] = stream.getVideoTracks();
+  let rec;
+  try {
+    rec = new MediaRecorder(stream, { mimeType: mime });
+    const chunks = [];
+    const stopped = new Promise((resolve, reject) => {
+      rec.ondataavailable = (e) => {
+        if (e.data.size) chunks.push(e.data);
+      };
+      rec.onerror = (e) => reject(e.error || new Error("Turntable recording failed."));
+      rec.onstop = resolve;
+    });
+    const start = performance.now();
+    async function animate() {
+      rec.start();
+      for (let frame = 0; frame < frames; frame++) {
+        signal?.throwIfAborted();
+        view.draw(from + ((to - from) * frame) / (frames - 1));
+        track.requestFrame?.();
+        const deadline = start + ((frame + 1) * duration * 1000) / frames;
+        await new Promise((resolve) => setTimeout(resolve, Math.max(0, deadline - performance.now())));
+        if (rec.state === "inactive") break;
+      }
+      if (rec.state !== "inactive") rec.stop();
+    }
+    await Promise.all([animate(), stopped]);
+    signal?.throwIfAborted();
+    const blob = new Blob(chunks, { type: rec.mimeType.split(";")[0] });
+    if (!blob.size) throw new Error("The browser produced an empty turntable recording.");
+    return bytesToDataUrl(new Uint8Array(await blob.arrayBuffer()), blob.type);
+  } finally {
+    if (rec && rec.state !== "inactive") rec.stop();
+    stream.getTracks().forEach((t) => t.stop());
+  }
+}
+
+export async function slice3d(node, inp, ctx) {
+  if (!inp.model) throw new Error("Wire a 3D model into Slice 3D.");
+  const fields = node.fields || {},
+    size = number(fields, "resolution", 48, 16, 128, true),
+    layers = number(fields, "slices", 48, 8, 128, true);
+  const el = canvas(size * layers, size);
+  const modelBlob = await readMedia(inp.model, ctx),
+    bytes = new Uint8Array(await modelBlob.arrayBuffer());
+  const model =
+    bytes[0] === 112 && bytes[1] === 108 && bytes[2] === 121
+      ? gaussianModel(bytes)
+      : await triangleModel(bytes, imagePixels);
+  const palette = number(fields, "palette", 16, 0, 64, true);
+  const supplied =
+    palette && inp.paletteImage ? await imagePixels(await readMedia(inp.paletteImage, ctx)) : null;
+  ctx?.signal?.throwIfAborted();
+  const sliced = slicePixels(
+    model,
+    { size, layers, axis: fields.upAxis || "auto", outline: flag(fields.outline, true), palette },
+    supplied,
+  );
+  el.getContext("2d").putImageData(new ImageData(sliced.rgba, sliced.width, sliced.height), 0, 0);
+  const view = stackView(el, {});
+  view.draw(35);
+  return { sheet: png(el), layout: JSON.stringify(sliced.layout), image: png(view.el) };
+}
+
+export async function renderSpriteStack(node, inp, ctx) {
+  if (!inp.sheet) throw new Error("Wire the Slice 3D sheet into Sprite stack render.");
+  if (typeof document === "undefined") throw new Error("Sprite stacking requires a browser with Canvas 2D.");
+  const fields = node.fields || {},
+    sheet = await bitmap(await readMedia(inp.sheet, ctx));
+  try {
+    const view = stackView(sheet, fields);
+    view.draw(number(fields, "yaw", 35, -3600, 3600));
+    const image = png(view.el);
+    if (!flag(fields.turntable, false)) return { image };
+    return { image, video: await recordTurntable(view, fields, ctx?.signal) };
+  } finally {
+    sheet.close?.();
+  }
+}

@@ -40,6 +40,8 @@ export const NODE_TYPES = {
   upload:  { title: "Image input",     inputs: [], outputs: [{ name: "image", type: "image" }], local: true },
   aupload: { title: "Audio input",     inputs: [], outputs: [{ name: "audio", type: "audio" }], local: true },
   vupload: { title: "Video input",     inputs: [], outputs: [{ name: "video", type: "video" }], local: true },
+  "slice-3d": { title: "Slice 3D", inputs: ["model", "paletteImage"], outputs: [{ name: "sheet", type: "image" }, { name: "layout", type: "text" }, { name: "image", type: "image" }], local: true },
+  "sprite-stack-render": { title: "Sprite stack render", inputs: ["sheet"], outputs: [{ name: "image", type: "image" }, { name: "video", type: "video" }], local: true },
   mupload: { title: "3D input",        inputs: [], outputs: [{ name: "model", type: "model3d" }], local: true },
   choice:  { title: "Choice",          inputs: [], outputs: [{ name: "text", type: "text" }], local: true },
   join:    { title: "Join",            inputs: ["a", "b"], outputs: [{ name: "text", type: "text" }], local: true },

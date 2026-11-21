@@ -1,3 +1,4 @@
+import { slice3d, renderSpriteStack } from "./sprite-stack.mjs";
 import { imageModelOpts } from "./image-options.mjs";
 import { NanoodleError } from "./errors.mjs";
 import { catItem, chatModelCan, pricingAdvertisesRefs } from "./catalog.mjs";
@@ -502,6 +503,8 @@ function guardRefsSize(imgs) {
  * ctx = { chat, image, video, audio, transcribe, progress } (cost/poll wired by the engine).
  */
 export const RUNNERS = {
+  "slice-3d": slice3d,
+  "sprite-stack-render": renderSpriteStack,
   async text(n) { return { text: n.fields.text || "" }; },
 
   async upload(n) {

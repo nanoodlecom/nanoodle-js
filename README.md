@@ -272,10 +272,15 @@ decisions, joins, retries, and an existing gate.
 
 | runs | node types |
 |---|---|
-| local | text, upload (image/audio/video), mupload (3D .glb), choice, join, comment |
+| local | text, upload (image/audio/video), mupload (3D asset), choice, join, comment |
+| browser canvas | slice-3d, sprite-stack-render |
 | local media† | resize, vframes, combine, soundtrack, trim, extractaudio |
 | NanoGPT | llm (incl. vision + audio input), image, edit, inpaint*, vision, decide†, tvideo, ivideo, model3d‡, vedit, lipsync, music, remix, tts, transcribe, cleanvoice§ |
 | custom URL | endpoint (POST to a URL in the graph; no NanoGPT key) |
+
+`slice-3d` takes a `model` wire and an optional `paletteImage`. It reads static GLB or self-contained glTF 2 triangle meshes and uncompressed Gaussian PLY splats (ASCII or binary little-endian). Use the original Gaussian PLY for splats. Auto up is Y for meshes and Z for splats. The default is 48 layers of 48 × 48 pixels, 16 colors and an outline. Set `palette` to 0 to preserve source colors.
+
+The `sheet` output is a transparent PNG with square tiles ordered from ground at left to top at right. The `layout` text output gives the bounds, axis and sampling dimensions. The `image` output previews the stack at 35° yaw. Wire `sheet` into `sprite-stack-render.sheet` to change yaw, pitch, layer spacing or pixel scale. Enable `turntable` to add a local `video` output with configurable duration, fps, start yaw and end yaw. These nodes run through `nanoodle/browser` with Canvas 2D. Turntable export uses the browser’s MP4 or WebM recorder.
 
 † `decide` asks a NanoGPT decision model one typed question (`POST /api/v1/decisions`): pick the best of the wired `img1…` images, choose a label, score on a scale, or yes/no. Text-only decisions need nothing extra; wired images are shrunk to the model's limits with ffmpeg. A yes/no gate that answers no is not a failure: that node settles as `gated`, everything downstream is `skipped` unbilled, and the run succeeds (see [Gates](#gates-decide-said-no)).
 

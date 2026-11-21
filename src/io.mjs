@@ -284,6 +284,24 @@ export const SETTING_SPECS = {
     { f: "seed", label: "Seed", kind: "number" },
   ],
   // local media knobs (play.html SETTING_SPECS) — shape-affecting fields for vframes/combine
+  "slice-3d": [
+    { f: "slices", label: "Slices", kind: "number", min: 8, max: 128, def: "48" },
+    { f: "resolution", label: "Tile resolution", kind: "number", min: 16, max: 128, def: "48" },
+    { f: "palette", label: "Palette colors", kind: "number", min: 0, max: 64, def: "16" },
+    { f: "outline", label: "Outline", kind: "boolean", def: true },
+    { f: "upAxis", label: "Up axis", kind: "select", options: ["auto", "x", "y", "z"], def: "auto" },
+  ],
+  "sprite-stack-render": [
+    { f: "yaw", label: "Yaw (degrees)", kind: "number", def: "35" },
+    { f: "pitch", label: "Pitch (degrees)", kind: "number", min: 0, max: 90, def: "30" },
+    { f: "spacing", label: "Layer spacing", kind: "number", min: 0, max: 4, def: "1" },
+    { f: "scale", label: "Pixel scale", kind: "number", min: 1, max: 8, def: "3" },
+    { f: "turntable", label: "Record turntable", kind: "boolean", def: false },
+    { f: "duration", label: "Duration (s)", kind: "number", min: 0.25, max: 30, def: "3" },
+    { f: "fps", label: "Frames per second", kind: "number", min: 1, max: 60, def: "24" },
+    { f: "yawStart", label: "Start yaw", kind: "number", def: "0" },
+    { f: "yawEnd", label: "End yaw", kind: "number", def: "360" },
+  ],
   resize: [
     { f: "mode", label: "Mode", kind: "select", options: ["fit", "fill", "exact"], def: "fit" },
     { f: "width", label: "Width", kind: "number" },
