@@ -1,6 +1,8 @@
-import { number, viewPlan, softwareFrame, flag, turntablePlan } from "./sprite-projection.mjs";
-import { decodeSpriteImage, frameUrl, encodeTurntable } from "./sprite-cpu.mjs";
+import { number, viewPlan, softwareView, flag, turntablePlan } from "./sprite-projection.mjs";
+import { encodePngRgba } from "./local-media.mjs";
+import { encodeSpriteMp4 } from "./sprite-video.mjs";
 import { MediaRef, bytesToDataUrl } from "./media.mjs";
+import { decodeSpriteBytes } from "./sprite-image.mjs";
 import { gaussianModel, triangleModel } from "./sprite-model.mjs";
 import { slicePixels } from "./sprite-slices.mjs";
 
@@ -35,8 +37,7 @@ async function imagePixels(blob) {
 }
 async function readMedia(value, ctx) {
   const media = new MediaRef(String(value), { fetch: ctx?.fetch });
-  const bytes = await media.bytes({ signal: ctx?.signal });
-  return new Blob([bytes], { type: media.mime || "application/octet-stream" });
+  return media.bytes({ signal: ctx?.signal });
 }
 function png(el) {
   const result = el.toDataURL("image/png");
@@ -47,7 +48,7 @@ function png(el) {
 function stackView(sheet, fields) {
   const { tile, layers, scale, rise, squash, w, h } = viewPlan(sheet, fields);
   const el = canvas(w, h),
-    ctx = el.getContext("2d");
+    ctx = el.getContext("2d", { willReadFrequently: flag(fields.turntable, false) });
   function draw(yaw) {
     ctx.resetTransform();
     ctx.clearRect(0, 0, w, h);
@@ -61,62 +62,28 @@ function stackView(sheet, fields) {
     }
     ctx.resetTransform();
   }
-  return { el, draw };
+  return { el, ctx, draw };
 }
 
-// Match the editor's MP4-first canvas export, falling back to WebM where available.
-async function recordTurntable(view, fields, signal) {
-  if (typeof MediaRecorder === "undefined" || !view.el.captureStream)
-    throw new Error("Turntable export requires MediaRecorder and canvas.captureStream.");
-  const mime = [
-    "video/mp4;codecs=avc1.42E01E",
-    "video/mp4",
-    "video/webm;codecs=vp9",
-    "video/webm;codecs=vp8",
-    "video/webm",
-  ].find((m) => MediaRecorder.isTypeSupported(m));
-  if (!mime) throw new Error("No supported MP4 or WebM recorder in this browser.");
-  const { fps, duration, from, to, count: frames } = turntablePlan(fields);
-  view.draw(from);
-  let stream = view.el.captureStream(0);
-  if (typeof stream.getVideoTracks()[0]?.requestFrame !== "function") {
-    stream.getTracks().forEach((track) => track.stop());
-    stream = view.el.captureStream(fps);
-  }
-  const [track] = stream.getVideoTracks();
-  let rec;
-  try {
-    rec = new MediaRecorder(stream, { mimeType: mime });
-    const chunks = [];
-    const stopped = new Promise((resolve, reject) => {
-      rec.ondataavailable = (e) => {
-        if (e.data.size) chunks.push(e.data);
-      };
-      rec.onerror = (e) => reject(e.error || new Error("Turntable recording failed."));
-      rec.onstop = resolve;
-    });
-    const start = performance.now();
-    async function animate() {
-      rec.start();
-      for (let frame = 0; frame < frames; frame++) {
-        signal?.throwIfAborted();
-        view.draw(from + ((to - from) * frame) / (frames - 1));
-        track.requestFrame?.();
-        const deadline = start + ((frame + 1) * duration * 1000) / frames;
-        await new Promise((resolve) => setTimeout(resolve, Math.max(0, deadline - performance.now())));
-        if (rec.state === "inactive") break;
+async function frameUrl(frame) {
+  return bytesToDataUrl(await encodePngRgba(frame.width, frame.height, frame.data), "image/png");
+}
+
+async function encodeTurntable(draw, fields, signal) {
+  const { duration, from, to, count } = turntablePlan(fields);
+  async function* frames() {
+    let lastYield = performance.now();
+    for (let i = 0; i < count; i++) {
+      // Give the editor and Node event loop time to deliver cancellation between frames.
+      if (performance.now() - lastYield >= 16) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        lastYield = performance.now();
       }
-      if (rec.state !== "inactive") rec.stop();
+      signal?.throwIfAborted();
+      yield draw(from + ((to - from) * i) / (count - 1));
     }
-    await Promise.all([animate(), stopped]);
-    signal?.throwIfAborted();
-    const blob = new Blob(chunks, { type: rec.mimeType.split(";")[0] });
-    if (!blob.size) throw new Error("The browser produced an empty turntable recording.");
-    return bytesToDataUrl(new Uint8Array(await blob.arrayBuffer()), blob.type);
-  } finally {
-    if (rec && rec.state !== "inactive") rec.stop();
-    stream.getTracks().forEach((t) => t.stop());
   }
+  return bytesToDataUrl(await encodeSpriteMp4(frames(), duration), "video/mp4");
 }
 
 export async function slice3d(node, inp, ctx) {
@@ -124,14 +91,13 @@ export async function slice3d(node, inp, ctx) {
   const fields = node.fields || {},
     size = number(fields, "resolution", 48, 16, 128, true),
     layers = number(fields, "slices", 48, 8, 128, true);
-  const pixels =
-    typeof document === "undefined" ? (blob) => decodeSpriteImage(blob, ctx?.signal) : imagePixels;
-  const modelBlob = await readMedia(inp.model, ctx),
-    bytes = new Uint8Array(await modelBlob.arrayBuffer());
+  const headless = typeof document === "undefined";
+  const pixels = headless ? decodeSpriteBytes : (raw, mime) => imagePixels(new Blob([raw], { type: mime }));
+  const bytes = await readMedia(inp.model, ctx);
   const model =
     bytes[0] === 112 && bytes[1] === 108 && bytes[2] === 121
       ? gaussianModel(bytes)
-      : await triangleModel(bytes, (raw, mime) => pixels(new Blob([raw], { type: mime })));
+      : await triangleModel(bytes, pixels);
   const palette = number(fields, "palette", 16, 0, 64, true);
   const supplied = palette && inp.paletteImage ? await pixels(await readMedia(inp.paletteImage, ctx)) : null;
   ctx?.signal?.throwIfAborted();
@@ -140,12 +106,12 @@ export async function slice3d(node, inp, ctx) {
     { size, layers, axis: fields.upAxis || "auto", outline: flag(fields.outline, true), palette },
     supplied,
   );
-  if (typeof document === "undefined") {
+  if (headless) {
     const sheet = { width: sliced.width, height: sliced.height, data: sliced.rgba };
     return {
       sheet: await frameUrl(sheet),
       layout: JSON.stringify(sliced.layout),
-      image: await frameUrl(softwareFrame(sheet, {}, 35)),
+      image: await frameUrl(softwareView(sheet, {})(35)),
     };
   }
   const el = canvas(size * layers, size);
@@ -158,21 +124,26 @@ export async function slice3d(node, inp, ctx) {
 export async function renderSpriteStack(node, inp, ctx) {
   if (!inp.sheet) throw new Error("Wire the Slice 3D sheet into Sprite stack render.");
   const fields = node.fields || {},
-    blob = await readMedia(inp.sheet, ctx);
+    bytes = await readMedia(inp.sheet, ctx);
   const yaw = number(fields, "yaw", 35, -3600, 3600);
   if (typeof document === "undefined") {
-    const sheet = await decodeSpriteImage(blob, ctx?.signal);
-    const image = await frameUrl(softwareFrame(sheet, fields, yaw));
+    const sheet = await decodeSpriteBytes(bytes);
+    const draw = softwareView(sheet, fields);
+    const image = await frameUrl(draw(yaw));
     if (!flag(fields.turntable, false)) return { image };
-    return { image, video: await encodeTurntable(sheet, fields, ctx?.signal) };
+    return { image, video: await encodeTurntable(draw, fields, ctx?.signal) };
   }
-  const sheet = await bitmap(blob);
+  const sheet = await bitmap(new Blob([bytes]));
   try {
     const view = stackView(sheet, fields);
     view.draw(yaw);
     const image = png(view.el);
     if (!flag(fields.turntable, false)) return { image };
-    return { image, video: await recordTurntable(view, fields, ctx?.signal) };
+    const draw = (angle) => {
+      view.draw(angle);
+      return view.ctx.getImageData(0, 0, view.el.width, view.el.height);
+    };
+    return { image, video: await encodeTurntable(draw, fields, ctx?.signal) };
   } finally {
     sheet.close?.();
   }

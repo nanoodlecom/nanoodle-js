@@ -12,15 +12,32 @@ async function nodeZlib() {
   return _zlib;
 }
 
-async function pipeThrough(bytes, stream) {
+async function pipeThrough(bytes, stream, maxOutputLength) {
   const out = new Blob([bytes]).stream().pipeThrough(stream);
-  return new Uint8Array(await new Response(out).arrayBuffer());
+  if (maxOutputLength === undefined) return new Uint8Array(await new Response(out).arrayBuffer());
+  const reader = out.getReader();
+  const data = new Uint8Array(maxOutputLength);
+  let size = 0;
+  try {
+    for (;;) {
+      const {done, value} = await reader.read();
+      if (done) return data.subarray(0, size);
+      if (value.length > data.length-size) {
+        await reader.cancel();
+        throw new Error("Decompressed data exceeds the declared image size");
+      }
+      data.set(value, size);
+      size += value.length;
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
-export async function inflate(bytes) {
+export async function inflate(bytes, maxOutputLength) {
   const z = await nodeZlib();
-  if (z) return new Uint8Array(z.inflateSync(bytes));
-  return streamZlib.inflate(bytes);
+  if (z) return new Uint8Array(z.inflateSync(bytes, {maxOutputLength}));
+  return streamZlib.inflate(bytes, maxOutputLength);
 }
 
 export async function deflate(bytes, { level = 9 } = {}) {
@@ -92,7 +109,7 @@ export async function gunzipLax(bytes) {
 // The browser implementations, exported so tests can exercise them in Node
 // (which also ships Compression/DecompressionStream) without hiding node:zlib.
 export const streamZlib = {
-  inflate: (b) => pipeThrough(b, new DecompressionStream("deflate")),
+  inflate: (b, limit) => pipeThrough(b, new DecompressionStream("deflate"), limit),
   deflate: (b) => pipeThrough(b, new CompressionStream("deflate")),
   gunzip: (b) => pipeThrough(b, new DecompressionStream("gzip")),
   gunzipLax: (b) => {

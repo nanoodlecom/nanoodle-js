@@ -2,7 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { triangleModel, gaussianModel } from "../src/sprite-model.mjs";
 import { slicePixels } from "../src/sprite-slices.mjs";
-import { materialize, RUNNERS } from "../src/browser.mjs";
+import { materialize, RUNNERS, Workflow } from "../src/browser.mjs";
+import { MP4CAT } from "../src/mp4cat.mjs";
+import { dataUrlBytes } from "../src/media.mjs";
 import { asymmetricMesh, splatFixture } from "./fixtures/sprite-stack.mjs";
 
 const opts = { size: 16, layers: 8, axis: "auto", outline: false, palette: 0 };
@@ -122,5 +124,34 @@ test("saved graphs retain ports and settings and render in Node", async () => {
     assert.match(render.image, /^data:image\/png;base64,/);
     assert.equal(render.video, undefined);
     assert.notEqual(sliced.image, render.image);
+  }
+});
+
+test("saved turntables feed Combine as timed H.264 tracks without a media subprocess", async () => {
+  const fields = { turntable: true, duration: 0.5, fps: 8 };
+  const link = (from, out, to, input) => ({ from: { node: from, port: out }, to: { node: to, port: input } });
+  const workflow = Workflow.fromJSON({
+    nodes: [
+      { id: "source", type: "mupload", fields: { model: "data:model/ply;base64," + splatFixture().toString("base64") } },
+      { id: "slice", type: "slice-3d", fields: { resolution: 16, slices: 8 } },
+      { id: "first", type: "sprite-stack-render", fields: { ...fields, yawEnd: 180 } },
+      { id: "second", type: "sprite-stack-render", fields: { ...fields, yawStart: 180 } },
+      { id: "joined", type: "combine", fields: {} },
+    ],
+    links: [
+      link("source", "model", "slice", "model"), link("slice", "sheet", "first", "sheet"),
+      link("slice", "sheet", "second", "sheet"), link("first", "video", "joined", "vid1"),
+      link("second", "video", "joined", "vid2"),
+    ],
+  });
+  const { nodes } = await workflow.run();
+  for (const [id, count] of [["first", 4], ["second", 4], ["joined", 8]]) {
+    const { bytes, mime } = dataUrlBytes(nodes[id].out.video);
+    const [track] = MP4CAT.parseMp4(bytes).tracks;
+    assert.equal(mime, "video/mp4");
+    assert.equal(track.kind, "video");
+    assert.ok(track.codecCfg, "the MP4 carries its H.264 decoder configuration");
+    assert.equal(track.samples.length, count);
+    assert.equal(track.samples.reduce((ticks, sample) => ticks + sample.dur, 0) / track.timescale, count / 8);
   }
 });

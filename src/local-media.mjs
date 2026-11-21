@@ -13,7 +13,8 @@
  *
  * Outputs are data: URLs so they plug into the existing MediaRef / network-inline pipeline.
  */
-import { inflate, deflate } from "./zlib.mjs";
+import { deflate } from "./zlib.mjs";
+import { decodePngPixels } from "./png-decoder.mjs";
 import { NanoodleError } from "./errors.mjs";
 import { bytesToDataUrl, dataUrlBytes, downloadMedia, sniffMime, MEDIA_INLINE_MAX } from "./media.mjs";
 import { MP4CAT } from "./mp4cat.mjs";
@@ -217,99 +218,9 @@ function pngChunk(type, data) {
   return out;
 }
 
-/** Decode 8-bit RGB/RGBA/gray/gray+alpha PNG → { w, h, rgba:Uint8ClampedArray }. */
+/** Decode a PNG texture to straight-alpha 8-bit RGBA. */
 async function decodePng(bytes, allowSpriteStrip = false) {
-  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  if (u8.length < 8 || u8[0] !== 0x89 || u8[1] !== 0x50) {
-    throw new NanoodleError("couldn't read that image to resize");
-  }
-  const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-  for (let i = 0; i < 8; i++) if (u8[i] !== sig[i]) throw new NanoodleError("couldn't read that image to resize");
-
-  let w = 0, h = 0, bitDepth = 8, colorType = 2;
-  const idats = [];
-  let p = 8;
-  while (p + 8 <= u8.length) {
-    // >>> 0: PNG chunk lengths are unsigned; JS << is signed 32-bit
-    const len = ((u8[p] << 24) | (u8[p + 1] << 16) | (u8[p + 2] << 8) | u8[p + 3]) >>> 0;
-    if (p + 12 + len > u8.length) throw new NanoodleError("couldn't read that image to resize");
-    const type = String.fromCharCode(u8[p + 4], u8[p + 5], u8[p + 6], u8[p + 7]);
-    const data = u8.subarray(p + 8, p + 8 + len);
-    p += 12 + len;
-    if (type === "IHDR") {
-      w = ((data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3]) >>> 0;
-      h = ((data[4] << 24) | (data[5] << 16) | (data[6] << 8) | data[7]) >>> 0;
-      bitDepth = data[8];
-      colorType = data[9];
-      if (data[10] !== 0 || data[11] !== 0 || data[12] !== 0) {
-        throw new NanoodleError("couldn't read that image to resize"); // compressed/filter/interlace
-      }
-    } else if (type === "IDAT") {
-      idats.push(data);
-    } else if (type === "IEND") break;
-  }
-  if (!(w > 0) || !(h > 0) || bitDepth !== 8) {
-    throw new NanoodleError("couldn't read that image to resize");
-  }
-  const maxWidth = allowSpriteStrip && h <= 128 ? 128 * 128 : MAX_IMAGE_DIM;
-  if (w > maxWidth || h > MAX_IMAGE_DIM) {
-    throw new NanoodleError(
-      `image is too large to resize in-process (${w}×${h}; max ${MAX_IMAGE_DIM}px) — use smaller source dimensions`);
-  }
-  // colorType: 0 gray, 2 RGB, 4 gray+A, 6 RGBA (no palette)
-  if (colorType !== 0 && colorType !== 2 && colorType !== 4 && colorType !== 6) {
-    throw new NanoodleError("couldn't read that image to resize");
-  }
-  const cpp = colorType === 0 ? 1 : colorType === 2 ? 3 : colorType === 4 ? 2 : 4;
-  const raw = await inflate(catBytes(idats));
-  const stride = w * cpp;
-  const expected = h * (1 + stride);
-  if (raw.length < expected) throw new NanoodleError("couldn't read that image to resize");
-
-  const unfiltered = new Uint8Array(h * stride);
-  for (let y = 0; y < h; y++) {
-    const ftype = raw[y * (1 + stride)];
-    const row = raw.subarray(y * (1 + stride) + 1, y * (1 + stride) + 1 + stride);
-    const dest = unfiltered.subarray(y * stride, (y + 1) * stride);
-    const prev = y > 0 ? unfiltered.subarray((y - 1) * stride, y * stride) : null;
-    for (let x = 0; x < stride; x++) {
-      const left = x >= cpp ? dest[x - cpp] : 0;
-      const up = prev ? prev[x] : 0;
-      const upLeft = prev && x >= cpp ? prev[x - cpp] : 0;
-      let v = row[x];
-      if (ftype === 1) v = (v + left) & 255; // Sub
-      else if (ftype === 2) v = (v + up) & 255; // Up
-      else if (ftype === 3) v = (v + ((left + up) >> 1)) & 255; // Average
-      else if (ftype === 4) { // Paeth
-        const p0 = left + up - upLeft;
-        const pa = Math.abs(p0 - left), pb = Math.abs(p0 - up), pc = Math.abs(p0 - upLeft);
-        const pr = pa <= pb && pa <= pc ? left : pb <= pc ? up : upLeft;
-        v = (v + pr) & 255;
-      } else if (ftype !== 0) {
-        throw new NanoodleError("couldn't read that image to resize");
-      }
-      dest[x] = v;
-    }
-  }
-
-  const rgba = new Uint8ClampedArray(w * h * 4);
-  for (let i = 0, px = 0; i < w * h; i++, px += cpp) {
-    const o = i * 4;
-    if (colorType === 0) {
-      rgba[o] = rgba[o + 1] = rgba[o + 2] = unfiltered[px];
-      rgba[o + 3] = 255;
-    } else if (colorType === 2) {
-      rgba[o] = unfiltered[px]; rgba[o + 1] = unfiltered[px + 1]; rgba[o + 2] = unfiltered[px + 2];
-      rgba[o + 3] = 255;
-    } else if (colorType === 4) {
-      rgba[o] = rgba[o + 1] = rgba[o + 2] = unfiltered[px];
-      rgba[o + 3] = unfiltered[px + 1];
-    } else {
-      rgba[o] = unfiltered[px]; rgba[o + 1] = unfiltered[px + 1];
-      rgba[o + 2] = unfiltered[px + 2]; rgba[o + 3] = unfiltered[px + 3];
-    }
-  }
-  return { w, h, rgba };
+  return decodePngPixels(bytes, MAX_IMAGE_DIM, allowSpriteStrip);
 }
 
 async function encodePngRgba(w, h, rgba) {
@@ -1096,4 +1007,4 @@ export async function muxSoundtrack(videoUrl, audioUrl, loop = false, { fetch: f
 export { MAX_FRAMES, MAX_IMAGE_DIM, MP4CAT };
 // PNG codec internals — used by the nanoodle repo's dual-engine parity harness
 // (pixel-level mask comparison + headless canvas shim). Not part of the stable API.
-export { decodePng, encodePngRgba, withTemp, runProc };
+export { decodePng, encodePngRgba };

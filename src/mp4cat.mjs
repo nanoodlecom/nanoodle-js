@@ -171,6 +171,11 @@ function concatMp4(buffers, opts){
     outTracks.push(merged);
   }
 
+  return muxTracks(buffers, outTracks);
+}
+
+// Both a lossless concat and a newly encoded sprite track use the same muxer.
+function muxTracks(buffers, outTracks, fastStart = false) {
   // Build mdat first so chunk offsets are known. Layout: ftyp + mdat + moov.
   const ftyp = box("ftyp", enc("isom"), u32(0x200), enc("isomiso2avc1mp41"));
   // assemble mdat data, recording each sample's absolute offset
@@ -184,10 +189,21 @@ function concatMp4(buffers, opts){
       cursor += s.size;
     }
   }
-  const mdatData = concat(mdatParts);
-  const mdat = concat([u32(mdatData.length + 8), enc("mdat"), mdatData]);
+  if(cursor > 0xffffffff) throw new Error("MP4 exceeds 32-bit chunk offsets");
+  const mdatHeader = concat([u32(cursor - ftyp.length), enc("mdat")]);
 
-  // moov
+  let moov = movieBox(outTracks, 0);
+  if (cursor + moov.length > 0xffffffff) throw new Error("MP4 exceeds 32-bit file size");
+  if (fastStart) {
+    // All chunk offsets are fixed-width stco entries. Moving moov in
+    // front of mdat shifts each entry by exactly the size of moov.
+    moov = movieBox(outTracks, moov.length);
+    return concat([ftyp, moov, mdatHeader, ...mdatParts]);
+  }
+  return concat([ftyp, mdatHeader, ...mdatParts, moov]);
+}
+
+function movieBox(outTracks, chunkShift) {
   const mvTimescale = 1000;
   let maxDurMs = 0;
   const trakBoxes = [];
@@ -202,7 +218,7 @@ function concatMp4(buffers, opts){
     const stts = fullbox("stts", 0, 0, u32(sttsRuns.length), ...sttsRuns.map(r=>concat([u32(r[0]), u32(r[1])])));
     const stsz = fullbox("stsz", 0, 0, u32(0), u32(t.samples.length), ...t.samples.map(s=>u32(s.size)));
     const stsc = fullbox("stsc", 0, 0, u32(1), concat([u32(1), u32(1), u32(1)]));
-    const stco = fullbox("stco", 0, 0, u32(t.samples.length), ...t.samples.map(s=>u32(s.newOffset)));
+    const stco = fullbox("stco", 0, 0, u32(t.samples.length), ...t.samples.map(s=>u32(s.newOffset + chunkShift)));
     const children = [t.stsdRaw, stts];
     if(t.kind==="video"){
       const anyCts = t.samples.some(s=>s.cts!==0);
@@ -242,9 +258,7 @@ function concatMp4(buffers, opts){
     u32(0x00010000), u16(0x0100), u16(0), new Uint8Array(8),
     concat([u32(0x00010000),u32(0),u32(0),u32(0),u32(0x00010000),u32(0),u32(0),u32(0),u32(0x40000000)]),
     new Uint8Array(24), u32(trackId));
-  const moov = box("moov", mvhd, ...trakBoxes);
-
-  return concat([ftyp, mdat, moov]);
+  return box("moov", mvhd, ...trakBoxes);
 }
 
 // quick sniff
@@ -276,7 +290,25 @@ function mp4ParamsMatch(bufs){
     return true;
   }catch(e){ return false; }
 }
-  return { concatMp4, isMp4, mp4ParamsMatch, parseMp4 };
+// A single AVC track, with one length-prefixed NAL per sample. Keep the
+// visual sample entry and AVC decoder configuration in the sample table.
+function muxAvc(samples, width, height, seconds, sps, pps) {
+  const avcC = box("avcC", Uint8Array.of(1, sps[1], sps[2], sps[3], 0xff, 0xe1),
+    u16(sps.length), sps, Uint8Array.of(1), u16(pps.length), pps);
+  const avc1 = box("avc1", new Uint8Array(6), u16(1), new Uint8Array(16),
+    u16(width), u16(height), u32(0x00480000), u32(0x00480000), u32(0),
+    u16(1), new Uint8Array(32), u16(24), u16(0xffff), avcC);
+  const timescale = 90000;
+  const total = Math.round(seconds * timescale);
+  const buffers = samples.map(s => s.bytes);
+  const entries = samples.map((s, i) => ({
+    bufIdx: i, offset: 0, size: s.bytes.length, cts: 0, sync: s.sync,
+    dur: Math.round((i + 1) * total / samples.length) - Math.round(i * total / samples.length)
+  }));
+  return muxTracks(buffers, [{kind:"video", width, height, timescale,
+    stsdRaw:fullbox("stsd", 0, 0, u32(1), avc1), samples:entries}], true);
+}
+  return { concatMp4, isMp4, mp4ParamsMatch, parseMp4, muxAvc };
 })();
 
 
