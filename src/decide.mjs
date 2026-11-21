@@ -5,7 +5,7 @@
 // uses ffmpeg (fitImageJpeg) — text-only decisions need no ffmpeg at all.
 import { NanoodleError } from "./errors.mjs";
 
-export const DECIDE_DEFAULT_MODEL = "perplexity/pplx-decider-v1.1-27b";
+export const DECIDE_DEFAULT_MODEL = "perplexity/pplx-decider-v1.2";
 export const DECIDE_SCALE_DEFAULT = "poor\nokay\ngood\ngreat";
 /** The live limits of every image-capable decision model at launch (catalog decision_input.image_limits). */
 export const DECIDE_IMG_FALLBACK = { maxImages: 4, maxDimension: 512, maxEncodedBytes: 240000 };
