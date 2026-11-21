@@ -1,9 +1,11 @@
 import { dataUrlBytes, sniffMime } from "./media.mjs";
 
-import { ident, mul, trs, xform, unpackGlb } from "./gltf-scene.mjs";
+import { trs, unpackGlb } from "./gltf-scene.mjs";
+import { prepareClip } from "./gltf-animation.mjs";
+import { sceneNodes, readSkin, skinInfluences, skinMatrices, posedPositions } from "./gltf-skin.mjs";
 
 const decodeText = (bytes) => new TextDecoder().decode(bytes);
-const components = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4 };
+const components = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT4: 16 };
 const glTypes = {
   5120: [1, "getInt8", 127],
   5121: [1, "getUint8", 255],
@@ -32,6 +34,10 @@ function embedded(uri) {
 }
 
 export async function triangleModel(bytes, imagePixels) {
+  return (await trianglePoses(bytes, imagePixels)).pose(0);
+}
+
+export async function trianglePoses(bytes, imagePixels, { clip = "", frames = 1 } = {}) {
   const { json, bin } = unpack(bytes);
   if (json?.asset?.version !== "2.0") throw new Error("Expected glTF 2.0.");
   const unsupported = (json.extensionsRequired || []).filter((name) => name !== "EXT_texture_webp");
@@ -48,6 +54,7 @@ export async function triangleModel(bytes, imagePixels) {
     if (
       !buffer ||
       !Number.isSafeInteger(bv.byteLength) ||
+      !Number.isSafeInteger(start) ||
       start < 0 ||
       bv.byteLength < 0 ||
       start + bv.byteLength > buffer.length
@@ -57,34 +64,73 @@ export async function triangleModel(bytes, imagePixels) {
       throw new Error("Meshopt-compressed buffers are unsupported.");
     return buffer.subarray(start, start + bv.byteLength);
   }
+  const cache = new Map();
   function accessor(index, shapes, count) {
     const a = json.accessors?.[index],
       spec = glTypes[a?.componentType];
-    if (!a || !spec || !shapes.includes(a.type) || a.sparse || a.bufferView == null)
-      throw new Error("Unsupported glTF accessor type or sparse encoding.");
+    if (!spec || !shapes.includes(a.type)) throw new Error("Unsupported glTF accessor type.");
+    if (!Number.isSafeInteger(a.count) || a.count < 1 || (count != null && a.count !== count))
+      throw new Error("Invalid glTF accessor count.");
+    if (cache.has(index)) return cache.get(index);
     const n = components[a.type],
-      [size, get, max] = spec,
-      buf = bufferView(a.bufferView);
-    const stride = json.bufferViews[a.bufferView].byteStride ?? n * size,
-      offset = a.byteOffset ?? 0;
-    if (
-      !Number.isSafeInteger(a.count) ||
-      a.count < 1 ||
-      (count != null && a.count !== count) ||
-      offset < 0 ||
-      stride < n * size ||
-      offset + (a.count - 1) * stride + n * size > buf.length
-    )
-      throw new Error("Invalid glTF accessor bounds or count.");
-    const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength),
-      data = new Float64Array(n * a.count);
-    for (let i = 0; i < a.count; i++)
+      [size, get, max] = spec;
+    function source(viewIndex, offset, stride, length, elements, bytes) {
+      const buf = bufferView(viewIndex);
+      if (
+        !Number.isSafeInteger(offset) ||
+        offset < 0 ||
+        !Number.isSafeInteger(stride) ||
+        stride < elements * bytes ||
+        offset + (length - 1) * stride + elements * bytes > buf.length
+      )
+        throw new Error("Invalid glTF accessor bounds.");
+      return new DataView(buf.buffer, buf.byteOffset + offset, buf.byteLength - offset);
+    }
+    function row(view, offset, data, output) {
       for (let c = 0; c < n; c++) {
-        const v = view[get](offset + i * stride + c * size, true);
+        const v = view[get](offset + c * size, true);
         if (!Number.isFinite(v)) throw new Error("Non-finite glTF attribute.");
-        data[i * n + c] = a.normalized ? Math.max(-1, v / max) : v;
+        data[output + c] = a.normalized ? Math.max(-1, v / max) : v;
       }
-    return { data, n, count: a.count };
+    }
+    const stride = json.bufferViews?.[a.bufferView]?.byteStride ?? n * size;
+    const base =
+      a.bufferView == null ? null : source(a.bufferView, a.byteOffset ?? 0, stride, a.count, n, size);
+    // Sparse-only accessors can expand far beyond the size of the uploaded file.
+    if (!base && a.count * n > 16_777_216) throw new Error("glTF sparse accessor is too large.");
+    const data = new Float64Array(n * a.count);
+    if (base) for (let i = 0; i < a.count; i++) row(base, i * stride, data, i * n);
+    if (a.sparse) {
+      const { indices, values, count: length } = a.sparse;
+      if (
+        !Number.isSafeInteger(length) ||
+        length < 1 ||
+        length > a.count ||
+        ![5121, 5123, 5125].includes(indices?.componentType) ||
+        !values
+      )
+        throw new Error("Invalid glTF sparse accessor.");
+      const [indexSize, indexGet] = glTypes[indices.componentType];
+      const indicesView = source(
+        indices.bufferView,
+        indices.byteOffset ?? 0,
+        indexSize,
+        length,
+        1,
+        indexSize,
+      );
+      const valuesView = source(values.bufferView, values.byteOffset ?? 0, n * size, length, n, size);
+      let previous = -1;
+      for (let i = 0; i < length; i++) {
+        const target = indicesView[indexGet](i * indexSize, true);
+        if (target <= previous || target >= a.count) throw new Error("Invalid glTF sparse index.");
+        row(valuesView, i * n * size, data, target * n);
+        previous = target;
+      }
+    }
+    const result = { data, n, count: a.count };
+    cache.set(index, result);
+    return result;
   }
   const textures = new Map();
   async function texture(info) {
@@ -108,8 +154,14 @@ export async function triangleModel(bytes, imagePixels) {
     if (useWebp && !cached.webp) throw new Error("EXT_texture_webp source must contain a WebP image.");
     return { pixels: cached.pixels, sampler: json.samplers?.[tex.sampler] || {} };
   }
-  const meshes = [];
-  async function emit(index, world) {
+  const meshes = [],
+    skins = new Map(),
+    scene = sceneNodes(json);
+  async function emit(index, nodeIndex) {
+    const node = json.nodes?.[nodeIndex] ?? {};
+    if (node.skin != null && !skins.has(node.skin)) {
+      skins.set(node.skin, readSkin(json, node.skin, accessor, scene));
+    }
     if (!json.meshes?.[index]) throw new Error("Missing glTF mesh.");
     for (const p of json.meshes[index].primitives) {
       const mode = p.mode ?? 4;
@@ -117,14 +169,16 @@ export async function triangleModel(bytes, imagePixels) {
         throw new Error(
           "Slice 3D requires triangles. For a point-cloud preview, supply the original Gaussian PLY.",
         );
-      if (p.targets?.length || p.extensions?.KHR_draco_mesh_compression)
-        throw new Error("Morph targets and Draco-compressed meshes are unsupported.");
+      if (p.extensions?.KHR_draco_mesh_compression)
+        throw new Error("Draco-compressed meshes are unsupported.");
       const pos = accessor(p.attributes.POSITION, ["VEC3"]);
-      for (let i = 0; i < pos.data.length; i += 3) {
-        const point = xform(world, pos.data[i], pos.data[i + 1], pos.data[i + 2], false);
-        if (!point.every(Number.isFinite)) throw new Error("Invalid glTF scene transform.");
-        pos.data.set(point, i);
-      }
+      const targets = (p.targets || []).map((target) =>
+        target.POSITION == null ? null : accessor(target.POSITION, ["VEC3"], pos.count).data,
+      );
+      const influences =
+        node.skin == null
+          ? null
+          : skinInfluences(json, p.attributes, pos.count, skins.get(node.skin), accessor);
       if (p.indices != null) {
         const indexSpec = json.accessors?.[p.indices];
         if (!indexSpec || ![5121, 5123, 5125].includes(indexSpec.componentType) || indexSpec.normalized)
@@ -153,43 +207,62 @@ export async function triangleModel(bytes, imagePixels) {
         ? accessor(p.attributes["TEXCOORD_" + (info.texCoord ?? 0)], ["VEC2"], pos.count)
         : null;
       meshes.push({
-        positions: pos.data,
-        idx,
-        mode,
-        length,
-        color,
-        uv,
-        texture: info && (await texture(info)),
-        factor,
-        alphaMode: mat.alphaMode || "OPAQUE",
-        cutoff: mat.alphaCutoff ?? 0.5,
+        base: pos.data,
+        targets,
+        influences,
+        nodeIndex,
+        skin: node.skin,
+        weights: node.weights ?? json.meshes[index].weights,
+        material: {
+          idx,
+          mode,
+          length,
+          color,
+          uv,
+          factor,
+          texture: info && (await texture(info)),
+          alphaMode: mat.alphaMode || "OPAQUE",
+          cutoff: mat.alphaCutoff ?? 0.5,
+        },
       });
     }
   }
-  const active = new Set(),
-    nodes = json.nodes || [];
-  async function walk(i, parent) {
-    const node = nodes[i];
-    if (!node || active.has(i)) throw new Error("Invalid or cyclic glTF node tree.");
-    if (node.skin != null) throw new Error("Skinned meshes require a static mesh export.");
-    active.add(i);
-    const world = mul(
-      parent,
-      node.matrix ||
-        trs(node.translation || [0, 0, 0], node.rotation || [0, 0, 0, 1], node.scale || [1, 1, 1]),
-    );
-    if (node.mesh != null) await emit(node.mesh, world);
-    for (const child of node.children || []) await walk(child, world);
-    active.delete(i);
-  }
-  if (nodes.length) {
-    const children = new Set(nodes.flatMap((n) => n.children || []));
-    const roots =
-      json.scenes?.[json.scene ?? 0]?.nodes ?? nodes.map((_, i) => i).filter((i) => !children.has(i));
-    for (const root of roots) await walk(root, ident());
-  } else for (let i = 0; i < (json.meshes || []).length; i++) await emit(i, ident());
+  if (json.nodes?.length) {
+    for (const i of scene.active) {
+      const node = json.nodes[i];
+      if (node.mesh != null) await emit(node.mesh, i);
+    }
+  } else for (let i = 0; i < (json.meshes || []).length; i++) await emit(i);
   if (!meshes.length) throw new Error("No triangles in the selected glTF scene.");
-  return { kind: "mesh", meshes };
+  const sampler = prepareClip(json, accessor, clip, frames);
+  const animation = sampler?.info ?? null;
+  function pose(index) {
+    if (!Number.isInteger(index) || index < 0 || index >= frames) throw new Error("Invalid frame index.");
+    const overrides = sampler?.sample(animation.times[index]);
+    const world = scene.worldMatrices(overrides),
+      palettes = new Map();
+    for (const [id, joints] of skins) palettes.set(id, skinMatrices(joints, world));
+    return {
+      kind: "mesh",
+      meshes: meshes.map((mesh) => ({
+        ...mesh.material,
+        positions: posedPositions(
+          mesh,
+          world.get(mesh.nodeIndex),
+          overrides?.get(mesh.nodeIndex)?.weights ?? mesh.weights,
+          palettes.get(mesh.skin),
+        ),
+      })),
+    };
+  }
+  return {
+    pose,
+    animation,
+    count: frames,
+    clip: animation?.clip ?? "",
+    start: animation?.times[0] ?? 0,
+    duration: animation?.duration ?? 0,
+  };
 }
 
 const plyTypes = {
