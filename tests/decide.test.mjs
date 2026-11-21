@@ -170,7 +170,7 @@ test("decide: pick shrinks wired images to JPEG within the decision budget (ffmp
     nodes: [
       { id: "a", type: "upload", fields: { image: PNG_DATA_URL } },
       { id: "b", type: "upload", fields: { image: PNG_DATA_URL } },
-      { id: "d", type: "decide", fields: { model: "perplexity/pplx-decider-v1.1-27b" } },
+      { id: "d", type: "decide", fields: { model: "perplexity/pplx-decider-v1.2" } },
     ],
     links: [
       { id: "l1", from: { node: "a", port: "image" }, to: { node: "d", port: "img1" } },
