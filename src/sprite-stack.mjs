@@ -2,7 +2,6 @@ import { number, viewPlan, softwareView, flag, turntablePlan } from "./sprite-pr
 import { encodePngRgba } from "./local-media.mjs";
 import { encodeSpriteMp4 } from "./sprite-video.mjs";
 import { MediaRef, bytesToDataUrl } from "./media.mjs";
-import { decodeSpriteBytes } from "./sprite-image.mjs";
 import { gaussianModel, triangleModel } from "./sprite-model.mjs";
 import { slicePixels } from "./sprite-slices.mjs";
 
@@ -92,7 +91,9 @@ export async function slice3d(node, inp, ctx) {
     size = number(fields, "resolution", 48, 16, 128, true),
     layers = number(fields, "slices", 48, 8, 128, true);
   const headless = typeof document === "undefined";
-  const pixels = headless ? decodeSpriteBytes : (raw, mime) => imagePixels(new Blob([raw], { type: mime }));
+  const pixels = headless
+    ? (await import("./sprite-image.mjs")).decodeSpriteBytes
+    : (raw, mime) => imagePixels(new Blob([raw], { type: mime }));
   const bytes = await readMedia(inp.model, ctx);
   const model =
     bytes[0] === 112 && bytes[1] === 108 && bytes[2] === 121
@@ -127,6 +128,7 @@ export async function renderSpriteStack(node, inp, ctx) {
     bytes = await readMedia(inp.sheet, ctx);
   const yaw = number(fields, "yaw", 35, -3600, 3600);
   if (typeof document === "undefined") {
+    const { decodeSpriteBytes } = await import("./sprite-image.mjs");
     const sheet = await decodeSpriteBytes(bytes);
     const draw = softwareView(sheet, fields);
     const image = await frameUrl(draw(yaw));

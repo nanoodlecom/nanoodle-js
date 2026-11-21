@@ -1,4 +1,4 @@
-import { dataUrlBytes } from "./media.mjs";
+import { dataUrlBytes, sniffMime } from "./media.mjs";
 
 import { ident, mul, trs, xform, unpackGlb } from "./gltf-scene.mjs";
 
@@ -34,8 +34,8 @@ function embedded(uri) {
 export async function triangleModel(bytes, imagePixels) {
   const { json, bin } = unpack(bytes);
   if (json?.asset?.version !== "2.0") throw new Error("Expected glTF 2.0.");
-  if (json.extensionsRequired?.length)
-    throw new Error("Unsupported required glTF extensions: " + json.extensionsRequired.join(", "));
+  const unsupported = (json.extensionsRequired || []).filter((name) => name !== "EXT_texture_webp");
+  if (unsupported.length) throw new Error("Unsupported required glTF extensions: " + unsupported.join(", "));
   const buffers = (json.buffers || []).map((b, i) => {
     const data = b.uri ? embedded(b.uri).bytes : i === 0 && bin;
     if (!data || data.length < b.byteLength) throw new Error("Missing or truncated glTF buffer.");
@@ -88,15 +88,25 @@ export async function triangleModel(bytes, imagePixels) {
   }
   const textures = new Map();
   async function texture(info) {
-    const tex = json.textures?.[info.index],
-      img = json.images?.[tex?.source];
+    const tex = json.textures?.[info.index];
+    const useWebp = Object.hasOwn(tex?.extensions || {}, "EXT_texture_webp");
+    const source = useWebp ? tex.extensions.EXT_texture_webp?.source : tex?.source;
+    const img = json.images?.[source];
+    if (useWebp && (!Number.isSafeInteger(source) || source < 0 || !img))
+      throw new Error("Invalid EXT_texture_webp image source.");
     if (!img || info.extensions?.KHR_texture_transform)
       throw new Error("Unsupported base-color texture encoding or transform.");
-    if (!textures.has(tex.source)) {
+    if (useWebp && !img.uri && img.mimeType !== "image/webp")
+      throw new Error("EXT_texture_webp bufferView requires image/webp.");
+    if (!textures.has(source)) {
       const image = img.uri ? embedded(img.uri) : { bytes: bufferView(img.bufferView), mime: img.mimeType };
-      textures.set(tex.source, await imagePixels(image.bytes, image.mime));
+      const webp = sniffMime(image.bytes) === "image/webp";
+      if (useWebp && !webp) throw new Error("EXT_texture_webp source must contain a WebP image.");
+      textures.set(source, { pixels: await imagePixels(image.bytes, image.mime), webp });
     }
-    return { pixels: textures.get(tex.source), sampler: json.samplers?.[tex.sampler] || {} };
+    const cached = textures.get(source);
+    if (useWebp && !cached.webp) throw new Error("EXT_texture_webp source must contain a WebP image.");
+    return { pixels: cached.pixels, sampler: json.samplers?.[tex.sampler] || {} };
   }
   const meshes = [];
   async function emit(index, world) {

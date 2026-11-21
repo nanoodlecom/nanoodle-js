@@ -65,3 +65,33 @@ test("truncated JPEG, GIF, and PNG files fail during native decode", async () =>
     );
   }
 });
+
+test("AVIF alpha and subsampled chroma match the reference through a transparency boundary", async () => {
+  const image = await decodeSpriteBytes(await fixture("chroma-alpha.avif"));
+  const reference = await decodeSpriteBytes(await fixture("chroma-alpha-reference.png"));
+  assert.deepEqual([image.width, image.height], [35, 29]);
+  assert.equal(image.data.length, reference.data.length);
+  for (let i = 0; i < image.data.length; i += 4) {
+    const alpha = image.data[i + 3];
+    assert.equal(alpha, reference.data[i + 3]);
+    for (let c = 0; c < 3; c++) {
+      const visibleDelta = Math.abs(image.data[i + c] - reference.data[i + c]) * alpha / 255;
+      assert.ok(visibleDelta <= 2, "visible color differs at byte " + (i + c));
+    }
+  }
+});
+
+test("AVIF handles opaque and translucent 4:4:4 and 4:2:0 images at odd dimensions", async () => {
+  for (const [name, w, h, samples] of [
+    ["alpha.avif", 16, 16, [[0, 0, [10, 181, 45, 255]], [15, 15, [0, 0, 0, 0]]]],
+    ["odd-444.avif", 37, 41, [[0, 0, [249, 44, 56, 247]], [4, 5, [29, 139, 243, 47]], [36, 40, [70, 255, 222, 202]]]],
+  ]) {
+    const { width, height, data } = await decodeSpriteBytes(await fixture(name));
+    assert.deepEqual([width, height], [w, h]);
+    for (const [x, y, expected] of samples) {
+      const pixel = data.subarray(4 * (width * y + x), 4 * (width * y + x + 1));
+      assert.equal(pixel[3], expected[3]);
+      if (pixel[3]) assert.ok(expected.slice(0, 3).every((v, i) => Math.abs(v - pixel[i]) <= 2));
+    }
+  }
+});

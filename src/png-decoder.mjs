@@ -46,7 +46,7 @@ function sample(row, n, depth) {
   return (row[bit >> 3] >> (8 - depth - (bit & 7))) & ((1 << depth) - 1);
 }
 
-export async function decodePngPixels(bytes, maxDim, allowSpriteStrip) {
+export async function decodePngPixels(bytes, { maxDim, allowSpriteStrip, firstAnimationFrame = false }) {
   const u = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   check(
     SIGNATURE.every((v, i) => u[i] === v),
@@ -62,6 +62,10 @@ export async function decodePngPixels(bytes, maxDim, allowSpriteStrip) {
     trns,
     ended = false,
     compressedSize = 0;
+  let animated = false,
+    sawIdat = false,
+    controlCount = 0,
+    firstFrame;
   const chunks = [];
   for (let p = 8; p + 12 <= u.length; ) {
     const length = view.getUint32(p),
@@ -85,18 +89,48 @@ export async function decodePngPixels(bytes, maxDim, allowSpriteStrip) {
         );
       check(DEPTHS[type]?.includes(depth) && !data[10] && !data[11] && interlace <= 1, "header encoding");
     } else if (name === "PLTE") {
-      check(!chunks.length && length > 0 && length <= 768 && length % 3 === 0, "palette");
+      check(!sawIdat && length > 0 && length <= 768 && length % 3 === 0, "palette");
       palette = data;
     } else if (name === "tRNS") {
       check(
-        !chunks.length &&
+        !sawIdat &&
           ((type === 3 && palette && length <= palette.length / 3) ||
             (type === 0 && length === 2) ||
             (type === 2 && length === 6)),
         "transparency",
       );
       trns = data;
+    } else if (firstAnimationFrame && name === "acTL") {
+      check(!sawIdat && !animated && length === 8 && view.getUint32(start), "animation control");
+      animated = true;
+    } else if (animated && name === "fcTL") {
+      check(length === 26, "animation frame control");
+      if (++controlCount === 1) {
+        const width = view.getUint32(start + 4),
+          height = view.getUint32(start + 8);
+        const x = view.getUint32(start + 12),
+          y = view.getUint32(start + 16);
+        check(
+          width && height && x + width <= w && y + height <= h && data[24] <= 2 && data[25] <= 1,
+          "animation frame bounds or operation",
+        );
+        check(sawIdat || (width === w && height === h && !x && !y), "animated IDAT dimensions");
+        firstFrame = { width, height, x, y, poster: sawIdat, over: data[25] === 1 };
+        // With fcTL after IDAT, IDAT is a separate poster outside the animation.
+        if (sawIdat) {
+          chunks.length = 0;
+          compressedSize = 0;
+        }
+      }
+    } else if (animated && name === "fdAT") {
+      check(firstFrame && sawIdat && length >= 4, "animation frame data");
+      if (controlCount === 1 && firstFrame.poster) {
+        chunks.push(data.subarray(4));
+        compressedSize += length - 4;
+      }
     } else if (name === "IDAT") {
+      check(!firstFrame?.poster, "IDAT after animation frame data");
+      sawIdat = true;
       compressedSize += length;
       chunks.push(data);
     } else if (name === "IEND") {
@@ -107,13 +141,14 @@ export async function decodePngPixels(bytes, maxDim, allowSpriteStrip) {
     p = start + length + 4;
   }
   check(ended && chunks.length && (type !== 3 || palette), "missing image data or palette");
+  const frame = firstFrame || { width: w, height: h, x: 0, y: 0 };
   const channels = CHANNELS[type],
     bpp = channels * depth;
   const passes = [];
   let expected = 0;
   for (const [x0, y0, dx, dy] of interlace ? ADAM7 : [[0, 0, 1, 1]]) {
-    const cols = Math.ceil((w - x0) / dx),
-      rows = Math.ceil((h - y0) / dy);
+    const cols = Math.ceil((frame.width - x0) / dx),
+      rows = Math.ceil((frame.height - y0) / dy);
     if (cols <= 0 || rows <= 0) continue;
     const stride = Math.ceil((cols * bpp) / 8);
     passes.push({ x0, y0, dx, dy, cols, rows, stride });
@@ -146,7 +181,7 @@ export async function decodePngPixels(bytes, maxDim, allowSpriteStrip) {
       p += stride;
       unfilter(row, prev, Math.ceil(bpp / 8), filter);
       prev = row;
-      let dst = ((y0 + y * dy) * w + x0) * 4;
+      let dst = ((frame.y + y0 + y * dy) * w + frame.x + x0) * 4;
       if (type === 6 && depth === 8 && dx === 1) {
         rgba.set(row, dst);
         continue;
@@ -178,5 +213,14 @@ export async function decodePngPixels(bytes, maxDim, allowSpriteStrip) {
       }
     }
   }
+  // The first animation frame blends onto transparent black. Only fully
+  // transparent samples differ between SOURCE and OVER on an empty canvas.
+  if (frame.over)
+    for (let y = frame.y; y < frame.y + frame.height; y++) {
+      for (let x = frame.x; x < frame.x + frame.width; x++) {
+        const dst = (y * w + x) * 4;
+        if (!rgba[dst + 3]) rgba.fill(0, dst, dst + 3);
+      }
+    }
   return { w, h, rgba };
 }

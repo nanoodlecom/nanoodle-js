@@ -1,7 +1,7 @@
 {
   "name": "nanoodle",
   "version": "0.14.1",
-  "description": "Run nanoodle visual AI workflows from JavaScript — zero-dependency executor for saved noodle-graph.json files",
+  "description": "Run nanoodle visual AI workflows from JavaScript with a local executor for saved noodle-graph.json files",
   "type": "module",
   "main": "./src/index.mjs",
   "exports": {
@@ -46,9 +46,7 @@
     "automation",
     "tts",
     "transcription",
-    "byok",
-    "no-deps",
-    "zero-dependencies"
+    "byok"
   ],
   "license": "MIT",
   "homepage": "https://nanoodle.com",
@@ -58,5 +56,9 @@
   },
   "bugs": {
     "url": "https://github.com/nanoodlecom/nanoodle-js/issues"
+  },
+  "dependencies": {
+    "@jsquash/avif": "^2.1.1",
+    "sharp": "^0.35.5"
   }
 }

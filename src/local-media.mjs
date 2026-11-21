@@ -220,7 +220,7 @@ function pngChunk(type, data) {
 
 /** Decode a PNG texture to straight-alpha 8-bit RGBA. */
 async function decodePng(bytes, allowSpriteStrip = false) {
-  return decodePngPixels(bytes, MAX_IMAGE_DIM, allowSpriteStrip);
+  return decodePngPixels(bytes, {maxDim:MAX_IMAGE_DIM, allowSpriteStrip});
 }
 
 async function encodePngRgba(w, h, rgba) {

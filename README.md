@@ -5,7 +5,7 @@
 and re-run them here — same graph, same [NanoGPT](https://nano-gpt.com) API,
 your own key.
 
-Zero runtime dependencies. Library + CLI in one install.
+The library and CLI come in one npm install.
 
 Looking for Python? → **[nanoodle-py](https://github.com/nanoodlecom/nanoodle-py)**
 
@@ -35,7 +35,7 @@ agents.
 | | |
 |---|---|
 | **Package** | `nanoodle` on npm |
-| **Runtime** | Node 22.23.5+, 24.22.3+, or 26.13.1+ · built-in `fetch` · no deps |
+| **Runtime** | Node 22.23.5+, 24.22.3+, or 26.13.1+ · built-in `fetch` · sharp and libavif for local image decoding |
 | **Sibling** | [Python package](https://github.com/nanoodlecom/nanoodle-py) (same graphs, same semantics) |
 | **Editor** | [nanoodle.com](https://nanoodle.com) — wire nodes, hit 💾, download the graph |
 
@@ -280,7 +280,7 @@ decisions, joins, retries, and an existing gate.
 
 `slice-3d` takes a `model` wire and an optional `paletteImage`. It reads static GLB or self-contained glTF 2 triangle meshes and uncompressed Gaussian PLY splats (ASCII or binary little-endian). Use the original Gaussian PLY for splats. Auto up is Y for meshes and Z for splats. The default is 48 layers of 48 × 48 pixels, 16 colors and an outline. Set `palette` to 0 to preserve source colors.
 
-The `sheet` output is a transparent PNG with square tiles ordered from ground at left to top at right. The `layout` text output gives the bounds, axis and sampling dimensions. The `image` output previews the stack at 35° yaw. Wire `sheet` into `sprite-stack-render.sheet` to change yaw, pitch, layer spacing or pixel scale. Enable `turntable` to add a local `video` output with configurable duration, fps, start yaw and end yaw. The editor draws with Canvas 2D. Node.js runs the same graph headlessly in plain JavaScript and decodes PNG, JPEG and the first frame of GIF for texture, palette and sheet inputs. Both encode H.264 MP4 turntables in-process. The sprite nodes need no additional packages or command-line tools.
+The `sheet` output is a transparent PNG with square tiles ordered from ground at left to top at right. The `layout` text output gives the bounds, axis and sampling dimensions. The `image` output previews the stack at 35° yaw. Wire `sheet` into `sprite-stack-render.sheet` to change yaw, pitch, layer spacing or pixel scale. Enable `turntable` to add a local `video` output with configurable duration, fps, start yaw and end yaw. The editor draws with Canvas 2D. Node.js runs the same graph headlessly. Texture, palette and sheet inputs accept PNG, APNG, JPEG, GIF, WebP, AVIF, BMP, ICO and CUR. Animated inputs use their first displayed frame. A normal npm install supplies the image decoders. Both runtimes encode H.264 MP4 turntables in-process.
 
 † `decide` asks a NanoGPT decision model one typed question (`POST /api/v1/decisions`): pick the best of the wired `img1…` images, choose a label, score on a scale, or yes/no. Text-only decisions need nothing extra; wired images are shrunk to the model's limits with ffmpeg. A yes/no gate that answers no is not a failure: that node settles as `gated`, everything downstream is `skipped` unbilled, and the run succeeds (see [Gates](#gates-decide-said-no)).
 

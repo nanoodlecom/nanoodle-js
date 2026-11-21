@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { triangleModel, gaussianModel } from "../src/sprite-model.mjs";
+import { decodeSpriteBytes } from "../src/sprite-image.mjs";
 import { slicePixels } from "../src/sprite-slices.mjs";
 import { materialize, RUNNERS, Workflow } from "../src/browser.mjs";
 import { MP4CAT } from "../src/mp4cat.mjs";
@@ -154,4 +155,39 @@ test("saved turntables feed Combine as timed H.264 tracks without a media subpro
     assert.equal(track.samples.length, count);
     assert.equal(track.samples.reduce((ticks, sample) => ticks + sample.dur, 0) / track.timescale, count / 8);
   }
+});
+
+test("glTF selects EXT_texture_webp images, with an optional core fallback", async () => {
+  const scene = asymmetricMesh();
+  const uv = Buffer.alloc(36 * 2 * 4);
+  scene.buffers.push({ byteLength: uv.length, uri: "data:application/octet-stream;base64," + uv.toString("base64") });
+  scene.bufferViews.push({ buffer: 1, byteLength: uv.length });
+  scene.accessors.push({ bufferView: 1, componentType: 5126, type: "VEC2", count: 36 });
+  scene.meshes[0].primitives[0].attributes.TEXCOORD_0 = 2;
+  scene.materials[0].pbrMetallicRoughness.baseColorTexture = { index: 0 };
+  const redWebp = "data:image/webp;base64,UklGRhwAAABXRUJQVlA4TA8AAAAvAAAAAAcQ/Y/+ByKi/wEA";
+  const bluePng = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg==";
+  scene.images = [{ uri: bluePng }, { uri: redWebp }];
+  scene.textures = [{ source: 0, extensions: { EXT_texture_webp: { source: 1 } } }];
+  scene.extensionsUsed = ["EXT_texture_webp"];
+  const decoded = [];
+  const load = () => triangleModel(Buffer.from(JSON.stringify(scene)), (bytes, mime) => {
+    decoded.push(mime);
+    return decodeSpriteBytes(bytes);
+  });
+  await load();
+  delete scene.textures[0].source;
+  scene.extensionsRequired = ["EXT_texture_webp"];
+  await load();
+  assert.deepEqual(decoded, ["image/webp", "image/webp"]);
+
+  scene.textures[0].extensions.EXT_texture_webp.source = 0;
+  await assert.rejects(load, /must contain a WebP image/);
+  scene.textures[0].extensions.EXT_texture_webp.source = "1";
+  await assert.rejects(load, /Invalid EXT_texture_webp image source/);
+  scene.textures[0] = { source: 0 };
+  delete scene.extensionsRequired;
+  delete scene.extensionsUsed;
+  await load();
+  assert.equal(decoded.at(-1), "image/png");
 });
