@@ -2,7 +2,7 @@ import { dataUrlBytes } from "./media.mjs";
 
 import { ident, mul, trs, xform, unpackGlb } from "./gltf-scene.mjs";
 
-const decodeText = bytes => new TextDecoder().decode(bytes);
+const decodeText = (bytes) => new TextDecoder().decode(bytes);
 const components = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4 };
 const glTypes = {
   5120: [1, "getInt8", 127],
@@ -94,7 +94,7 @@ export async function triangleModel(bytes, imagePixels) {
       throw new Error("Unsupported base-color texture encoding or transform.");
     if (!textures.has(tex.source)) {
       const image = img.uri ? embedded(img.uri) : { bytes: bufferView(img.bufferView), mime: img.mimeType };
-      textures.set(tex.source, await imagePixels(new Blob([image.bytes], { type: image.mime })));
+      textures.set(tex.source, await imagePixels(image.bytes, image.mime));
     }
     return { pixels: textures.get(tex.source), sampler: json.samplers?.[tex.sampler] || {} };
   }

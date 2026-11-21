@@ -94,7 +94,7 @@ test("unsupported encodings produce specific errors before rasterization", async
     /little-endian/,
   );
 });
-test("saved graphs retain ports and settings and reject rendering outside a browser", async () => {
+test("saved graphs retain ports and settings and render in Node", async () => {
   const graph = {
     nodes: [
       { id: "m", type: "mupload", fields: {} },
@@ -110,5 +110,17 @@ test("saved graphs retain ports and settings and reject rendering outside a brow
   assert.deepEqual(saved.warnings, []);
   assert.deepEqual(saved.links, graph.links);
   assert.equal(saved.nodes[1].fields.upAxis, "x");
-  await assert.rejects(() => RUNNERS["slice-3d"](saved.nodes[1], { model: "data:," }), /requires a browser/);
+  for (const [mime, bytes] of [
+    ["model/gltf+json", Buffer.from(JSON.stringify(asymmetricMesh()))],
+    ["application/octet-stream", splatFixture(true)],
+  ]) {
+    const input = { model: "data:" + mime + ";base64," + bytes.toString("base64") };
+    const sliced = await RUNNERS["slice-3d"](saved.nodes[1], input, {});
+    assert.equal(JSON.parse(sliced.layout).upAxis, "x");
+    assert.match(sliced.sheet, /^data:image\/png;base64,/);
+    const render = await RUNNERS["sprite-stack-render"](saved.nodes[2], { sheet: sliced.sheet }, {});
+    assert.match(render.image, /^data:image\/png;base64,/);
+    assert.equal(render.video, undefined);
+    assert.notEqual(sliced.image, render.image);
+  }
 });

@@ -218,7 +218,7 @@ function pngChunk(type, data) {
 }
 
 /** Decode 8-bit RGB/RGBA/gray/gray+alpha PNG → { w, h, rgba:Uint8ClampedArray }. */
-async function decodePng(bytes) {
+async function decodePng(bytes, allowSpriteStrip = false) {
   const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   if (u8.length < 8 || u8[0] !== 0x89 || u8[1] !== 0x50) {
     throw new NanoodleError("couldn't read that image to resize");
@@ -251,7 +251,8 @@ async function decodePng(bytes) {
   if (!(w > 0) || !(h > 0) || bitDepth !== 8) {
     throw new NanoodleError("couldn't read that image to resize");
   }
-  if (w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM) {
+  const maxWidth = allowSpriteStrip && h <= 128 ? 128 * 128 : MAX_IMAGE_DIM;
+  if (w > maxWidth || h > MAX_IMAGE_DIM) {
     throw new NanoodleError(
       `image is too large to resize in-process (${w}×${h}; max ${MAX_IMAGE_DIM}px) — use smaller source dimensions`);
   }
@@ -1095,4 +1096,4 @@ export async function muxSoundtrack(videoUrl, audioUrl, loop = false, { fetch: f
 export { MAX_FRAMES, MAX_IMAGE_DIM, MP4CAT };
 // PNG codec internals — used by the nanoodle repo's dual-engine parity harness
 // (pixel-level mask comparison + headless canvas shim). Not part of the stable API.
-export { decodePng, encodePngRgba };
+export { decodePng, encodePngRgba, withTemp, runProc };

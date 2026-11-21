@@ -1,18 +1,9 @@
+import { number, viewPlan, softwareFrame, flag, turntablePlan } from "./sprite-projection.mjs";
+import { decodeSpriteImage, frameUrl, encodeTurntable } from "./sprite-cpu.mjs";
 import { MediaRef, bytesToDataUrl } from "./media.mjs";
 import { gaussianModel, triangleModel } from "./sprite-model.mjs";
 import { slicePixels } from "./sprite-slices.mjs";
 
-function number(fields, key, fallback, min, max, integer = false) {
-  const value = fields[key] == null || fields[key] === "" ? fallback : Number(fields[key]);
-  if (!Number.isFinite(value) || value < min || value > max || (integer && !Number.isInteger(value)))
-    throw new Error(
-      key + " must be " + (integer ? "an integer " : "") + "between " + min + " and " + max + ".",
-    );
-  return value;
-}
-function flag(value, fallback) {
-  return value == null ? fallback : value === true || value === "true";
-}
 function canvas(width, height) {
   if (typeof document === "undefined") throw new Error("Sprite stacking requires a browser with Canvas 2D.");
   const el = document.createElement("canvas");
@@ -54,19 +45,7 @@ function png(el) {
 }
 
 function stackView(sheet, fields) {
-  const tile = sheet.height,
-    layers = sheet.width / tile;
-  if (!Number.isInteger(layers) || layers < 8 || layers > 128 || tile < 16 || tile > 128)
-    throw new Error("Expected a horizontal Slice 3D sheet with 8–128 square tiles of 16–128 pixels.");
-  const pitch = (number(fields, "pitch", 30, 0, 90) * Math.PI) / 180,
-    scale = number(fields, "scale", 3, 1, 8);
-  const spacing = (number(fields, "spacing", 1, 0, 4) * (tile - 2)) / layers;
-  const rise = spacing * Math.cos(pitch),
-    squash = Math.max(1 / tile, Math.sin(pitch));
-  // Fixed even bounds for every yaw, including both turntable endpoints.
-  const floor = tile * Math.SQRT2;
-  const w = 2 * Math.ceil((floor * scale + 4) / 2),
-    h = 2 * Math.ceil(((floor * squash + rise * (layers - 1)) * scale + 4) / 2);
+  const { tile, layers, scale, rise, squash, w, h } = viewPlan(sheet, fields);
   const el = canvas(w, h),
     ctx = el.getContext("2d");
   function draw(yaw) {
@@ -97,12 +76,8 @@ async function recordTurntable(view, fields, signal) {
     "video/webm",
   ].find((m) => MediaRecorder.isTypeSupported(m));
   if (!mime) throw new Error("No supported MP4 or WebM recorder in this browser.");
-  const fps = number(fields, "fps", 24, 1, 60, true),
-    duration = number(fields, "duration", 3, 0.25, 30);
-  const from = number(fields, "yawStart", 0, -3600, 3600),
-    to = number(fields, "yawEnd", 360, -3600, 3600);
+  const { fps, duration, from, to, count: frames } = turntablePlan(fields);
   view.draw(from);
-  const frames = Math.max(2, Math.round(duration * fps));
   let stream = view.el.captureStream(0);
   if (typeof stream.getVideoTracks()[0]?.requestFrame !== "function") {
     stream.getTracks().forEach((track) => track.stop());
@@ -149,22 +124,31 @@ export async function slice3d(node, inp, ctx) {
   const fields = node.fields || {},
     size = number(fields, "resolution", 48, 16, 128, true),
     layers = number(fields, "slices", 48, 8, 128, true);
-  const el = canvas(size * layers, size);
+  const pixels =
+    typeof document === "undefined" ? (blob) => decodeSpriteImage(blob, ctx?.signal) : imagePixels;
   const modelBlob = await readMedia(inp.model, ctx),
     bytes = new Uint8Array(await modelBlob.arrayBuffer());
   const model =
     bytes[0] === 112 && bytes[1] === 108 && bytes[2] === 121
       ? gaussianModel(bytes)
-      : await triangleModel(bytes, imagePixels);
+      : await triangleModel(bytes, (raw, mime) => pixels(new Blob([raw], { type: mime })));
   const palette = number(fields, "palette", 16, 0, 64, true);
-  const supplied =
-    palette && inp.paletteImage ? await imagePixels(await readMedia(inp.paletteImage, ctx)) : null;
+  const supplied = palette && inp.paletteImage ? await pixels(await readMedia(inp.paletteImage, ctx)) : null;
   ctx?.signal?.throwIfAborted();
   const sliced = slicePixels(
     model,
     { size, layers, axis: fields.upAxis || "auto", outline: flag(fields.outline, true), palette },
     supplied,
   );
+  if (typeof document === "undefined") {
+    const sheet = { width: sliced.width, height: sliced.height, data: sliced.rgba };
+    return {
+      sheet: await frameUrl(sheet),
+      layout: JSON.stringify(sliced.layout),
+      image: await frameUrl(softwareFrame(sheet, {}, 35)),
+    };
+  }
+  const el = canvas(size * layers, size);
   el.getContext("2d").putImageData(new ImageData(sliced.rgba, sliced.width, sliced.height), 0, 0);
   const view = stackView(el, {});
   view.draw(35);
@@ -173,12 +157,19 @@ export async function slice3d(node, inp, ctx) {
 
 export async function renderSpriteStack(node, inp, ctx) {
   if (!inp.sheet) throw new Error("Wire the Slice 3D sheet into Sprite stack render.");
-  if (typeof document === "undefined") throw new Error("Sprite stacking requires a browser with Canvas 2D.");
   const fields = node.fields || {},
-    sheet = await bitmap(await readMedia(inp.sheet, ctx));
+    blob = await readMedia(inp.sheet, ctx);
+  const yaw = number(fields, "yaw", 35, -3600, 3600);
+  if (typeof document === "undefined") {
+    const sheet = await decodeSpriteImage(blob, ctx?.signal);
+    const image = await frameUrl(softwareFrame(sheet, fields, yaw));
+    if (!flag(fields.turntable, false)) return { image };
+    return { image, video: await encodeTurntable(sheet, fields, ctx?.signal) };
+  }
+  const sheet = await bitmap(blob);
   try {
     const view = stackView(sheet, fields);
-    view.draw(number(fields, "yaw", 35, -3600, 3600));
+    view.draw(yaw);
     const image = png(view.el);
     if (!flag(fields.turntable, false)) return { image };
     return { image, video: await recordTurntable(view, fields, ctx?.signal) };
