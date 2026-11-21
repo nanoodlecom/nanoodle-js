@@ -124,6 +124,12 @@ function scrubMediaPlaceholders(n, warnings) {
   const keys = n.type === "mupload" ? MEDIA_FIELD_KEYS.concat(["model"]) : MEDIA_FIELD_KEYS;
   for (const k of keys) {
     const v = n.fields[k];
+    // Built-in editor examples store their same-origin assets as relative paths.
+    if (typeof v === "string" && /^examples\/[A-Za-z0-9_./-]+$/.test(v) && !v.includes("..")) {
+      const origin = globalThis.location?.origin;
+      n.fields[k] = (/^https?:\/\//.test(origin || "") ? origin : "https://nanoodle.com") + "/" + v;
+      continue;
+    }
     if (v == null || v === "" || (typeof v === "string" && MEDIA_URL_RE.test(v.trim()))) continue;
     const shown = typeof v === "string"
       ? `"${v.length > 60 ? v.slice(0, 57) + "…" : v}"`

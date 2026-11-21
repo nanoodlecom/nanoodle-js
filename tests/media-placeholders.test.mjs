@@ -60,6 +60,19 @@ test("loader: real media URLs (data:, https:, http:) pass through untouched", ()
   assert.deepEqual(warnings, []);
 });
 
+test("loader: built-in editor samples resolve to their public URLs", () => {
+  const { nodes, warnings } = materialize({
+    nodes: [
+      { id: "mesh", type: "mupload", fields: { model: "examples/product-shot/sample.glb" } },
+      { id: "bad", type: "upload", fields: { image: "examples/../outside.png" } },
+    ],
+    links: [],
+  });
+  assert.equal(nodes[0].fields.model, "https://nanoodle.com/examples/product-shot/sample.glb");
+  assert.equal(nodes[1].fields.image, "");
+  assert.equal(warnings.length, 1);
+});
+
 test("workflow: a placeholder-authored upload derives a REQUIRED input with no default, and run({}) fails fast", async () => {
   const wf = Workflow.fromJSON({
     nodes: [{ id: "n1", type: "upload", fields: { image: "[will be supplied via --input]" } }],
