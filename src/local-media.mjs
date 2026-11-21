@@ -190,12 +190,15 @@ export function resizePlan(sw, sh, mode, tw, th) {
 
 /* ---------- pure PNG (canvas-equivalent resize for PNG sources) ------------ */
 
+const CRC32_TABLE = Uint32Array.from({ length: 256 }, (_, i) => {
+  let c = i;
+  for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1));
+  return c;
+});
+
 function crc32(buf) {
   let c = ~0;
-  for (let i = 0; i < buf.length; i++) {
-    c ^= buf[i];
-    for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1));
-  }
+  for (let i = 0; i < buf.length; i++) c = (c >>> 8) ^ CRC32_TABLE[(c ^ buf[i]) & 0xff];
   return (~c) >>> 0;
 }
 
@@ -1007,4 +1010,4 @@ export async function muxSoundtrack(videoUrl, audioUrl, loop = false, { fetch: f
 export { MAX_FRAMES, MAX_IMAGE_DIM, MP4CAT };
 // PNG codec internals — used by the nanoodle repo's dual-engine parity harness
 // (pixel-level mask comparison + headless canvas shim). Not part of the stable API.
-export { decodePng, encodePngRgba };
+export { decodePng, encodePngRgba, crc32, pngChunk, catBytes };
