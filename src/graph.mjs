@@ -3,11 +3,11 @@ import { NanoodleError } from "./errors.mjs";
 /* Dynamic input-port families (mirrors the nanoodle app's runGraph). A wire landing on one of
    these ports — or on a port declared in NODE_TYPES[type].inputs — is a data input; a wire
    landing on ANY other port is a field override (wired prompt/system/lyrics/q/...). */
-export const IMG_PORT_RE = /^img\d+$/;      // llm vision references, decide candidates
+export const IMG_PORT_RE = /^img\d*$/;      // llm vision references, decide candidates
 export const EDIT_IMG_RE = /^image\d*$/;    // edit multi-reference: image, image2, ...
-export const VID_PORT_RE = /^vid\d+$/;
-export const CLIP_PORT_RE = /^clip\d+$/;    // combine clips
-export const REF_PORT_RE = /^ref\d+$/;      // tvideo reference images
+export const VID_PORT_RE = /^vid\d*$/;
+export const CLIP_PORT_RE = /^clip\d*$/;    // combine clips
+export const REF_PORT_RE = /^ref\d*$/;      // tvideo reference images
 export const FRAME_PORT_RE = /^frame\d+$/;  // vframes outputs
 export const MAX_FRAMES = 12;
 
