@@ -1092,6 +1092,135 @@ export async function muxSoundtrack(videoUrl, audioUrl, loop = false, { fetch: f
   });
 }
 
+/* ---------- composite (Edge Styles S3) ------------------------------------ */
+
+/**
+ * Layout geometry for composite: given source sizes, a layout
+ * (over = vertical stack, row = horizontal strip, grid = near-square
+ * cells) and a gap, return the canvas size and each image's dest rect.
+ * over/row scale every image to the shared cross-axis size; grid
+ * contain-fits each image into the largest cell, centered.
+ * Exported for tests.
+ */
+export function compositePlan(sizes, layout = "over", gap = 0) {
+  const n = sizes.length;
+  if (!n) return null;
+  const g = Math.max(0, Math.round(gap) || 0);
+  const placements = [];
+  if (layout === "row") {
+    const H = Math.max(...sizes.map((s) => s.h));
+    let x = 0;
+    for (const s of sizes) {
+      const w = Math.max(1, Math.round((s.w * H) / s.h));
+      placements.push({ x, y: 0, w, h: H });
+      x += w + g;
+    }
+    return { width: x - g, height: H, placements };
+  }
+  if (layout === "grid") {
+    const cols = Math.ceil(Math.sqrt(n));
+    const rows = Math.ceil(n / cols);
+    const cw = Math.max(...sizes.map((s) => s.w));
+    const ch = Math.max(...sizes.map((s) => s.h));
+    sizes.forEach((s, i) => {
+      const scale = Math.min(cw / s.w, ch / s.h);
+      const w = Math.max(1, Math.round(s.w * scale));
+      const h = Math.max(1, Math.round(s.h * scale));
+      const cx = (i % cols) * (cw + g);
+      const cy = Math.floor(i / cols) * (ch + g);
+      placements.push({ x: cx + Math.round((cw - w) / 2), y: cy + Math.round((ch - h) / 2), w, h });
+    });
+    return { width: cols * cw + (cols - 1) * g, height: rows * ch + (rows - 1) * g, placements };
+  }
+  // over (default): vertical stack, every image scaled to the widest width
+  const W = Math.max(...sizes.map((s) => s.w));
+  let y = 0;
+  for (const s of sizes) {
+    const h = Math.max(1, Math.round((s.h * W) / s.w));
+    placements.push({ x: 0, y, w: W, h });
+    y += h + g;
+  }
+  return { width: W, height: y - g, placements };
+}
+
+function compositeBackground(background) {
+  if (!background || background === "transparent") return null;
+  if (background === "dark") return [24, 26, 32, 255];
+  if (background === "light") return [242, 243, 245, 255];
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(background).trim());
+  if (m) {
+    const v = parseInt(m[1], 16);
+    return [(v >> 16) & 255, (v >> 8) & 255, v & 255, 255];
+  }
+  return null;
+}
+
+async function loadRgba(url, fetchFn, signal) {
+  const bytes = await urlBytes(url, fetchFn, signal);
+  if (sniffMime(bytes) === "image/png") {
+    try {
+      return await decodePng(bytes);
+    } catch { /* exotic PNG → ffmpeg */ }
+  }
+  return withTemp(async (dir) => {
+    const inPath = await writeInput(dir, "in", url, fetchFn, signal);
+    const outPath = join(dir, "out.png");
+    await runProc("ffmpeg", ["-y", "-loglevel", "error", "-i", inPath, outPath], { signal });
+    return decodePng(await readFile(outPath));
+  });
+}
+
+/**
+ * Composite 2+ images into one PNG (data URL): contact sheets, view
+ * boards, before/after stacks. Pure PNG path; non-PNG inputs decode via
+ * ffmpeg like the other local nodes. Source-over alpha compositing.
+ */
+export async function compositeImages(urls, { layout = "over", gap = 0, background = "transparent" } = {}, { fetch: fetchFn, signal } = {}) {
+  if (!urls || urls.length < 2) throw new NanoodleError("composite: wire at least two images");
+  throwIfAborted(signal);
+  const imgs = [];
+  for (const u of urls) {
+    throwIfAborted(signal);
+    imgs.push(await loadRgba(u, fetchFn, signal));
+  }
+  const plan = compositePlan(imgs.map((i) => ({ w: i.w, h: i.h })), layout, gap);
+  if (!plan || plan.width > MAX_IMAGE_DIM || plan.height > MAX_IMAGE_DIM) {
+    throw new NanoodleError("composite: result would exceed the max image dimension");
+  }
+  const out = new Uint8ClampedArray(plan.width * plan.height * 4);
+  const bg = compositeBackground(background);
+  if (bg) {
+    for (let i = 0; i < out.length; i += 4) {
+      out[i] = bg[0]; out[i + 1] = bg[1]; out[i + 2] = bg[2]; out[i + 3] = bg[3];
+    }
+  }
+  imgs.forEach((img, idx) => {
+    const p = plan.placements[idx];
+    for (let y = 0; y < p.h; y++) {
+      for (let x = 0; x < p.w; x++) {
+        const u = (x + 0.5) / p.w * img.w - 0.5;
+        const v = (y + 0.5) / p.h * img.h - 0.5;
+        if (u < -0.5 || v < -0.5 || u > img.w - 0.5 || v > img.h - 0.5) continue;
+        const sx = Math.max(0, Math.min(img.w - 1, u));
+        const sy = Math.max(0, Math.min(img.h - 1, v));
+        const pix = sampleBilinear(img.rgba, img.w, img.h, sx, sy);
+        const o = ((p.y + y) * plan.width + (p.x + x)) * 4;
+        const sa = pix[3] / 255;
+        if (sa <= 0) continue;
+        const da = out[o + 3] / 255;
+        const oa = sa + da * (1 - sa);
+        if (oa <= 0) continue;
+        out[o] = (pix[0] * sa + out[o] * da * (1 - sa)) / oa;
+        out[o + 1] = (pix[1] * sa + out[o + 1] * da * (1 - sa)) / oa;
+        out[o + 2] = (pix[2] * sa + out[o + 2] * da * (1 - sa)) / oa;
+        out[o + 3] = oa * 255;
+      }
+    }
+  });
+  const png = await encodePngRgba(plan.width, plan.height, out);
+  return dataUrlFromBytes(png, "image/png");
+}
+
 export { MAX_FRAMES, MAX_IMAGE_DIM, MP4CAT };
 // PNG codec internals — used by the nanoodle repo's dual-engine parity harness
 // (pixel-level mask comparison + headless canvas shim). Not part of the stable API.
