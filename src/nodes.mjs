@@ -6,7 +6,7 @@ import { IMG_PORT_RE, EDIT_IMG_RE, REF_PORT_RE, CLIP_PORT_RE, VID_PORT_RE, optio
 import { MEDIA_INLINE_MAX } from "./media.mjs";
 import {
   resizeCropImage, trimAudioToWav, extractAudioToWav,
-  extractVideoFrames, concatVideos, muxSoundtrack, maskToSource, fitImageInline, fitImageJpeg,
+  extractVideoFrames, concatVideos, muxSoundtrack, maskToSource, fitImageInline, fitImageJpeg, compositeImages,
 } from "./local-media.mjs";
 import { decideRun, decideImageLimits } from "./decide.mjs";
 import { cleanVoiceRun, CLEANVOICE_DEFAULT_MODEL } from "./cleanvoice.mjs";
@@ -569,6 +569,19 @@ export const RUNNERS = {
       ...media,
       onProgress: ctx && ctx.progress,
     });
+  },
+
+  async composite(n, inp, ctx) {
+    const urls = collectPorts(inp, EDIT_IMG_RE);
+    if (urls.length < 2) throw new NanoodleError("composite: wire at least two images");
+    const media = mediaOpts(ctx);
+    return {
+      image: await compositeImages(urls, {
+        layout: n.fields.layout || "over",
+        gap: parseFloat(n.fields.gap) || 0,
+        background: n.fields.background || "transparent",
+      }, media),
+    };
   },
 
   async combine(n, inp, ctx) {

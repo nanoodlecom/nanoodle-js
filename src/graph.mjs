@@ -58,6 +58,7 @@ export const NODE_TYPES = {
   vedit:   { title: "Video edit",      inputs: ["video"], outputs: [{ name: "video", type: "video" }], network: true },
   vframes: { title: "Video → frames",  inputs: ["video"], outputs: [{ name: "frame1", type: "image" }], local: true, framesOut: true }, // dynamic frame1..N
   combine: { title: "Combine videos",  inputs: [], outputs: [{ name: "video", type: "video" }], local: true },
+  composite: { title: "Composite images", inputs: [], outputs: [{ name: "image", type: "image" }], local: true }, // image, image2, … (EDIT_IMG_RE)
   soundtrack: { title: "Soundtrack",   inputs: ["video", "audio"], outputs: [{ name: "video", type: "video" }], local: true },
   lipsync: { title: "Avatar / lipsync", inputs: ["image", "audio"], outputs: [{ name: "video", type: "video" }], network: true },
   music:   { title: "Music",           inputs: [], outputs: [{ name: "audio", type: "audio" }], network: true },

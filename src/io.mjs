@@ -321,6 +321,11 @@ export const SETTING_SPECS = {
   combine: [
     { f: "dedup", label: "Trim duplicate seam frame", kind: "boolean", def: true },
   ],
+  composite: [
+    { f: "layout", label: "Layout", kind: "select", options: ["over", "row", "grid"], def: "over" },
+    { f: "gap", label: "Gap (px)", kind: "number", def: "0" },
+    { f: "background", label: "Background", kind: "select", options: ["transparent", "dark", "light"], def: "transparent" },
+  ],
   soundtrack: [
     { f: "loop", label: "Loop audio to fill video", kind: "boolean", def: false },
   ],
