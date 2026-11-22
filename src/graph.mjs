@@ -59,6 +59,7 @@ export const NODE_TYPES = {
   vframes: { title: "Video → frames",  inputs: ["video"], outputs: [{ name: "frame1", type: "image" }], local: true, framesOut: true }, // dynamic frame1..N
   combine: { title: "Combine videos",  inputs: [], outputs: [{ name: "video", type: "video" }], local: true },
   soundtrack: { title: "Soundtrack",   inputs: ["video", "audio"], outputs: [{ name: "video", type: "video" }], local: true },
+  depthshift:{ title: "Depth Shift",   inputs: ["image", "depth"], outputs: [{ name: "video", type: "video" }], local: true },
   lipsync: { title: "Avatar / lipsync", inputs: ["image", "audio"], outputs: [{ name: "video", type: "video" }], network: true },
   music:   { title: "Music",           inputs: [], outputs: [{ name: "audio", type: "audio" }], network: true },
   remix:   { title: "Remix audio",     inputs: ["audio"], outputs: [{ name: "audio", type: "audio" }], network: true },

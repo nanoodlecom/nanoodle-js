@@ -324,6 +324,12 @@ export const SETTING_SPECS = {
   soundtrack: [
     { f: "loop", label: "Loop audio to fill video", kind: "boolean", def: false },
   ],
+  depthshift: [
+    { f: "shiftX", label: "Horizontal shift (px at nearest depth)", kind: "number", def: "24" },
+    { f: "shiftY", label: "Vertical shift (px at nearest depth)", kind: "number", def: "0" },
+    { f: "frames", label: "Frames (one seamless loop)", kind: "number", def: "24" },
+    { f: "fps", label: "FPS", kind: "number", def: "24" },
+  ],
   trim: [
     { f: "start", label: "Start (s)", kind: "number", def: "0" },
     { f: "length", label: "Length (s)", kind: "number", def: "30" },

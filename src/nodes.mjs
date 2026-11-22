@@ -7,6 +7,7 @@ import { MEDIA_INLINE_MAX } from "./media.mjs";
 import {
   resizeCropImage, trimAudioToWav, extractAudioToWav,
   extractVideoFrames, concatVideos, muxSoundtrack, maskToSource, fitImageInline, fitImageJpeg,
+  depthShiftVideo,
 } from "./local-media.mjs";
 import { decideRun, decideImageLimits } from "./decide.mjs";
 import { cleanVoiceRun, CLEANVOICE_DEFAULT_MODEL } from "./cleanvoice.mjs";
@@ -598,6 +599,19 @@ export const RUNNERS = {
     const loop = n.fields.loop === true || n.fields.loop === "true" || n.fields.loop === 1 || n.fields.loop === "1";
     const media = mediaOpts(ctx);
     return { video: await muxSoundtrack(inp.video, inp.audio, loop, { ...media, onProgress: ctx && ctx.progress }) };
+  },
+
+  async depthshift(n, inp, ctx) {
+    if (!inp.image) throw new NanoodleError("no image input");
+    if (!inp.depth) throw new NanoodleError("no depth input — wire a depth map (e.g. model3d's depth port from MoGe)");
+    const media = mediaOpts(ctx);
+    const video = await depthShiftVideo(inp.image, inp.depth, {
+      frames: +n.fields.frames || 24,
+      shiftX: +n.fields.shiftX || 0,
+      shiftY: +n.fields.shiftY || 0,
+      fps: +n.fields.fps || 24,
+    }, { ...media, onProgress: ctx && ctx.progress });
+    return { video };
   },
 
   async trim(n, inp, ctx) {

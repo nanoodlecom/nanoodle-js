@@ -1007,6 +1007,83 @@ export async function muxSoundtrack(videoUrl, audioUrl, loop = false, { fetch: f
   });
 }
 
+async function loadRgba(url, fetchFn, signal) {
+  const bytes = await urlBytes(url, fetchFn, signal);
+  if (sniffMime(bytes) === "image/png") {
+    try {
+      return await decodePng(bytes);
+    } catch { /* exotic PNG → ffmpeg */ }
+  }
+  return withTemp(async (dir) => {
+    const inPath = await writeInput(dir, "in", url, fetchFn, signal);
+    const outPath = join(dir, "out.png");
+    await runProc("ffmpeg", ["-y", "-loglevel", "error", "-i", inPath, outPath], { signal });
+    return decodePng(await readFile(outPath));
+  });
+}
+
+/**
+ * One depth-shifted frame (pure): every output pixel samples the source
+ * offset by -(depthNorm × shift), where depthNorm is the depth map's
+ * luma mapped to [-1, 1] — bright (near) content travels the full shift,
+ * dark (far) content counter-travels, mid-gray stays. Bilinear sampling,
+ * edges clamp. A specified pixel loop (not ffmpeg's `displace` filter,
+ * whose measured gain is ~1.19× the map offset with a constant sampling
+ * bias — calibrated 2026-11-21) so "shiftX px" means exactly shiftX px
+ * and every surface porting this loop produces the same frames.
+ */
+export function depthShiftFrame(src, depth, shiftX, shiftY) {
+  const w = src.w, h = src.h;
+  const out = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const dx = Math.min(depth.w - 1, Math.floor(x * depth.w / w));
+      const dy = Math.min(depth.h - 1, Math.floor(y * depth.h / h));
+      const di = (dy * depth.w + dx) * 4;
+      const lum = (depth.rgba[di] * 299 + depth.rgba[di + 1] * 587 + depth.rgba[di + 2] * 114) / 1000;
+      const d = (lum / 255) * 2 - 1;
+      const sx = Math.max(0, Math.min(w - 1, x - d * shiftX));
+      const sy = Math.max(0, Math.min(h - 1, y - d * shiftY));
+      const pix = sampleBilinear(src.rgba, w, h, sx, sy);
+      const o = (y * w + x) * 4;
+      out[o] = pix[0]; out[o + 1] = pix[1]; out[o + 2] = pix[2]; out[o + 3] = pix[3];
+    }
+  }
+  return { w, h, rgba: out };
+}
+
+/**
+ * Depth-Slice Parallax (Edge Styles S6): a seamless looping video where
+ * the virtual camera sways on a sine ramp and each pixel travels by its
+ * depth — near content sweeps ±shiftX/shiftY px while far content
+ * counter-sweeps. Frames are PNG-encoded per frame and muxed with
+ * ffmpeg (libx264), like the other local video nodes.
+ */
+export async function depthShiftVideo(imageUrl, depthUrl, opts = {}, { fetch: fetchFn, signal, onProgress } = {}) {
+  const frames = Math.max(2, Math.min(240, Math.round(opts.frames || 24)));
+  const fps = Math.max(1, Math.min(60, Math.round(opts.fps || 24)));
+  const shiftX = Math.max(-512, Math.min(512, +opts.shiftX || 0));
+  const shiftY = Math.max(-512, Math.min(512, +opts.shiftY || 0));
+  if (!shiftX && !shiftY) throw new NanoodleError("depthshift needs a non-zero shiftX or shiftY");
+  throwIfAborted(signal);
+  const src = await loadRgba(imageUrl, fetchFn, signal);
+  const depth = await loadRgba(depthUrl, fetchFn, signal);
+  return withTemp(async (dir) => {
+    for (let t = 0; t < frames; t++) {
+      throwIfAborted(signal);
+      const s = Math.sin((t / frames) * Math.PI * 2);
+      const frame = depthShiftFrame(src, depth, shiftX * s, shiftY * s);
+      await writeFile(join(dir, "f" + String(t).padStart(4, "0") + ".png"), await encodePngRgba(frame.w, frame.h, frame.rgba));
+      if (onProgress) onProgress({ frame: t + 1, frames });
+    }
+    const outPath = join(dir, "out.mp4");
+    await runProc("ffmpeg", ["-y", "-loglevel", "error", "-framerate", String(fps), "-i", join(dir, "f%04d.png"),
+      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", outPath], { signal });
+    const bytes = await readFile(outPath);
+    return dataUrlFromBytes(bytes, "video/mp4");
+  });
+}
+
 export { MAX_FRAMES, MAX_IMAGE_DIM, MP4CAT };
 // PNG codec internals — used by the nanoodle repo's dual-engine parity harness
 // (pixel-level mask comparison + headless canvas shim). Not part of the stable API.
