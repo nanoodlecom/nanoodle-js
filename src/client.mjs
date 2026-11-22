@@ -1,5 +1,6 @@
 import { imageModelOpts } from "./image-options.mjs";
 import { NanoodleError } from "./errors.mjs";
+import { throwIfAborted } from "./deadline.mjs";
 import { b64ImageMime, bytesToDataUrl, dataUrlBytes, downloadMedia, sniffMime, MEDIA_INLINE_MAX } from "./media.mjs";
 import { assertPaymentOption, parseNanoInvoice, looksLikeResult } from "./x402.mjs";
 
@@ -145,12 +146,12 @@ export class NanoClient {
    * at most once; a second 402 after settling is an error, never a second send.
    */
   async _paidFetch(url, init, signal) {
-    if (signal && signal.aborted) throw abortError(signal.reason);
+    throwIfAborted(signal);
     const r = await this.fetch(url, init);
     if (r.status !== 402 || !this.payment || this.apiKey) return r;
     const settled = await this._settle402(r, signal);
     if (settled.response) return settled.response; // complete replayed the stored request
-    if (signal && signal.aborted) throw abortError(signal.reason);
+    throwIfAborted(signal);
     const r2 = await this.fetch(url, { ...init, headers: { ...init.headers, "x-x402-payment-id": settled.paymentId } });
     if (!r2.ok) throw await paidResponseError(r2, settled.paymentId, "replay");
     return r2;
@@ -165,7 +166,7 @@ export class NanoClient {
         "payment required, but the 402 response offered no usable Nano option" +
         (body ? " — " + JSON.stringify(body).slice(0, 200) : ""), { code: "x402", status: 402 });
     }
-    if (signal && signal.aborted) throw abortError(signal.reason);
+    throwIfAborted(signal);
     if (invoice.expiresAt && invoice.expiresAt <= Date.now()) {
       throw new NanoodleError("payment window expired before payment (" + invoice.paymentId + ", to " + invoice.payTo + ") — request a fresh invoice", { code: "x402-expired", paymentId: invoice.paymentId });
     }
@@ -173,7 +174,7 @@ export class NanoClient {
     // The complete endpoint doubles as the poll: 402 = not seen on-chain yet.
     const deadline = invoice.expiresAt || Date.now() + 15 * 60 * 1000;
     while (true) {
-      if (signal && signal.aborted) throw abortError(signal.reason);
+      throwIfAborted(signal);
       const cr = await this.fetch(invoice.completeUrl, {
         method: "POST", headers: { "Content-Type": "application/json", "x-x402": "true" }, body: "{}", signal,
       });
@@ -256,6 +257,7 @@ export class NanoClient {
       if (ac.signal.aborted) rejectAbort();
     });
     const work = Promise.resolve().then(async () => {
+      throwIfAborted(signal);
       if (ac.signal.aborted) throw ac.signal.reason;
       const r = await this._get(path, ac.signal);
       if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
@@ -423,7 +425,7 @@ export class NanoClient {
         }
         if (["FAILED", "ERROR", "CANCELED", "CANCELLED", "CONTENT_POLICY_VIOLATION"].includes(st)) {
           const why = (s.data && s.data.error) || st;
-          throw new NanoodleError((is3d ? "3D failed: " : "video failed: ") + why);
+          throw new NanoodleError((is3d ? "3D failed: " : "video failed: ") + why, { code: "job-failed" });
         }
       }
       const label = is3d ? "3D" : "video";
@@ -509,7 +511,7 @@ export class NanoClient {
         return url;
       }
       if (["error", "failed", "canceled", "cancelled", "content_policy_violation"].includes(st)) {
-        throw new NanoodleError("audio failed: " + (s.error || s.message || st));
+        throw new NanoodleError("audio failed: " + (s.error || s.message || st), { code: "job-failed" });
       }
     }
     throw new NanoodleError(`audio timed out (${Math.round(this.timeouts.audio / 1000)}s) — the job may still be running on NanoGPT's side`, { code: "timeout" });
@@ -702,6 +704,7 @@ export async function resolveProviderMediaUrl(url, { baseUrl, fetch: fetchImpl, 
   if (!doFetch) throw new NanoodleError("couldn't fetch provider media: no fetch available");
   let current = start.href;
   for (let hop = 0; hop < 5; hop++) {
+    throwIfAborted(signal);
     let r;
     try {
       r = await doFetch(current, {

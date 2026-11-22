@@ -1,4 +1,5 @@
 import { NanoodleError, RunError, UnsupportedNodeError } from "./errors.mjs";
+import { abortReason, enforceDeadline, startDeadline, throwIfAborted } from "./deadline.mjs";
 import { NODE_TYPES, displayName, isInputPort, lockedNode, materialize, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
 import { endpointOutPort } from "./endpoint.mjs";
 import { MEDIA_INPUT_KINDS, deriveInputs, deriveOutputs, deriveSettings, resolveInputKey, resolveSettingKey } from "./io.mjs";
@@ -64,6 +65,7 @@ async function publishNodeMedia(client, node, out, signal) {
     if (typeof value === "string") {
       if (!value) return value;
       if (cache.has(value)) return cache.get(value);
+      throwIfAborted(signal);
       const resolved = await client.resolveContentUrl(value, { signal });
       cache.set(value, resolved);
       return resolved;
@@ -91,24 +93,16 @@ async function publishNodeMedia(client, node, out, signal) {
   return copy || out;
 }
 
-function abortReason(signal) {
-  const r = signal && signal.reason;
-  if (r instanceof Error) return r;
-  return new NanoodleError(r != null ? String(r) : "run aborted", { code: "aborted" });
-}
-
-function throwIfAborted(signal) {
-  if (signal && signal.aborted) throw abortReason(signal);
-}
-
 /** Bound an async stage even when injected I/O ignores AbortSignal. Always observe late rejection. */
 function withSignal(work, signal) {
   return new Promise((resolve, reject) => {
     const onAbort = () => reject(abortReason(signal));
     signal.addEventListener("abort", onAbort, { once: true });
-    Promise.resolve().then(() => {
+    Promise.resolve().then(async () => {
       throwIfAborted(signal);
-      return work();
+      const value = await work();
+      throwIfAborted(signal);
+      return value;
     }).then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
   });
 }
@@ -347,7 +341,7 @@ export class Workflow {
       else signal.addEventListener("abort", onOuterAbort, { once: true });
     }
     if (timeoutMs) {
-      timer = setTimeout(() => ac.abort(new NanoodleError(`run timed out after ${timeoutMs}ms`, { code: "timeout" })), timeoutMs);
+      timer = startDeadline(ac, timeoutMs, `run timed out after ${timeoutMs}ms`);
     }
 
     const emit = (evt) => { if (onProgress) { try { onProgress(evt); } catch { /* listener errors never kill the run */ } } };
@@ -363,19 +357,24 @@ export class Workflow {
     let runSettled = false;
     const frozen = (rec) => runSettled || rec.final === true;
     const ctxFor = (node, rec, nodeSignal = ac.signal) => {
+      const report = (evt) => {
+        if (frozen(rec)) return;
+        emit(evt);
+        throwIfAborted(nodeSignal);
+      };
       const onCost = (c) => {
         if (!c || frozen(rec)) return;
         if (c.usd != null) { rec.costUsd = (rec.costUsd || 0) + c.usd; cost.total += c.usd; }
         else cost.exact = false;
         if (c.balance != null) cost.balance = c.balance;
       };
-      const onPoll = (info) => frozen(rec) ? undefined : emit({ type: "poll", nodeId: node.id, name: displayName(node), ...info });
+      const onPoll = (info) => report({ type: "poll", nodeId: node.id, name: displayName(node), ...info });
       const onRunId = (job) => {
         if (frozen(rec)) return;
         const runId = job && typeof job === "object" ? (job.runId || job.id) : job;
         if (runId == null) return;
         rec.runId = runId;
-        emit({ type: "node-run-id", nodeId: node.id, name: displayName(node), runId });
+        report({ type: "node-run-id", nodeId: node.id, name: displayName(node), runId });
       };
       const io = { onCost, onPoll, onRunId, signal: nodeSignal };
       return {
@@ -390,7 +389,7 @@ export class Workflow {
         fetch: mediaFetch,
         signal: nodeSignal,
         catalog: this.catalog,
-        progress: (msg) => frozen(rec) ? undefined : emit({ type: "node-progress", nodeId: node.id, name: displayName(node), message: msg }),
+        progress: (msg) => report({ type: "node-progress", nodeId: node.id, name: displayName(node), message: msg }),
       };
     };
 
@@ -406,6 +405,7 @@ export class Workflow {
     const execNode = async (n) => {
       const rec = nodesRec[n.id];
       let nodeTimer = null, unlinkNode = null;
+      let nodeSignal = ac.signal;
       try {
         throwIfAborted(ac.signal);
         let inbound = graph.links.filter((l) => l.to.node === n.id);
@@ -476,29 +476,28 @@ export class Workflow {
         if (n.type === "decide" && fields.branch !== n.fields.branch) fields = { ...fields, branch: n.fields.branch };
         const fit = withFittedPrompt(n, fields, { catalog: this.catalog, learned: this._promptCaps });
         fields = fit.fields;
-        rec.started = true;
-        emit({ type: "node-start", nodeId: n.id, name: displayName(n) });
-        // A fitted prompt changed what this run pays for — never silent, even headless.
-        if (fit.trimmed) {
-          emit({ type: "prompt-trimmed", nodeId: n.id, name: displayName(n), ...fit.trimmed });
-          warnGraph(`node ${n.id}: prompt trimmed ${fit.trimmed.from} → ${fit.trimmed.to} characters — ` +
-            `${fields.model} rejects prompts over ${fit.trimmed.cap}`);
-        }
         throwIfAborted(ac.signal);
         const t0 = Date.now();
-        // The node deadline covers the runner AND publication of provider media.
-        // Race every active stage with cancellation so an injected fetch cannot hold the run open.
+        // The node deadline covers progress callbacks, the runner and media publication.
         const timeoutMs = Number(fields.timeoutMs);
-        let nodeSignal = ac.signal;
         if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
           const nac = new AbortController();
           const onRunAbort = () => nac.abort(ac.signal.reason);
           ac.signal.addEventListener("abort", onRunAbort, { once: true });
           unlinkNode = () => ac.signal.removeEventListener("abort", onRunAbort);
           nodeSignal = nac.signal;
-          nodeTimer = setTimeout(() => nac.abort(new NanoodleError(
-            `node timed out after ${timeoutMs}ms`, { code: "timeout" })), timeoutMs);
+          nodeTimer = startDeadline(nac, timeoutMs, `node timed out after ${timeoutMs}ms`, ac.signal);
         }
+        rec.started = true;
+        emit({ type: "node-start", nodeId: n.id, name: displayName(n) });
+        throwIfAborted(nodeSignal);
+        // A fitted prompt changed what this run pays for — never silent, even headless.
+        if (fit.trimmed) {
+          emit({ type: "prompt-trimmed", nodeId: n.id, name: displayName(n), ...fit.trimmed });
+          warnGraph(`node ${n.id}: prompt trimmed ${fit.trimmed.from} → ${fit.trimmed.to} characters — ` +
+            `${fields.model} rejects prompts over ${fit.trimmed.cap}`);
+        }
+        throwIfAborted(nodeSignal);
         const nodeForRun = { ...n, fields };
         const out = await withSignal(async () => {
           const rawOut = await RUNNERS[n.type](nodeForRun, inp, ctxFor(n, rec, nodeSignal));
@@ -506,7 +505,6 @@ export class Workflow {
           return publishNodeMedia(this.client, nodeForRun, rawOut, nodeSignal);
         }, nodeSignal);
         throwIfAborted(nodeSignal);
-        throwIfAborted(ac.signal);
         rec.final = true;
         rec.status = "done";
         rec.out = out;
@@ -516,6 +514,9 @@ export class Workflow {
       } catch (e) {
         rec.final = true;
         if (e instanceof GateSkip) throw e;
+        enforceDeadline(nodeSignal);
+        if (ac.signal.aborted) e = abortReason(ac.signal);
+        else if (nodeSignal.aborted) e = abortReason(nodeSignal);
         // ⚖️ Decide gate answered no: a settled, billed decision — not an error. Downstream skips.
         if (e && e.gate === true && !ac.signal.aborted) {
           rec.status = "gated";
@@ -598,9 +599,12 @@ export class Workflow {
       value: this.outputs.filter((o) => nodesRec[o.nodeId] && nodesRec[o.nodeId].gatedBy)
         .map((o) => ({ key: o.key, nodeId: o.nodeId, gateName: displayName(byId.get(nodesRec[o.nodeId].gatedBy)) })),
     });
+    const failedSinks = this.outputs.filter((o) => nodesRec[o.nodeId] && nodesRec[o.nodeId].status === "error");
+    const skippedSinks = this.outputs.filter((o) => nodesRec[o.nodeId] && nodesRec[o.nodeId].skippedOnError);
 
     // timeout/abort must fail the run even when local media finished after the deadline
     // (or nodes never observed the signal). Prefer the abort reason when present.
+    enforceDeadline(ac.signal);
     if (ac.signal.aborted) {
       const reason = abortReason(ac.signal);
       const msg = reason.message || "run aborted";
@@ -618,7 +622,6 @@ export class Workflow {
       throw new RunError(msg, result, reason.code ? { code: reason.code } : {});
     }
 
-    const failedSinks = this.outputs.filter((o) => nodesRec[o.nodeId] && nodesRec[o.nodeId].status === "error");
     if (failedSinks.length) {
       let detail = failedSinks.map((o) => `"${o.key}": ${nodesRec[o.nodeId].error}`).join("; ");
       // "upstream failed: X" only names the sink's neighbor — name the node(s) that actually broke
@@ -630,7 +633,6 @@ export class Workflow {
       throw new RunError("run failed — " + detail, result);
     }
     // onError:"skip" never makes a run succeed with nothing: if every output skipped, fail.
-    const skippedSinks = this.outputs.filter((o) => nodesRec[o.nodeId] && nodesRec[o.nodeId].skippedOnError);
     if (this.outputs.length && skippedSinks.length === this.outputs.length) {
       throw new RunError("run failed — every output was skipped after failing: " +
         skippedSinks.map((o) => `"${o.key}": ${nodesRec[o.nodeId].error}`).join("; "), result);

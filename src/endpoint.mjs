@@ -6,6 +6,7 @@
  * a public host must be https.
  */
 import { NanoodleError } from "./errors.mjs";
+import { throwIfAborted } from "./deadline.mjs";
 import { b64ImageMime, bytesToDataUrl } from "./media.mjs";
 
 export const ENDPOINT_DEF_URL = "http://127.0.0.1:8787/v1/chat/completions";
@@ -392,9 +393,11 @@ export async function runEndpoint(n, inp, io = {}) {
   const doFetch = io.fetch || globalThis.fetch;
   let r;
   try {
-    r = await doFetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: io.signal });
+    const payload = JSON.stringify(body);
+    throwIfAborted(io.signal);
+    r = await doFetch(url, { method: "POST", headers, body: payload, signal: io.signal });
   } catch (e) {
-    if (e && e.name === "AbortError") throw e;
+    if (io.signal?.aborted || e?.name === "AbortError") throw e;
     throw new NanoodleError(endpointFetchError(e, url));
   }
   if (!r.ok) {
