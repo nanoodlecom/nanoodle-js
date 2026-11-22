@@ -16,6 +16,7 @@
 import { deflate } from "./zlib.mjs";
 import { decodePngPixels } from "./png-decoder.mjs";
 import { NanoodleError } from "./errors.mjs";
+import { abortReason, throwIfAborted } from "./deadline.mjs";
 import { bytesToDataUrl, dataUrlBytes, downloadMedia, sniffMime, MEDIA_INLINE_MAX } from "./media.mjs";
 import { MP4CAT } from "./mp4cat.mjs";
 
@@ -44,20 +45,12 @@ async function ensureNodeDeps() {
   tmpdir = os.tmpdir; join = path.join;
 }
 
-function abortError(signal) {
-  const r = signal && signal.reason;
-  if (r instanceof Error) return r;
-  return new NanoodleError(r != null ? String(r) : "run aborted", { code: "aborted" });
-}
-
-export function throwIfAborted(signal) {
-  if (signal && signal.aborted) throw abortError(signal);
-}
+export { throwIfAborted };
 
 async function runProc(bin, args, { timeoutMs = 120000, signal } = {}) {
   await ensureNodeDeps();
+  throwIfAborted(signal);
   return new Promise((resolve, reject) => {
-    if (signal && signal.aborted) return reject(abortError(signal));
     const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0);
     let settled = false;
@@ -74,7 +67,7 @@ async function runProc(bin, args, { timeoutMs = 120000, signal } = {}) {
     }, timeoutMs);
     const onAbort = () => {
       child.kill("SIGKILL");
-      finish(() => reject(abortError(signal)));
+      finish(() => reject(abortReason(signal)));
     };
     if (signal) signal.addEventListener("abort", onAbort, { once: true });
     child.stdout.on("data", (d) => {
@@ -765,7 +758,7 @@ async function trimAudioToWavFfmpeg(url, start, len, rate = 16000, { fetch: fetc
       dur = parseFloat(String(pr.stdout).trim());
     } catch (e) {
       if (e instanceof NanoodleError && (e.code === "aborted" || e.code === "timeout" || /timed out|aborted/i.test(e.message || ""))) throw e;
-      if (signal && signal.aborted) throw abortError(signal);
+      throwIfAborted(signal);
       /* some containers lack duration; ffmpeg -t still works */
     }
 
@@ -977,7 +970,7 @@ export async function muxSoundtrack(videoUrl, audioUrl, loop = false, { fetch: f
       vdur = parseFloat(String(pr.stdout).trim());
     } catch (e) {
       if (e instanceof NanoodleError && (e.code === "aborted" || e.code === "timeout" || /timed out|aborted/i.test(e.message || ""))) throw e;
-      if (signal && signal.aborted) throw abortError(signal);
+      throwIfAborted(signal);
       /* optional */
     }
 

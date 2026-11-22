@@ -1,4 +1,5 @@
 import { NanoodleError } from "./errors.mjs";
+import { enforceDeadline } from "./deadline.mjs";
 
 /** NanoGPT's edge rejects request bodies over ~4.5 MB; media rides inline as base64 (no upload endpoint). */
 export const MEDIA_INLINE_MAX = 4.4 * 1024 * 1024;
@@ -135,6 +136,7 @@ export function dataUrlBytes(url) {
  */
 export async function downloadMedia(url, { fetch: fetchFn = globalThis.fetch, signal, what = "media" } = {}) {
   const checkAbort = () => {
+    enforceDeadline(signal);
     if (signal && signal.aborted) throw signal.reason || new NanoodleError("download aborted", { code: "aborted" });
   };
   for (let attempt = 1; attempt <= 3; attempt++) {

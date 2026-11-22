@@ -6,6 +6,64 @@ import { NanoClient } from '../src/client.mjs';
 const graph = (fields = {}) => ({ nodes: [{ id: 'n', type: 'image', fields: { prompt: 'hi', model: 'test', ...fields } }], links: [] });
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
+for (const scope of ['run', 'node']) {
+  test(`${scope} deadline prevents submission after synchronous progress blocks the timer`, async (t) => {
+    let now = 0, requests = 0;
+    t.mock.method(performance, 'now', () => now);
+    const wf = Workflow.fromJSON(graph(scope === 'node' ? { timeoutMs: 10 } : {}), { apiKey: 'k', fetch: async () => {
+      requests++;
+      return json({ data: [{ url: 'https://cdn.invalid/image.png' }] });
+    } });
+    await assert.rejects(wf.run({}, {
+      ...(scope === 'run' ? { timeoutMs: 10 } : {}),
+      onProgress: e => { if (e.type === 'node-start') now += 60; },
+    }), e => {
+      assert.ok(e instanceof RunError);
+      assert.equal(e.result.nodes.n.status, 'error');
+      assert.equal(e.result.errors[0].code, 'timeout');
+      assert.match(e.message, new RegExp(`${scope} timed out after 10ms`));
+      return true;
+    });
+    assert.equal(requests, 0);
+  });
+}
+
+test('a response fulfilled after the deadline retains billing but cannot publish outputs', async (t) => {
+  let now = 0;
+  const requests = [];
+  t.mock.method(performance, 'now', () => now);
+  const wf = Workflow.fromJSON(graph(), { apiKey: 'k', fetch: async url => {
+    requests.push(url);
+    if (!String(url).includes('/generations')) return new Response(new Uint8Array([1]), { headers: { 'content-type': 'image/png' } });
+    return { ok: true, headers: new Headers(), json: async () => {
+      now += 60;
+      return { data: [{ url: '/api/images/content?job=1' }], cost: 0.2 };
+    } };
+  } });
+  await assert.rejects(wf.run({}, { timeoutMs: 10 }), e => {
+    assert.ok(e instanceof RunError);
+    assert.equal(e.code, 'timeout');
+    assert.deepEqual(e.result.outputs, {});
+    assert.equal(e.result.costUsd, 0.2);
+    return true;
+  });
+  assert.equal(requests.length, 1, 'an expired run must not fetch provider media');
+});
+
+test('an invoice decoded after the deadline never reaches the payment callback', async (t) => {
+  let now = 0, payments = 0;
+  t.mock.method(performance, 'now', () => now);
+  const wf = Workflow.fromJSON(graph(), { apiKey: null, payment: async () => { payments++; }, fetch: async url => {
+    if (String(url).includes('/complete/')) return json({ data: [{ url: 'https://cdn.invalid/image.png' }] });
+    return { status: 402, json: async () => {
+      now += 60;
+      return { accepts: [{ scheme: 'nano', payTo: 'nano_test', paymentId: 'p', amount: '1' }] };
+    } };
+  } });
+  await assert.rejects(wf.run({}, { timeoutMs: 10 }), e => e instanceof RunError && e.code === 'timeout');
+  assert.equal(payments, 0);
+});
+
 for (const mode of ['run timeout', 'outer abort', 'node timeout during publication']) {
   test(`${mode} settles even when injected I/O ignores cancellation`, { timeout: 1500 }, async () => {
     let release, started;
@@ -80,7 +138,9 @@ for (const kind of ['video', 'audio']) {
       if (init.method === 'POST') return json({ runId: 'job' });
       polls++; return json({ status: 'cancelled' });
     } });
-    await assert.rejects(kind === 'video' ? client.video('test', 'hi') : client.audio('test', 'hi'), /failed: cancelled/i);
+    await assert.rejects(kind === 'video' ? client.video('test', 'hi') : client.audio('test', 'hi'), {
+      code: 'job-failed', message: /failed: cancelled/i,
+    });
     assert.equal(polls, 1);
   });
 }
