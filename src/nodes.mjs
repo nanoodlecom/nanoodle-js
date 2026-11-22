@@ -379,6 +379,28 @@ function modelRefSpec(model, ctx) {
   return { key, cap: cap != null ? cap : refMaxFor(model, m.pricing) };
 }
 
+/**
+ * Multi-view spec for a 3D model: {key, cap, min} or null. Catalog-driven
+ * like modelRefSpec — Tripo's line declares `images` (array, 2–4, "use
+ * instead of image_url", ordered front/left/back/right), Hyper3D declares
+ * `image_urls` (1–5). No catalog entry or no declared array param → null:
+ * for 3D we never guess a param name.
+ */
+function model3dViewSpec(model, ctx) {
+  const m = catItem(ctx && ctx.catalog, "model3d", model);
+  if (!m) return null;
+  const sp = m.supported_parameters || {}, pp = sp.parameters || sp;
+  const key = ["images", "image_urls"].find((k) => k in pp);
+  if (!key) return null;
+  const d = pp[key];
+  let cap = 4, min = 2;
+  if (d && typeof d === "object") {
+    if (+d.maxItems > 0) cap = +d.maxItems;
+    if (+d.minItems > 0) min = +d.minItems;
+  }
+  return { key, cap, min };
+}
+
 /** Attach wired refs to video opts under the model's real key, clamped to its cap (twin of the app runtimes: say so, never silently discard). */
 function applyRefs(opts, refs, n, ctx) {
   if (!refs.length) return;
@@ -862,10 +884,35 @@ export const RUNNERS = {
     if (image) image = await fitImage(image, ctx, "source image");
     const extra = { ...(n.fields.modelOpts || {}) };
     if (mesh) extra.model_url = mesh; // the wire wins over a static modelOpts copy
+    // Multi-view (Edge Styles S4): image2… wires are ordered views for the
+    // models whose catalog declares an images/image_urls array. The array
+    // REPLACES the single image (the catalog's own "use instead of"
+    // wording; verified live on tripo3d/v2.5). Below the declared minimum
+    // or on a single-image model the extra wires are ignored, with a note.
+    let singleImage = image || null;
+    if (!mesh && mods.image) {
+      const views = collectPorts(inp, EDIT_IMG_RE).filter(Boolean);
+      if (views.length > 1) {
+        const spec = model3dViewSpec(model, ctx);
+        if (spec && views.length >= spec.min) {
+          const fitted = [];
+          for (const v of views.slice(0, spec.cap)) fitted.push(await fitImage(v, ctx, "view image"));
+          extra[spec.key] = fitted;
+          singleImage = null;
+          if (views.length > spec.cap && ctx && ctx.progress) {
+            ctx.progress("dropped " + (views.length - spec.cap) + " view image(s) over this model's limit of " + spec.cap);
+          }
+        } else if (ctx && ctx.progress) {
+          ctx.progress(spec
+            ? "this model needs at least " + spec.min + " views for multi-view — using the first image only"
+            : "extra view image(s) ignored — this model takes a single image");
+        }
+      }
+    }
     const url = await ctx.video(model, mods.text ? prompt : "", {
       extra,
       mediaKind: "model3d",
-    }, image || null);
+    }, singleImage);
     return { model: url };
   },
 
