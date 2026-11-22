@@ -20,7 +20,7 @@ import { abortReason, throwIfAborted } from "./deadline.mjs";
 import { bytesToDataUrl, dataUrlBytes, downloadMedia, sniffMime, MEDIA_INLINE_MAX } from "./media.mjs";
 import { MP4CAT } from "./mp4cat.mjs";
 
-const MAX_FRAMES = 12;
+const MAX_FRAMES = 48;
 /** Refuse pure PNG decode above this edge (memory guard; canvas-class bound). */
 const MAX_IMAGE_DIM = 8192;
 /** Refuse pure WAV decode above this many interleaved samples (~17 min mono @ 48 kHz). */
@@ -802,11 +802,14 @@ export async function extractAudioToWav(url, start, len, rate = 16000, opts = {}
 
 /* ---------- vframes (ffmpeg — needs a video decoder) ----------------------- */
 
-export async function extractVideoFrames(url, { count = 1, gap = 0.5, dir = "end", fetch: fetchFn, onProgress, signal } = {}) {
+export async function extractVideoFrames(url, { count = 1, gap = 0.5, dir = "end", stride = 1, startSec, endSec, fetch: fetchFn, onProgress, signal } = {}) {
   throwIfAborted(signal);
   const n = Math.max(1, Math.min(MAX_FRAMES, parseInt(count, 10) || 1));
   const stepSec = Number.isFinite(Number(gap)) ? Math.max(0, Number(gap)) : 0.5;
   const fromEnd = (dir || "end") === "end";
+  const strideN = Math.max(1, parseInt(stride, 10) || 1);
+  const rangeStart = startSec != null && startSec !== "" && Number.isFinite(Number(startSec)) ? Math.max(0, Number(startSec)) : null;
+  const rangeEnd = endSec != null && endSec !== "" && Number.isFinite(Number(endSec)) ? Math.max(0, Number(endSec)) : null;
 
   return withTemp(async (dir) => {
     const inPath = await writeInput(dir, "in", url, fetchFn, signal);
@@ -838,12 +841,35 @@ export async function extractVideoFrames(url, { count = 1, gap = 0.5, dir = "end
         "-y", "-ss", String(t), "-i", inPath, "-frames:v", "1", "-q:v", "2", framePath,
       ], { signal });
     };
+    // Range (S5): extraction is bounded to [lo, hi] seconds when set.
+    const lo = rangeStart != null ? Math.min(rangeStart, dur) : 0;
+    const hi = rangeEnd != null ? Math.min(rangeEnd, dur) : dur;
+    // Stride mode (S5): true frame-index selection (indices firstIdx +
+    // i*stride) when the rate is probed; without a rate, stride widens
+    // the time gap instead — same spacing, coarser anchor.
+    const indexMode = strideN > 1 && fps > 0;
+    const lastIdx = Math.max(0, Math.floor(Math.max(0, hi - EPS) * fps));
+    const firstIdx = Math.min(lastIdx, Math.round(lo * fps));
+
     const out = {};
     for (let i = 0; i < n; i++) {
       throwIfAborted(signal);
       if (onProgress) onProgress(`extracting frame ${i + 1}/${n}…`);
-      let t = fromEnd ? (dur - EPS - i * stepSec) : (i * stepSec);
-      t = Math.max(0, Math.min(Math.max(0, dur - EPS), t));
+      let t;
+      if (indexMode) {
+        const idx = fromEnd ? lastIdx - i * strideN : firstIdx + i * strideN;
+        // Seek to the frame's OWN pts: input -ss drops frames with an
+        // earlier pts, so a mid-frame target lands on the NEXT frame
+        // (measured: t=0.5208 on a 24 fps file returns frame 13, while
+        // t=0.5 returns frame 12 exactly).
+        t = Math.max(0, Math.min(lastIdx, idx)) / fps;
+      } else {
+        const step = strideN > 1 ? stepSec * strideN : stepSec;
+        t = fromEnd ? (hi - EPS - i * step) : (lo + i * step);
+        t = Math.max(0, Math.min(Math.max(0, dur - EPS), t));
+        if (fromEnd) t = Math.max(lo, t);
+        else if (hi < dur) t = Math.min(t, Math.max(lo, hi - EPS));
+      }
       const framePath = join(dir, `f${i + 1}.jpg`);
       try {
         await grab(t, framePath);

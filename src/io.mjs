@@ -315,8 +315,11 @@ export const SETTING_SPECS = {
   ],
   vframes: [
     { f: "dir", label: "Start from", kind: "select", options: ["end", "start"], def: "end" },
-    { f: "frames", label: "Frames", kind: "number", def: "1", min: 1, max: 12 },
+    { f: "frames", label: "Frames", kind: "number", def: "1", min: 1, max: 48 },
     { f: "gap", label: "Gap (s)", kind: "number", def: "0.5" },
+    { f: "stride", label: "Stride (every Nth frame)", kind: "number", def: "1", min: 1 },
+    { f: "startSec", label: "Range start (s)", kind: "number" },
+    { f: "endSec", label: "Range end (s)", kind: "number" },
   ],
   combine: [
     { f: "dedup", label: "Trim duplicate seam frame", kind: "boolean", def: true },

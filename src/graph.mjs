@@ -9,7 +9,7 @@ export const VID_PORT_RE = /^vid\d*$/;
 export const CLIP_PORT_RE = /^clip\d*$/;    // combine clips
 export const REF_PORT_RE = /^ref\d*$/;      // tvideo reference images
 export const FRAME_PORT_RE = /^frame\d+$/;  // vframes outputs
-export const MAX_FRAMES = 12;
+export const MAX_FRAMES = 48;
 
 const DYNAMIC_INPUT_RES = [IMG_PORT_RE, EDIT_IMG_RE, VID_PORT_RE, CLIP_PORT_RE, REF_PORT_RE];
 const DYNAMIC_INPUT_NAMES = new Set(["audio", "endframe"]);
