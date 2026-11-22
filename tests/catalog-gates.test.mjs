@@ -453,3 +453,59 @@ test("reference mode capability matches word boundary/case and preserves explici
   assert.equal(sent.refKey, "reference_image_urls", "explicit key wins over mode fallback");
   assert.equal(sent.refImages.length, 1, "explicit max wins over family default");
 });
+
+test("llm bare img port: a wire to `img` (no digit) delivers the image like img1 does", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /api/v1/chat/completions", chatJson("ok"));
+  srv.script("POST /api/v1/chat/completions", chatJson("ok"));
+  srv.script("POST /api/v1/chat/completions", chatJson("ok"));
+
+  const nodes = [
+    { id: "u1", type: "upload", fields: { image: PNG_DATA_URL } },
+    { id: "m1", type: "llm", fields: { model: "vision-yes", prompt: "look", system: "" } },
+  ];
+  const links = [{ id: "l1", from: { node: "u1", port: "image" }, to: { node: "m1", port: "img" } }];
+  const catalog = { catalog: { chat: [{ id: "vision-yes", capabilities: { vision: true } }] } };
+
+  // vision-capable model: the bare-img image must ride (regression: IMG_PORT_RE
+  // required a digit, so the wire became a field override and vanished silently)
+  await one(srv, nodes, links, catalog).run({});
+  const content1 = srv.requests[0].json.messages.at(-1).content;
+  assert.ok(Array.isArray(content1) && content1.some((p) => p.type === "image_url"), "bare img reaches a vision model");
+
+  // no catalog → permissive, part rides
+  await one(srv, nodes, links).run({});
+  const content2 = srv.requests[1].json.messages.at(-1).content;
+  assert.ok(Array.isArray(content2) && content2.some((p) => p.type === "image_url"), "bare img rides with no catalog");
+
+  // KNOWN text-only model: dropped BY THE GATE, with its progress note — the wire
+  // now reaches the gate instead of vanishing upstream of it
+  const notes = [];
+  await one(srv, nodes.map((n) => n.id === "m1" ? { ...n, fields: { ...n.fields, model: "text-only" } } : n), links, {
+    catalog: { chat: [{ id: "text-only", capabilities: {} }] },
+  }).run({}, { onProgress: (e) => { if (e.type === "node-progress") notes.push(e.message); } });
+  const content3 = srv.requests[2].json.messages.at(-1).content;
+  assert.equal(typeof content3, "string", "text-only gate still drops the bare-img image");
+  assert.ok(notes.some((m) => /image.*ignored.*text-only/i.test(m)), "gate note emitted for bare img");
+});
+
+test("llm img + img2 pair: both wired images ride, bare port counts as the first slot", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /api/v1/chat/completions", chatJson("ok"));
+
+  const nodes = [
+    { id: "u1", type: "upload", fields: { image: PNG_DATA_URL } },
+    { id: "u2", type: "upload", fields: { image: PNG_DATA_URL } },
+    { id: "m1", type: "llm", fields: { model: "vision-yes", prompt: "compare", system: "" } },
+  ];
+  const links = [
+    { id: "l1", from: { node: "u1", port: "image" }, to: { node: "m1", port: "img" } },
+    { id: "l2", from: { node: "u2", port: "image" }, to: { node: "m1", port: "img2" } },
+  ];
+  await one(srv, nodes, links, { catalog: { chat: [{ id: "vision-yes", capabilities: { vision: true } }] } }).run({});
+  const content = srv.requests[0].json.messages.at(-1).content;
+  const parts = Array.isArray(content) ? content.filter((p) => p.type === "image_url") : [];
+  assert.equal(parts.length, 2, "both the bare-img and img2 images ride");
+});
