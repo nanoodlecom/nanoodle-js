@@ -8,6 +8,7 @@ import {
   resizeCropImage, trimAudioToWav, extractAudioToWav,
   extractVideoFrames, concatVideos, muxSoundtrack, maskToSource, fitImageInline, fitImageJpeg,
 } from "./local-media.mjs";
+import { assetOutputs } from "./client.mjs";
 import { decideRun, decideImageLimits } from "./decide.mjs";
 import { cleanVoiceRun, CLEANVOICE_DEFAULT_MODEL } from "./cleanvoice.mjs";
 import { runEndpoint } from "./endpoint.mjs";
@@ -498,6 +499,16 @@ function guardRefsSize(imgs) {
 }
 
 /**
+ * S1: shape a video-kind result (string URL, or {url, assets} when the runner
+ * asked for companion assets) into the node's output map — primary port plus
+ * any role ports the payload's labeled assets earn (matte / cutout / assets).
+ */
+function videoOut(result) {
+  if (typeof result === "string") return { video: result };
+  return { video: result.url, ...assetOutputs(result.assets, result.url, "video") };
+}
+
+/**
  * Per-node executors. Each: async run(node, inp, ctx) → out map keyed by output port name.
  * `node.fields` already carries wired field overrides + user inputs + settings.
  * ctx = { chat, image, video, audio, transcribe, progress } (cost/poll wired by the engine).
@@ -720,17 +731,17 @@ export const RUNNERS = {
 
   async tvideo(n, inp, ctx) {
     const prompt = promptOf(n, inp, "no prompt");
-    const opts = { ...videoDims(n, ctx), lora: loraParams(n), extra: n.fields.modelOpts || {} };
+    const opts = { ...videoDims(n, ctx), lora: loraParams(n), extra: n.fields.modelOpts || {}, wantAssets: true };
     applyRefs(opts, collectPorts(inp, REF_PORT_RE), n, ctx);
-    return { video: await ctx.video(mdl(n), prompt, opts, null) };
+    return videoOut(await ctx.video(mdl(n), prompt, opts, null));
   },
 
   async ivideo(n, inp, ctx) {
     if (!inp.image) throw new NanoodleError("no image input");
     const prompt = promptOf(n, inp);
-    const opts = { ...videoDims(n, ctx), lora: loraParams(n), extra: n.fields.modelOpts || {} };
+    const opts = { ...videoDims(n, ctx), lora: loraParams(n), extra: n.fields.modelOpts || {}, wantAssets: true };
     if (inp.endframe) opts.last_image = await fitImage(inp.endframe, ctx, "end frame");
-    return { video: await ctx.video(mdl(n), prompt, opts, await fitImage(inp.image, ctx, "source image")) };
+    return videoOut(await ctx.video(mdl(n), prompt, opts, await fitImage(inp.image, ctx, "source image")));
   },
 
   async vedit(n, inp, ctx) {
@@ -743,7 +754,8 @@ export const RUNNERS = {
     // stale wire left after a swap to a plain v2v model is never sent; catalog miss → send (the
     // wire was authored deliberately, same permissive-ON stance as ivideo's endframe).
     const image = inp.image && vEditTakesImage(ctx && ctx.catalog, n.fields.model) ? await fitImage(inp.image, ctx, "character image") : null;
-    return { video: await ctx.video(mdl(n), prompt, opts, image) };
+    opts.wantAssets = true;
+    return videoOut(await ctx.video(mdl(n), prompt, opts, image));
   },
 
   async lipsync(n, inp, ctx) {
@@ -865,11 +877,13 @@ export const RUNNERS = {
     if (image) image = await fitImage(image, ctx, "source image");
     const extra = { ...(n.fields.modelOpts || {}) };
     if (mesh) extra.model_url = mesh; // the wire wins over a static modelOpts copy
-    const url = await ctx.video(model, mods.text ? prompt : "", {
+    const result = await ctx.video(model, mods.text ? prompt : "", {
       extra,
       mediaKind: "model3d",
+      wantAssets: true,
     }, image || null);
-    return { model: url };
+    if (typeof result === "string") return { model: result };
+    return { model: result.url, ...assetOutputs(result.assets, result.url, "model3d") };
   },
 
   // 🔌 Custom endpoint: POST to the graph's own URL. ctx.fetch so tests can point it at a mock.
