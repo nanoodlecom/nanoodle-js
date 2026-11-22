@@ -1,7 +1,7 @@
 <!doctype html><html><head><meta charset="utf-8">
 <script type="importmap">{"imports":{"three":"/three.module.js","three/addons/":"/addons/"}}</script>
-</head><body style="margin:0;background:transparent">
-<canvas id="c"></canvas>
+</head><body style="margin:0;background:transparent;overflow:hidden">
+<canvas id="c" style="display:block"></canvas>
 <script type="module">
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -122,6 +122,15 @@ window.__render3d = {
   },
 };
 
+// Auto mode (headless screenshot drivers, e.g. the Rust executor): fields
+// arrive in the URL fragment (#f=<json>); apply once on load and retitle.
+const autoFields = (() => {
+  try {
+    if (location.hash.startsWith('#f=')) return JSON.parse(decodeURIComponent(location.hash.slice(3)));
+  } catch { /* fall through */ }
+  return null;
+})();
+
 new GLTFLoader().load('/model.glb', (g) => {
   root = g.scene;
   scene.add(root);
@@ -134,5 +143,6 @@ new GLTFLoader().load('/model.glb', (g) => {
   window.__render3d.info = { parts: parts.length, clips: clips.map((c) => c.name), radius };
   window.__render3d.ready = true;
   document.title = 'READY';
+  if (autoFields) { window.__render3d.apply(autoFields); document.title = 'DONE'; }
 }, undefined, (e) => { window.__render3d.error = String(e && e.message || e); document.title = 'ERROR'; });
 </script></body></html>
