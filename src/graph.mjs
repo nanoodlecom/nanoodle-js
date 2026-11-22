@@ -50,10 +50,10 @@ export const NODE_TYPES = {
   resize:  { title: "Resize / crop",   inputs: ["image"], outputs: [{ name: "image", type: "image" }], local: true },
   vision:  { title: "Vision",          inputs: ["image"], outputs: [{ name: "text", type: "text" }], network: true },
   decide:  { title: "Decide",          inputs: ["text"], outputs: [{ name: "text", type: "text" }, { name: "image", type: "image" }], network: true }, // img1… candidates (IMG_PORT_RE)
-  tvideo:  { title: "Text→Video",      inputs: [], outputs: [{ name: "video", type: "video" }], network: true },
-  ivideo:  { title: "Image→Video",     inputs: ["image"], outputs: [{ name: "video", type: "video" }], network: true },
-  model3d: { title: "3D model",        inputs: ["image", "model"], outputs: [{ name: "model", type: "model3d" }], network: true },
-  vedit:   { title: "Video edit",      inputs: ["video"], outputs: [{ name: "video", type: "video" }], network: true },
+  tvideo:  { title: "Text→Video",      inputs: [], outputs: [{ name: "video", type: "video" }, { name: "matte", type: "video" }, { name: "cutout", type: "video" }, { name: "assets", type: "text" }], network: true },
+  ivideo:  { title: "Image→Video",     inputs: ["image"], outputs: [{ name: "video", type: "video" }, { name: "matte", type: "video" }, { name: "cutout", type: "video" }, { name: "assets", type: "text" }], network: true },
+  model3d: { title: "3D model",        inputs: ["image", "model"], outputs: [{ name: "model", type: "model3d" }, { name: "depth", type: "image" }, { name: "normals", type: "image" }, { name: "mask", type: "image" }, { name: "points", type: "model3d" }, { name: "assets", type: "text" }], network: true },
+  vedit:   { title: "Video edit",      inputs: ["video"], outputs: [{ name: "video", type: "video" }, { name: "matte", type: "video" }, { name: "cutout", type: "video" }, { name: "assets", type: "text" }], network: true },
   vframes: { title: "Video → frames",  inputs: ["video"], outputs: [{ name: "frame1", type: "image" }], local: true, framesOut: true }, // dynamic frame1..N
   combine: { title: "Combine videos",  inputs: [], outputs: [{ name: "video", type: "video" }], local: true },
   soundtrack: { title: "Soundtrack",   inputs: ["video", "audio"], outputs: [{ name: "video", type: "video" }], local: true },

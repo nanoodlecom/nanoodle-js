@@ -113,6 +113,81 @@ export function model3dStatusUrl(s, model) {
   return out.model_url || (out.model && out.model.url) || (out.video && out.video.url) || fromList || "";
 }
 
+/**
+ * Labeled companion assets from a completed job's status payload (Edge Styles
+ * S1). Providers return more than the primary output: MoGe-3 ships a depth map,
+ * normals, a validity mask and a point cloud next to its GLB; LTX AlphaGen
+ * ships an alpha matte and a ProRes cutout next to its video. They arrive as
+ * `output.model3d_assets[]` / `output.processing_assets[]` — arrays of
+ * {label, url, filename?, contentType?}. Until now every executor reduced the
+ * payload to the primary URL and dropped the rest. Returns a normalized
+ * [{label, url, kind}] list (kind: model3d | image | video | audio | file),
+ * or [] when the payload carries no assets array.
+ */
+export function parseStatusAssets(s) {
+  const out = (s && s.data && s.data.output) || (s && s.output) || {};
+  const raw = [];
+  if (Array.isArray(out.model3d_assets)) raw.push(...out.model3d_assets);
+  if (Array.isArray(out.processing_assets)) raw.push(...out.processing_assets);
+  const assets = [];
+  for (const a of raw) {
+    if (!a || typeof a.url !== "string" || !a.url) continue;
+    assets.push({ label: String(a.label || a.filename || ""), url: a.url, kind: assetKindOf(a) });
+  }
+  return assets;
+}
+
+function assetKindOf(a) {
+  const ct = String(a.contentType || "").toLowerCase();
+  if (ct.startsWith("image/")) return "image";
+  if (ct.startsWith("video/") || ct === "video/quicktime") return "video";
+  if (ct.startsWith("audio/")) return "audio";
+  if (ct.includes("gltf") || ct.includes("model/")) return "model3d";
+  const path = String(a.url || "").split(/[?#]/)[0].toLowerCase();
+  if (/\.(glb|gltf|fbx|obj|stl|ply|usdz|3mf)$/.test(path)) return "model3d";
+  if (/\.(png|jpe?g|webp|gif|avif)$/.test(path)) return "image";
+  if (/\.(mp4|mov|webm|mkv)$/.test(path)) return "video";
+  if (/\.(mp3|wav|ogg|flac|m4a)$/.test(path)) return "audio";
+  return "file";
+}
+
+/**
+ * Role outputs for a node's companion assets (Edge Styles S1). The `assets`
+ * port always carries the full normalized list as JSON, so nothing is ever
+ * dropped; canonical roles additionally surface as typed ports a graph can
+ * wire directly. First match wins per role; the primary URL never reappears
+ * as an extra model port. Returns {} when there are no assets.
+ * mediaKind "model3d": depth / normals / mask (image), points (model3d),
+ *   model2..N for further 3D assets beyond the primary.
+ * mediaKind "video": matte / cutout (video).
+ */
+export function assetOutputs(assets, primaryUrl, mediaKind) {
+  if (!assets || !assets.length) return {};
+  const out = { assets: JSON.stringify(assets) };
+  const taken = new Set();
+  const claim = (role, test) => {
+    const hit = assets.find((a) => !taken.has(a) && test(a));
+    if (hit) { taken.add(hit); out[role] = hit.url; }
+  };
+  const labelHas = (a, word) => a.label.toLowerCase().includes(word);
+  if (mediaKind === "model3d") {
+    claim("depth", (a) => a.kind === "image" && labelHas(a, "depth"));
+    claim("normals", (a) => a.kind === "image" && labelHas(a, "normal"));
+    claim("mask", (a) => a.kind === "image" && labelHas(a, "mask"));
+    claim("points", (a) => labelHas(a, "point") || /\.ply([?#]|$)/i.test(a.url));
+    let n = 2;
+    for (const a of assets) {
+      if (a.kind !== "model3d" || taken.has(a) || a.url === primaryUrl) continue;
+      taken.add(a);
+      out["model" + n++] = a.url;
+    }
+  } else if (mediaKind === "video") {
+    claim("matte", (a) => a.kind === "video" && labelHas(a, "matte"));
+    claim("cutout", (a) => a.kind === "video" && (labelHas(a, "cutout") || labelHas(a, "alpha")));
+  }
+  return out;
+}
+
 export class NanoClient {
   constructor({ apiKey, baseUrl = "https://nano-gpt.com", fetch = globalThis.fetch, pollIntervals = {}, timeouts = {}, payment } = {}) {
     // non-enumerable: console.log/util.inspect/JSON.stringify of a client (or a Workflow holding
@@ -411,15 +486,18 @@ export class NanoClient {
         const st = String((s.data && s.data.status) || s.status || "").toUpperCase();
         if (onPoll) onPoll({ status: st, elapsedMs: Date.now() - t0, runId });
         if (st === "COMPLETED" || st === "SUCCEEDED") {
+          // S1: callers that ask (opts.wantAssets) get the payload's labeled
+          // companion assets alongside the primary URL; everyone else keeps
+          // the standing string contract.
           if (is3d) {
             const url = model3dStatusUrl(s, model);
             if (!url) throw new NanoodleError("completed but no model url");
-            return url;
+            return opts.wantAssets ? { url, assets: parseStatusAssets(s) } : url;
           }
           const out = (s.data && s.data.output) || s.output || {};
           const url = (out.video && out.video.url) || out.url || (Array.isArray(out.video) ? out.video[0] && out.video[0].url : null);
           if (!url) throw new NanoodleError("completed but no video url");
-          return url;
+          return opts.wantAssets ? { url, assets: parseStatusAssets(s) } : url;
         }
         if (["FAILED", "ERROR", "CANCELED", "CANCELLED", "CONTENT_POLICY_VIOLATION"].includes(st)) {
           const why = (s.data && s.data.error) || st;
