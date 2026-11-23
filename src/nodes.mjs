@@ -567,6 +567,9 @@ export const RUNNERS = {
       count: n.fields.frames,
       gap: n.fields.gap,
       dir: n.fields.dir || "end",
+      stride: n.fields.stride,
+      startSec: n.fields.startSec,
+      endSec: n.fields.endSec,
       ...media,
       onProgress: ctx && ctx.progress,
     });

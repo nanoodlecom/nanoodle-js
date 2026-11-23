@@ -17,10 +17,10 @@ import { deflate } from "./zlib.mjs";
 import { decodePngPixels } from "./png-decoder.mjs";
 import { NanoodleError } from "./errors.mjs";
 import { abortReason, throwIfAborted } from "./deadline.mjs";
+import { MAX_FRAMES } from "./graph.mjs";
 import { bytesToDataUrl, dataUrlBytes, downloadMedia, sniffMime, MEDIA_INLINE_MAX } from "./media.mjs";
 import { MP4CAT } from "./mp4cat.mjs";
 
-const MAX_FRAMES = 12;
 /** Refuse pure PNG decode above this edge (memory guard; canvas-class bound). */
 const MAX_IMAGE_DIM = 8192;
 /** Refuse pure WAV decode above this many interleaved samples (~17 min mono @ 48 kHz). */
@@ -802,15 +802,93 @@ export async function extractAudioToWav(url, start, len, rate = 16000, opts = {}
 
 /* ---------- vframes (ffmpeg — needs a video decoder) ----------------------- */
 
-export async function extractVideoFrames(url, { count = 1, gap = 0.5, dir = "end", fetch: fetchFn, onProgress, signal } = {}) {
+function frameRangeValue(value, name) {
+  if (value == null || value === "") return undefined;
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) throw new NanoodleError(`${name} must be a non-negative time in seconds`);
+  return seconds;
+}
+
+async function extractIndexedFrames(inPath, dir, { n, stride, gap, start, end, fromEnd, onProgress, signal }) {
+  if (onProgress) onProgress("reading frame timestamps…");
+  const { stdout } = await runProc("ffprobe", [
+    "-v", "error", "-select_streams", "v:0", "-show_frames",
+    "-show_entries", "stream=time_base:frame=best_effort_timestamp", "-of", "json", inPath,
+  ], { signal });
+  let probe;
+  try { probe = JSON.parse(stdout); } catch { throw new NanoodleError("could not read the video frame timestamps"); }
+  const [units, scale] = String(probe.streams?.[0]?.time_base || "").split("/").map(Number);
+  const frames = probe.frames || [];
+  const origin = frames[0]?.best_effort_timestamp;
+  if (!(units > 0 && scale > 0) || !Number.isSafeInteger(origin)) {
+    throw new NanoodleError("video has no readable frame timestamps");
+  }
+  const available = [];
+  let previous = origin;
+  for (const [index, frame] of frames.entries()) {
+    const pts = frame.best_effort_timestamp;
+    if (!Number.isSafeInteger(pts) || pts < previous) {
+      throw new NanoodleError("video frame timestamps are missing or out of order");
+    }
+    previous = pts;
+    const time = (pts - origin) * units / scale;
+    if (time > end + 1e-9) break;
+    if (time + 1e-9 >= start) available.push({ index, time });
+  }
+  if (fromEnd) available.reverse();
+  if (available.length === 0) throw new NanoodleError("no video frames in the requested time range");
+
+  const selected = [];
+  let lastTime;
+  for (const [offset, { index, time }] of available.entries()) {
+    if (stride ? offset % stride !== 0 : lastTime !== undefined && Math.abs(time - lastTime) + 1e-9 < gap) continue;
+    selected.push(index);
+    lastTime = time;
+    if (selected.length === n) break;
+  }
+
+  // Decode the first video stream in the same display order as ffprobe.
+  // Select by frame number, so VFR gaps and seek rounding cannot change the result.
+  const filter = selected.map(index => `eq(n,${index})`).join("+");
+  if (onProgress) onProgress(`extracting ${selected.length} frames…`);
+  await runProc("ffmpeg", [
+    "-y", "-i", inPath, "-map", "0:v:0", "-vf", `select='${filter}'`,
+    "-fps_mode", "passthrough", "-frames:v", String(selected.length), "-q:v", "2",
+    "-start_number", "1", join(dir, "frame-%d.jpg"),
+  ], { signal });
+  const out = {};
+  for (const [i] of selected.entries()) {
+    throwIfAborted(signal);
+    const fileNumber = fromEnd ? selected.length - i : i + 1;
+    out[`frame${i + 1}`] = await dataUrlFromFile(join(dir, `frame-${fileNumber}.jpg`), "image/jpeg");
+  }
+  return out;
+}
+
+export async function extractVideoFrames(url, { count = 1, gap = 0.5, dir = "end", stride, startSec, endSec, fetch: fetchFn, onProgress, signal } = {}) {
   throwIfAborted(signal);
   const n = Math.max(1, Math.min(MAX_FRAMES, parseInt(count, 10) || 1));
   const stepSec = Number.isFinite(Number(gap)) ? Math.max(0, Number(gap)) : 0.5;
   const fromEnd = (dir || "end") === "end";
+  const rangeStart = frameRangeValue(startSec, "startSec");
+  const rangeEnd = frameRangeValue(endSec, "endSec");
+  const strideN = stride != null && stride !== "" ? Number(stride) : undefined;
+  if (strideN !== undefined && (!Number.isSafeInteger(strideN) || strideN < 1)) {
+    throw new NanoodleError("stride must be a positive integer");
+  }
+  if (rangeEnd !== undefined && rangeEnd < (rangeStart ?? 0)) {
+    throw new NanoodleError("endSec must be at or after startSec");
+  }
 
   return withTemp(async (dir) => {
     const inPath = await writeInput(dir, "in", url, fetchFn, signal);
     throwIfAborted(signal);
+    if (strideN !== undefined || rangeStart !== undefined || rangeEnd !== undefined) {
+      return extractIndexedFrames(inPath, dir, {
+        n, stride: strideN, gap: stepSec, start: rangeStart ?? 0, end: rangeEnd ?? Infinity,
+        fromEnd, onProgress, signal,
+      });
+    }
     const pr = await runProc("ffprobe", [
       "-v", "error", "-select_streams", "v:0",
       "-show_entries", "stream=duration,avg_frame_rate", "-show_entries", "format=duration",
@@ -838,16 +916,18 @@ export async function extractVideoFrames(url, { count = 1, gap = 0.5, dir = "end
         "-y", "-ss", String(t), "-i", inPath, "-frames:v", "1", "-q:v", "2", framePath,
       ], { signal });
     };
+    // Keep the legacy gap-only sampling for existing graphs.
     const out = {};
     for (let i = 0; i < n; i++) {
       throwIfAborted(signal);
       if (onProgress) onProgress(`extracting frame ${i + 1}/${n}…`);
-      let t = fromEnd ? (dur - EPS - i * stepSec) : (i * stepSec);
-      t = Math.max(0, Math.min(Math.max(0, dur - EPS), t));
+      const target = fromEnd ? dur - EPS - i * stepSec : i * stepSec;
+      const t = Math.max(0, Math.min(Math.max(0, dur - EPS), target));
       const framePath = join(dir, `f${i + 1}.jpg`);
       try {
         await grab(t, framePath);
       } catch (e) {
+        if (e?.code === "aborted" || e?.code === "timeout") throw e;
         // Reported durations can still overshoot the last decodable frame (VFR, sloppy
         // muxes) — step back once before giving up.
         if (t <= 0) throw e;
