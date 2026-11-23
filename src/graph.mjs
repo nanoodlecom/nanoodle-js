@@ -211,8 +211,26 @@ function scrubMediaPlaceholders(n, warnings) {
   }
 }
 
+function nonblankString(value) {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+/** Reject structurally invalid records before normalizing their IDs or types. */
+export function assertNodeRecord(node, index) {
+  let issue;
+  if (!node || typeof node !== "object" || Array.isArray(node)) {
+    issue = "must be an object";
+  } else if (!Object.hasOwn(node, "id") || !(nonblankString(node.id) || Number.isFinite(node.id))) {
+    issue = "has a missing or invalid id (expected a non-empty string or finite number)";
+  } else if (!Object.hasOwn(node, "type") || !nonblankString(node.type)) {
+    issue = "has a missing or invalid type (expected a non-empty string)";
+  }
+  if (issue) throw new NanoodleError(`node at position ${index + 1} ${issue}`, { code: "invalid-node-record" });
+}
+
 /**
  * Load raw parsed graph JSON into an executable graph (mirrors the app's applyGraphData):
+ * - malformed node records are rejected with their position in the nodes array
  * - `audio` type aliases to `tts` (legacy saves)
  * - unknown node types are KEPT but flagged (`unknown: true`) + a warning; run() fails fast on them
  * - media fields that aren't a data:/http(s) URL (prose placeholders, file paths) are blanked + a warning
@@ -227,13 +245,13 @@ export function materialize(data) {
   const warnings = [];
   const nodes = [];
   const seenIds = new Set();
-  for (const raw of data.nodes) {
-    if (!raw || raw.id == null || !raw.type) continue;
+  for (const [index, raw] of data.nodes.entries()) {
+    assertNodeRecord(raw, index);
     const id = String(raw.id);
     if (seenIds.has(id)) throw new NanoodleError(`duplicate node id "${id}" — every node must have a unique id`);
     seenIds.add(id);
     const type = raw.type === "audio" ? "tts" : raw.type === "decide-branch" ? "decide" : raw.type;
-    const n = { id: String(raw.id), type, name: raw.name, fields: { ...(raw.fields || {}) } };
+    const n = { id, type, name: raw.name, fields: { ...(raw.fields || {}) } };
     if (raw.type === "decide-branch") n.fields.branch = true;
     if (!Object.hasOwn(NODE_TYPES, type)) {
       n.unknown = true;

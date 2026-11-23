@@ -1,6 +1,6 @@
 import { NanoodleError, RunError, UnsupportedNodeError } from "./errors.mjs";
 import { abortReason, enforceDeadline, normalizeTimeoutMs, startDeadline, throwIfAborted } from "./deadline.mjs";
-import { NODE_TYPES, displayName, isInputPort, lockedNode, materialize, topoSort, wireIssue, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
+import { NODE_TYPES, assertNodeRecord, displayName, isInputPort, lockedNode, materialize, topoSort, wireIssue, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
 import { COMPETING_INPUT_WIRES, competingInputIssues, staticCompetingInputIssues } from "./input-wires.mjs";
 import { endpointOutPort } from "./endpoint.mjs";
 import { MEDIA_INPUT_KINDS, deriveInputs, deriveOutputs, deriveSettings, resolveInputKey, resolveSettingKey } from "./io.mjs";
@@ -249,8 +249,10 @@ export class Workflow {
     const { settings = {}, defaults = true, timeoutMs, signal, onProgress } = runOpts;
     const graph = this.graph;
 
-    for (const n of graph.nodes) {
-      if (n.unknown) {
+    for (const [index, n] of graph.nodes.entries()) {
+      // Workflow.graph can be edited after materialize; validate before scheduling it.
+      assertNodeRecord(n, index);
+      if (n.unknown || !Object.hasOwn(NODE_TYPES, n.type)) {
         throw new UnsupportedNodeError(
           `node ${n.id}: unknown node type '${n.type}' — this graph needs a newer nanoodle library`,
           { nodeId: n.id, nodeType: n.type });

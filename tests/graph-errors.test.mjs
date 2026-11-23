@@ -7,6 +7,47 @@ import { startMockServer, mockOpts, chatJson, PNG_B64 } from "./harness/mock-ser
 const fixture = (name) => fileURLToPath(new URL("./fixtures/" + name, import.meta.url));
 const noNet = { apiKey: "unused", quiet: true };
 
+test("loader: invalid node records identify the position and malformed property", () => {
+  const valid = { id: "source", type: "text" };
+  for (const [damaged, message] of [
+    [null, /node at position 2 must be an object/],
+    [[], /node at position 2 must be an object/],
+    ["text", /node at position 2 must be an object/],
+    [{ type: "text" }, /node at position 2 has a missing or invalid id/],
+    [{ id: false, type: "text" }, /node at position 2 has a missing or invalid id/],
+    [{ id: "  ", type: "text" }, /node at position 2 has a missing or invalid id/],
+    [{ id: Infinity, type: "text" }, /node at position 2 has a missing or invalid id/],
+    [{ id: "damaged" }, /node at position 2 has a missing or invalid type/],
+    [{ id: "damaged", type: 1 }, /node at position 2 has a missing or invalid type/],
+    [{ id: "damaged", type: "  " }, /node at position 2 has a missing or invalid type/],
+  ]) {
+    assert.throws(() => materialize({ nodes: [valid, damaged] }), {
+      code: "invalid-node-record", message,
+    });
+  }
+});
+
+test("numeric IDs retain their normalized identity through scheduling and wires", async () => {
+  const wf = Workflow.fromJSON({
+    nodes: [{ id: 0, type: "text", fields: { text: "numeric source" } }, { id: 2.5, type: "join" }],
+    links: [{ from: { node: 0, port: "text" }, to: { node: 2.5, port: "a" } }],
+  }, { ...noNet, fetch: () => assert.fail("unexpected provider request") });
+  assert.deepEqual(wf.graph.nodes.map(node => node.id), ["0", "2.5"]);
+  assert.equal((await wf.run()).get("2.5"), "numeric source");
+});
+
+test("run revalidates node records edited after materialization before scheduling", async () => {
+  const wf = Workflow.fromJSON({
+    nodes: [{ id: "writer", type: "llm", fields: { model: "offline-fixture", prompt: "stored fallback" } }],
+  }, { ...noNet, fetch: () => assert.fail("unexpected provider request") });
+  wf.graph.nodes.push({ type: "text" });
+  const events = [];
+  await assert.rejects(wf.run({}, { onProgress: event => events.push(event) }), {
+    code: "invalid-node-record", message: /node at position 2 has a missing or invalid id/,
+  });
+  assert.deepEqual(events, []);
+});
+
 test("loader: legacy 'audio' type aliases to tts + inbound 'text' port migrates to 'prompt'", () => {
   const { nodes, links } = materialize({
     nodes: [
