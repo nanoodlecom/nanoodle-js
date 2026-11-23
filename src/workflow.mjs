@@ -315,15 +315,6 @@ export class Workflow {
       effFields.get(entry.nodeId)[entry.field] = this._coerceInput(entry, value, mediaCoerceOpts);
       explicit.add(entry);
     }
-    // vframes: raise frames to highest wired frameK (play.html wiredFramesFloor) so a
-    // persisted frames=1 with frame3 wired doesn't starve the consumer after paid upstream.
-    for (const n of graph.nodes) {
-      if (n.type !== "vframes") continue;
-      const fields = effFields.get(n.id);
-      const floor = wiredFramesFloor(graph, n.id);
-      const cur = Math.max(1, Math.min(MAX_FRAMES, parseInt(fields.frames, 10) || 1));
-      if (floor > cur) fields.frames = String(floor);
-    }
     // defaults + required check
     for (const entry of this.inputs) {
       const fields = effFields.get(entry.nodeId);
@@ -498,6 +489,13 @@ export class Workflow {
             inp[port] = value;
           }
           else fields = { ...fields, [port]: value };
+        }
+        // The floor applies to the resolved frame count, which a wire can override.
+        // The extractor still uses the requested stride and range.
+        if (n.type === "vframes") {
+          const floor = wiredFramesFloor(graph, n.id);
+          const count = Math.max(1, Math.min(MAX_FRAMES, parseInt(fields.frames, 10) || 1));
+          if (floor > count) fields = { ...fields, frames: String(floor) };
         }
         throwIfAborted(ac.signal);
         // Prompt length caps (see prompt-caps.mjs). Many image/video models reject an over-long

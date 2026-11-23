@@ -138,8 +138,8 @@ Implemented in `src/local-media.mjs` + `src/mp4cat.mjs` (JS) / `nanoodle/local_m
 
 Node behaviour:
 - **resize** — `mode` fit|fill|exact, width/height; fit never upscales; PNG stays PNG else JPEG.
-- **vframes** — `frames` 1–12, `gap` seconds, `dir` end|start; emits `frame1..frameN` JPEG data URLs.
-  - **wiredFramesFloor**: before run, `fields.frames` is raised to the highest wired outbound `frameK` port (same as play.html). Prevents starving a `frame3` consumer when a saved graph still has `frames:1` after paid upstream steps. Settings UI also floors the knob to that value.
+- **vframes** — `frames` 1–48, `gap` seconds, `dir` end|start; emits `frame1..frameN` JPEG data URLs.
+  - **wiredFramesFloor**: after resolving incoming wires, the requested count is raised to match the highest wired outbound `frameK` port. The extractor still honors the requested stride and time range. The settings UI also uses the outbound floor.
 - **combine** — clip1../vid1.. inputs (≥2), ordered by port number across both families; remux when params match, else re-encode; `dedup` only on re-encode path.
 - **soundtrack** — video+audio; `loop` loops audio to fill video length; mux → mp4.
 - **trim** — audio → mono WAV @ 16 kHz; `start` + `length` (default 30s when blank).
