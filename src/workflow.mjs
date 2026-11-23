@@ -38,8 +38,8 @@ function mediaOutputKeys(node, out) {
   const add = (k) => { if (k && !keys.includes(k)) keys.push(k); };
   if (!out || typeof out !== "object") return keys;
   if (node.type === "endpoint") {
-    const p = endpointOutPort(node);
-    if (p && MEDIA_OUT_TYPES.has(p.type)) add(p.name);
+    const p = endpointOutPort(node, out);
+    if (MEDIA_OUT_TYPES.has(p.type)) add(p.name);
   } else if (node.type === "vframes") {
     for (const k of Object.keys(out)) if (/^frame\d+$/.test(k)) add(k);
   } else {
@@ -623,7 +623,7 @@ export class Workflow {
     for (const o of this.outputs) {
       const rec = nodesRec[o.nodeId];
       if (!rec || !(rec.status === "done" || (rec.status === "gated" && rec.out))) continue;
-      const primary = o.ports[0];
+      const primary = o.type === "endpoint" ? endpointOutPort(byId.get(o.nodeId), rec.out) : o.ports[0];
       const value = this._wrapValue(rec.out[primary.name], primary.type);
       outputEntries.push([o.key, value], [o.nodeId, value]);
     }

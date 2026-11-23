@@ -69,7 +69,7 @@ export const NODE_TYPES = {
   transcribe: { title: "Transcribe",   inputs: ["audio"], outputs: [{ name: "text", type: "text" }], network: true },
   cleanvoice: { title: "Clean voice", inputs: ["audio", "video"], outputs: [{ name: "audio", type: "audio" }], network: true },
   // Custom URL — not a NanoGPT call, so `network` stays unset (no API key required).
-  // Output port follows fields.mode (see deriveOutputs / endpointOutPort).
+  // Output port follows the selected route mode (see deriveOutputs / endpointOutPort).
   endpoint: { title: "Custom endpoint", inputs: ["text", "image", "audio", "video"], outputs: [{ name: "text", type: "text" }] },
   comment: { title: "Comment",         inputs: [], outputs: [], note: true, local: true },
 };

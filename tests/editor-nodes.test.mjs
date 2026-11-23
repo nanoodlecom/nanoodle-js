@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  Workflow, materialize, estimateGraphCost, graphModelKinds,
+  Workflow, MediaRef, materialize, estimateGraphCost, graphModelKinds,
   deriveInputs, deriveOutputs, deriveSettings, NODE_TYPES,
 } from "../src/index.mjs";
 import { model3dStatusUrl } from "../src/client.mjs";
@@ -204,6 +204,87 @@ test("endpoint: a wired Choice path joins onto the typed host", async (t) => {
   const result = await wf.run({});
   assert.equal(srv.requests[0].path, "/echo");
   assert.equal(result.get("Custom endpoint"), "echoed");
+});
+
+test("endpoint sink publishes the port chosen by a wired mode on each run", async () => {
+  const fixtures = {
+    chat: { port: "text", value: "", json: { choices: [{ message: { content: "" } }] } },
+    video: { port: "video", value: "https://cdn.example/movie.mp4", json: { url: "https://cdn.example/movie.mp4" } },
+    image: { port: "image", value: "https://cdn.example/picture.png", json: { data: [{ url: "https://cdn.example/picture.png" }, { url: "https://cdn.example/second.png" }] } },
+    audio: { port: "audio", value: "data:audio/wav;base64,AAEC", binary: Uint8Array.of(0, 1, 2) },
+    json: { port: "text", value: "/api/generate-video/content?job=not-media", json: { text: "/api/generate-video/content?job=not-media" } },
+  };
+  let fixture, requests = 0;
+  const wf = Workflow.fromJSON({
+    nodes: [
+      { id: "choice", name: "Route", type: "choice", fields: { options: Object.keys(fixtures).join("\n") } },
+      { id: "e", name: "Result", type: "endpoint", fields: { url: "https://custom.example/endpoint", mode: "chat", prompt: "hi" } },
+    ],
+    links: [{ id: "route", from: { node: "choice", port: "text" }, to: { node: "e", port: "mode" } }],
+  }, { fetch: async (url, { method }) => {
+    assert.equal(url, "https://custom.example/endpoint");
+    assert.equal(method, "POST");
+    requests++;
+    if (fixture.binary) return new Response(fixture.binary, { headers: { "content-type": "audio/wav" } });
+    return Response.json(fixture.json);
+  } });
+  for (const [mode, expected] of Object.entries(fixtures)) {
+    fixture = expected;
+    const result = await wf.run({ Route: mode });
+    const value = result.get("Result");
+    assert.equal(result.get("e"), value);
+    assert.equal(result.nodes.e.out[expected.port], expected.value);
+    if (expected.port === "text") assert.equal(value, expected.value);
+    else {
+      assert(value instanceof MediaRef, `${mode} should use a MediaRef`);
+      assert.equal(value.url, expected.value);
+    }
+    if (mode === "image") assert.deepEqual(result.nodes.e.out.images, expected.json.data.map(item => item.url));
+    if (mode === "audio") assert.deepEqual(await value.bytes(), expected.binary);
+  }
+  assert.equal(requests, Object.keys(fixtures).length);
+  assert.deepEqual(wf.outputs[0].ports, [{ name: "text", type: "text" }]);
+});
+
+test("endpoint sink uses a wired route prefix ahead of the authored mode and publishes provider media", async () => {
+  const content = "https://nano-gpt.com/api/generate-video/content?job=fixture";
+  const media = "https://cdn.example/movie.mp4";
+  const requests = [];
+  const wf = Workflow.fromJSON({
+    nodes: [
+      { id: "choice", type: "choice", fields: { options: "video: /movie?format=mp4" } },
+      { id: "e", name: "Result", type: "endpoint", fields: { url: "https://custom.example/chat", mode: "chat", prompt: "hi" } },
+    ],
+    links: [{ id: "route", from: { node: "choice", port: "text" }, to: { node: "e", port: "url" } }],
+  }, { apiKey: "fixture", fetch: async (url, { method, body, headers }) => {
+    requests.push([method, url]);
+    if (url === "https://custom.example/movie?format=mp4") {
+      assert.deepEqual(JSON.parse(body), { model: "local", prompt: "hi" });
+      assert.equal(headers.Authorization, undefined);
+      return Response.json({ url: "/api/generate-video/content?job=fixture" });
+    }
+    assert.equal(url, content);
+    return Response.redirect(media, 302);
+  } });
+  const result = await wf.run();
+  assert.deepEqual(requests, [["POST", "https://custom.example/movie?format=mp4"], ["GET", content]]);
+  assert(result.get("Result") instanceof MediaRef);
+  assert.equal(result.get("Result").url, media);
+  assert.deepEqual(result.nodes.e.out, { video: media });
+});
+
+test("endpoint output metadata recognizes an authored route prefix and the run honors settings", async () => {
+  const wf = Workflow.fromJSON(g({
+    id: "e", name: "Result", type: "endpoint",
+    fields: { mode: "chat", url: "audio | https://custom.example/audio", prompt: "hi" },
+  }), { fetch: async (url) => {
+    assert.equal(url, "https://custom.example/json");
+    return Response.json({ text: "settings override" });
+  } });
+  assert.deepEqual(wf.outputs[0].ports, [{ name: "audio", type: "audio" }]);
+  const result = await wf.run({}, { settings: { "e.url": "https://custom.example/json", "e.mode": "json" } });
+  assert.equal(result.get("Result"), "settings override");
+  assert.deepEqual(wf.outputs[0].ports, [{ name: "audio", type: "audio" }]);
 });
 
 test("video estimate: an untouched audio switch bills the catalog default", () => {
