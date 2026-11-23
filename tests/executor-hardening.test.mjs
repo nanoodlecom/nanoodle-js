@@ -73,6 +73,25 @@ test("deriveSettings: vframes frames min rises to wired floor", () => {
   assert.equal(frames.min, 3);
 });
 
+test("vframes source wires use canonical frame numbers within the extraction limit", async () => {
+  const graph = (port) => ({
+    nodes: [
+      { id: "f", type: "vframes", fields: { frames: "1" } },
+      { id: "r", type: "resize", fields: {} },
+    ],
+    links: [{ from: { node: "f", port }, to: { node: "r", port: "image" } }],
+  });
+  const options = { apiKey: null, quiet: true };
+  const valid = Workflow.fromJSON(graph("frame48"), options);
+  assert.deepEqual(valid.warnings, []);
+  assert.equal(valid.settings.find(s => s.key === "f.frames").min, 48);
+  for (const port of ["frame0", "frame01", "frame49"]) {
+    const invalid = Workflow.fromJSON(graph(port), options);
+    assert.equal(invalid.warnings.length, 1);
+    await assert.rejects(invalid.run(), { code: "invalid-source-port" });
+  }
+});
+
 /* ---------- timeout / abort ---------- */
 
 test("timeoutMs aborts a pending local-media download", { timeout: 3000 }, async (t) => {

@@ -1,6 +1,6 @@
 import { NanoodleError, RunError, UnsupportedNodeError } from "./errors.mjs";
 import { abortReason, enforceDeadline, startDeadline, throwIfAborted } from "./deadline.mjs";
-import { NODE_TYPES, displayName, isInputPort, lockedNode, materialize, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
+import { NODE_TYPES, displayName, isInputPort, lockedNode, materialize, sourceWireIssue, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
 import { endpointOutPort } from "./endpoint.mjs";
 import { MEDIA_INPUT_KINDS, deriveInputs, deriveOutputs, deriveSettings, resolveInputKey, resolveSettingKey } from "./io.mjs";
 import { NanoClient } from "./client.mjs";
@@ -182,7 +182,7 @@ export class Workflow {
      * the next run of the same Workflow, which is where a retry actually happens.
      */
     this._promptCaps = new Map();
-    /** Load-time warnings (unknown / unsupported node types). load() only warns; run() fails fast. */
+    /** Load-time graph warnings, including unknown node types and invalid wires. */
     this.warnings = warnings;
     this.client = new NanoClient({
       apiKey: opts.apiKey !== undefined ? opts.apiKey : envApiKey(),
@@ -287,6 +287,11 @@ export class Workflow {
       }
     }
 
+    const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+    for (const link of graph.links) {
+      const issue = sourceWireIssue(byId.get(link.from.node), link);
+      if (issue) throw new NanoodleError(issue, { code: "invalid-source-port" });
+    }
     const order = topoSort(graph); // throws naming cyclic nodes
     const branches = planBranches(graph, order.map(n => n.id));
 
@@ -352,7 +357,6 @@ export class Workflow {
     const payments = [];
     const canPay = !this.client.apiKey && this.client.payment;
     const cost = { total: 0, exact: true, balance: null };
-    const byId = new Map(graph.nodes.map((n) => [n.id, n]));
     const promises = new Map();
     const mediaFetch = this.client.fetch;
 
@@ -462,8 +466,7 @@ export class Workflow {
           else if (n.type === "endpoint" && (l.to.port === "url" || l.to.port === "mode")) {
             if (v != null) inp[l.to.port] = v;
           }
-          // wired textarea port = field override; a missing upstream port (degraded save) must
-          // NOT clobber the typed field with undefined — the app only applies v != null
+          // A wire overrides a typed field when the declared source port emits a value.
           else if (v != null) fields = { ...fields, [l.to.port]: v };
         }
         // a real failure upstream wins over a gate (the browser runners agree): that is an error
