@@ -204,7 +204,7 @@ test("x402 chat: reports failed completion or replay after one payment", async (
       assert.equal(error.status, 500);
       assert.equal(error.requestId, "req_x402-test");
       assert.match(error.paymentId, /^pay_/);
-      assert.match(error.message, /after payment was sent \(HTTP 500, request req_x402-test\)/);
+      assert.match(error.message, /failed \(HTTP 500, request req_x402-test\)/);
       assert.doesNotMatch(error.message, /balance|private prompt|top up/i);
       return true;
     });

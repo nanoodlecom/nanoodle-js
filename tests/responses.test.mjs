@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Workflow, NanoClient } from "../src/index.mjs";
+import { Workflow, NanoClient, RunError } from "../src/index.mjs";
 import { startMockServer, mockOpts, WAV_B64 } from "./harness/mock-server.mjs";
 
 const llmWf = (srv, fields = {}) => Workflow.fromJSON({
@@ -31,6 +31,26 @@ test("chat parse: array content joins its .text parts", async (t) => {
   assert.equal(result.get("LLM"), "Hello world");
 });
 
+test("chat parse failure preserves the provider's reported cost and remaining balance", async () => {
+  const wf = Workflow.fromJSON({
+    nodes: [{ id: "n1", type: "llm", fields: { model: "m", prompt: "hi" } }],
+    links: [],
+  }, {
+    apiKey: "test-key",
+    fetch: async () => new Response('{"choices":[', {
+      headers: { "content-type": "application/json", "x-cost": "0.07", "x-remaining-balance": "3.45" },
+    }),
+  });
+  await assert.rejects(wf.run({}), error => {
+    assert.ok(error instanceof RunError);
+    assert.equal(error.result.costUsd, 0.07);
+    assert.equal(error.result.nodes.n1.costUsd, 0.07);
+    assert.equal(error.result.costExact, true);
+    assert.equal(error.result.remainingBalance, 3.45);
+    return true;
+  });
+});
+
 test("llm showThinking: message.reasoning rides in a thinking fence before the answer", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());
@@ -48,16 +68,92 @@ test("llm showThinking: message.reasoning rides in a thinking fence before the a
   assert.equal(plain.get("LLM"), "42");
 });
 
-test("image parse: empty data list → 'no image in response'", async (t) => {
+test("image parse: empty data list reports failure and retains the bill once", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());
-  srv.script("POST /v1/images/generations", { json: { data: [], cost: 0.02 } });
+  srv.script("POST /v1/images/generations", {
+    json: { data: [], cost: 0.02, remainingBalance: 4 },
+    headers: { "x-cost": "0.08", "x-remaining-balance": "3.45" },
+  });
   const wf = Workflow.fromJSON({
     nodes: [{ id: "n1", type: "image", fields: { model: "flux", prompt: "x" } }],
     links: [],
   }, mockOpts(srv));
-  await assert.rejects(wf.run({}), /no image in response/);
+  await assert.rejects(wf.run({}), error => {
+    assert.ok(error instanceof RunError);
+    assert.match(error.message, /no image in response/);
+    assert.equal(error.result.costUsd, 0.02, "JSON cost takes precedence and is counted once");
+    assert.equal(error.result.nodes.n1.costUsd, 0.02);
+    assert.equal(error.result.costExact, true);
+    assert.equal(error.result.remainingBalance, 3.45, "the balance header takes precedence");
+    return true;
+  });
 });
+
+for (const [kind, call] of [
+  ["chat", (client, io) => client.chat([], "m", {}, io)],
+  ["decide", (client, io) => client.decide({}, io)],
+  ["image", (client, io) => client.image({ model: "m" }, io)],
+  ["video", (client, io) => client.video("m", "hi", {}, undefined, io)],
+  ["audio", (client, io) => client.audio("m", "hi", {}, io)],
+  ["transcribe", (client, io) => client.transcribe("m", "data:audio/wav;base64," + WAV_B64, null, io)],
+]) {
+  test(`${kind} calls the cost callback once when successful HTTP carries invalid JSON`, async () => {
+    const events = [];
+    const parseError = new SyntaxError("provider response cut short");
+    const client = new NanoClient({
+      apiKey: "test-key",
+      fetch: async () => ({
+        ok: true,
+        headers: new Headers({
+          "content-type": "application/json", "x-nano-cost": "0.11", "x-remaining-balance": "4.5",
+        }),
+        json: () => Promise.reject(parseError),
+      }),
+    });
+    await assert.rejects(call(client, { onCost: cost => events.push(cost) }), error => error === parseError);
+    assert.deepEqual(events, [{ usd: 0.11, balance: 4.5 }]);
+  });
+}
+
+test("Decide keeps usage cost and header balance precedence in a valid reply", async () => {
+  const body = {
+    answers: {}, usage: { cost: 0.02 }, cost: 0.03,
+    x_nanogpt_pricing: { costUsd: 0.04 }, remainingBalance: 1,
+  };
+  const costs = [];
+  const client = new NanoClient({
+    fetch: async () => Response.json(body, { headers: { "x-cost": "0.05", "x-remaining-balance": "2" } }),
+  });
+  assert.deepEqual(await client.decide({}, { onCost: cost => costs.push(cost) }), body);
+  assert.deepEqual(costs, [{ usd: 0.02, balance: 2 }]);
+});
+
+for (const kind of ["video", "audio"]) {
+  test(`${kind} preserves an accepted job and its accounting when the submit body settles after Stop`, async () => {
+    const ac = new AbortController();
+    const body = { runId: "paid-job", cost: 0.05, paymentSource: "balance", isApiRequest: true };
+    const events = [];
+    const client = new NanoClient({
+      apiKey: "test-key",
+      fetch: async (_url, init) => {
+        assert.equal(init.method, "POST", "stopped work must not start polling");
+        return {
+          ok: true,
+          headers: new Headers({ "content-type": "application/json", "x-remaining-balance": "4.2" }),
+          json: async () => {
+            ac.abort(new Error("stopped during submit"));
+            return body;
+          },
+        };
+      },
+    });
+    const io = { signal: ac.signal, onCost: cost => events.push(cost), onRunId: job => events.push(job) };
+    const run = kind === "video" ? client.video("m", "hi", {}, undefined, io) : client.audio("m", "hi", {}, io);
+    await assert.rejects(run, /stopped during submit/);
+    assert.deepEqual(events, [{ usd: 0.05, balance: 4.2 }, kind === "video" ? body.runId : body]);
+  });
+}
 
 test("transcribe parse priority: transcription → text → data.transcription/text", async (t) => {
   const srv = await startMockServer();

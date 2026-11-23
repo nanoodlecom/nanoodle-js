@@ -8,7 +8,6 @@ import {
   resizeCropImage, trimAudioToWav, extractAudioToWav,
   extractVideoFrames, concatVideos, muxSoundtrack, maskToSource, fitImageInline, fitImageJpeg,
 } from "./local-media.mjs";
-import { render3dMedia } from "./render3d.mjs";
 import { decideRun, decideImageLimits } from "./decide.mjs";
 import { cleanVoiceRun, CLEANVOICE_DEFAULT_MODEL } from "./cleanvoice.mjs";
 import { runEndpoint } from "./endpoint.mjs";
@@ -577,6 +576,9 @@ export const RUNNERS = {
 
   async render3d(n, inp, ctx) {
     if (!inp.model) throw new NanoodleError("render3d: connect a model first");
+    // Keep the headless driver and its module-relative assets out of the classic browser bundle.
+    if (!globalThis.process?.versions?.node) throw new NanoodleError("render3d requires a Node.js executor with Chromium");
+    const { render3dMedia } = await import("./render3d.mjs");
     const media = mediaOpts(ctx);
     return render3dMedia(inp.model, n.fields || {}, { ...media, onProgress: ctx && ctx.progress });
   },

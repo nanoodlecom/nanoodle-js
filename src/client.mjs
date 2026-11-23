@@ -1,6 +1,6 @@
 import { imageModelOpts } from "./image-options.mjs";
 import { NanoodleError } from "./errors.mjs";
-import { throwIfAborted } from "./deadline.mjs";
+import { abortReason, throwIfAborted } from "./deadline.mjs";
 import { b64ImageMime, bytesToDataUrl, dataUrlBytes, downloadMedia, sniffMime, MEDIA_INLINE_MAX } from "./media.mjs";
 import { assertPaymentOption, parseNanoInvoice, looksLikeResult } from "./x402.mjs";
 
@@ -26,14 +26,26 @@ export function httpError(status, bodyText, headers) {
   return new NanoodleError(status + ": " + String(bodyText).slice(0, 160), { code: "http", status });
 }
 
-async function paidResponseError(response, paymentId, stage) {
+function notePaymentResponse(payment, response) {
   const requestId = response.headers?.get?.("x-request-id");
-  const reference = /^[a-z0-9][a-z0-9._:-]{0,127}$/i.test(requestId || "") ? requestId : null;
-  await response.text().catch(() => {});
+  payment.httpStatus = response.status;
+  payment.requestId = typeof requestId === "string" && /^[a-z0-9][a-z0-9._:-]{0,127}$/i.test(requestId) ? requestId : null;
+}
+
+function paymentError(payment, message, code = "x402") {
+  const { paymentId, statusUrl, completeUrl, stage, httpStatus, requestId } = payment;
+  const uncertain = payment.status === "callback-failed" ? " The wallet callback failed and may already have sent a transfer." : "";
   return new NanoodleError(
-    `NanoGPT x402 ${stage} failed after payment was sent (HTTP ${response.status}${reference ? `, request ${reference}` : ""}). Check the payment status before paying again.`,
-    { code: "x402", status: response.status, paymentId, stage, requestId: reference },
+    `${message}${uncertain} Payment ${paymentId}. Check ${statusUrl || "the payment status"} before paying again.`,
+    { code, paymentId, statusUrl, completeUrl, stage, status: httpStatus, requestId },
   );
+}
+
+function paidResponseError(response, payment) {
+  // The recovery reference is available from headers even if the body hangs.
+  response.body?.cancel?.().catch(() => {});
+  const { stage, httpStatus, requestId } = payment;
+  return paymentError(payment, `NanoGPT x402 ${stage} failed (HTTP ${httpStatus}${requestId ? `, request ${requestId}` : ""}).`);
 }
 
 /**
@@ -73,6 +85,20 @@ export function costWithHeaders(j, r) {
     usd: fromJson.usd != null ? fromJson.usd : fromHeaders.usd,
     balance: fromHeaders.balance != null ? fromHeaders.balance : fromJson.balance,
   };
+}
+
+/** Account for a successful HTTP response even if its body cannot be decoded or used. */
+async function readBilledJson(response, onCost, useUsageCost = false) {
+  let body;
+  try {
+    body = await response.json();
+    return body;
+  } finally {
+    if (onCost) {
+      const usage = useUsageCost && typeof body?.usage?.cost === "number" ? body.usage.cost : null;
+      onCost(costWithHeaders(usage != null ? { ...body, cost: usage } : body, response));
+    }
+  }
 }
 
 function abortError(reason) {
@@ -145,32 +171,75 @@ export class NanoClient {
    * original request stamped with the settled payment id. Each API call pays
    * at most once; a second 402 after settling is an error, never a second send.
    */
-  async _paidFetch(url, init, signal) {
+  async _paidFetch(url, init, { signal, trackPayment } = {}) {
     throwIfAborted(signal);
     const r = await this.fetch(url, init);
     if (r.status !== 402 || !this.payment || this.apiKey) return r;
-    const settled = await this._settle402(r, signal);
-    if (settled.response) return settled.response; // complete replayed the stored request
-    throwIfAborted(signal);
-    const r2 = await this.fetch(url, { ...init, headers: { ...init.headers, "x-x402-payment-id": settled.paymentId } });
-    if (!r2.ok) throw await paidResponseError(r2, settled.paymentId, "replay");
-    return r2;
-  }
-
-  async _settle402(r, signal) {
     let body = null;
     try { body = await r.json(); } catch { /* fall through to the generic funds error */ }
     const invoice = body && parseNanoInvoice(body, this.baseUrl);
-    if (!invoice || !invoice.paymentId || !invoice.completeUrl) {
+    if (typeof invoice?.paymentId !== "string" || !invoice.paymentId || !invoice.completeUrl) {
       throw new NanoodleError(
         "payment required, but the 402 response offered no usable Nano option" +
         (body ? " — " + JSON.stringify(body).slice(0, 200) : ""), { code: "x402", status: 402 });
     }
     throwIfAborted(signal);
     if (invoice.expiresAt && invoice.expiresAt <= Date.now()) {
-      throw new NanoodleError("payment window expired before payment (" + invoice.paymentId + ", to " + invoice.payTo + ") — request a fresh invoice", { code: "x402-expired", paymentId: invoice.paymentId });
+      throw new NanoodleError("payment window expired before payment (" + invoice.paymentId + ", to " + invoice.payTo + ") — request a fresh invoice",
+        { code: "x402-expired", paymentId: invoice.paymentId, statusUrl: invoice.statusUrl, completeUrl: invoice.completeUrl, stage: "payment" });
     }
-    await this.payment(invoice); // ← the callback does the actual XNO send
+    const payment = {
+      paymentId: invoice.paymentId, statusUrl: invoice.statusUrl, completeUrl: invoice.completeUrl,
+      stage: "payment", status: "callback-pending", redeemed: false, httpStatus: null, requestId: null,
+    };
+    throwIfAborted(signal);
+    try {
+      // Register before calling user code, which can synchronously cancel the run.
+      let finish;
+      const drained = new Promise(resolve => { finish = resolve; });
+      try {
+        trackPayment?.(payment, drained);
+        await this.payment(invoice);
+        payment.status = "callback-returned";
+      } catch (cause) {
+        payment.status = "callback-failed";
+        const error = paymentError(payment, "Cannot confirm the x402 transfer.");
+        Object.defineProperty(error, "cause", { value: cause, configurable: true });
+        throw error;
+      } finally {
+        finish();
+      }
+
+      throwIfAborted(signal);
+      payment.stage = "completion";
+      const result = await this._settle402(invoice, payment, signal);
+      if (result) {
+        payment.redeemed = true;
+        throwIfAborted(signal);
+        return result;
+      }
+
+      throwIfAborted(signal);
+      payment.stage = "replay";
+      payment.httpStatus = null;
+      payment.requestId = null;
+      const replay = await this.fetch(url, { ...init, headers: { ...init.headers, "x-x402-payment-id": invoice.paymentId } });
+      notePaymentResponse(payment, replay);
+      if (!replay.ok) throw paidResponseError(replay, payment);
+      payment.redeemed = true;
+      throwIfAborted(signal);
+      return replay;
+    } catch (e) {
+      if (e?.paymentId === payment.paymentId) throw e;
+      if (signal?.aborted) {
+        const reason = abortReason(signal);
+        throw paymentError(payment, reason.message, reason.code || "aborted");
+      }
+      throw paymentError(payment, `NanoGPT x402 ${payment.stage} could not be verified.`);
+    }
+  }
+
+  async _settle402(invoice, payment, signal) {
     // The complete endpoint doubles as the poll: 402 = not seen on-chain yet.
     const deadline = invoice.expiresAt || Date.now() + 15 * 60 * 1000;
     while (true) {
@@ -178,6 +247,7 @@ export class NanoClient {
       const cr = await this.fetch(invoice.completeUrl, {
         method: "POST", headers: { "Content-Type": "application/json", "x-x402": "true" }, body: "{}", signal,
       });
+      notePaymentResponse(payment, cr);
       if (cr.ok) {
         const ct = ((cr.headers && cr.headers.get && cr.headers.get("content-type")) || "");
         const mime = ct.split(";")[0].trim().toLowerCase();
@@ -187,7 +257,7 @@ export class NanoClient {
         // not accepted here. The payment is now completed and can't be reused, so dropping this
         // body and re-POSTing only gets a 402.
         if (mime.startsWith("audio/") || mime === "application/octet-stream") {
-          return { paymentId: invoice.paymentId, statusUrl: invoice.statusUrl, response: cr };
+          return cr;
         }
         // Any other non-JSON 2xx (a text/plain settlement ack, a text/html error page) is neither
         // the result nor a settle receipt we can act on. The complete call may already have
@@ -195,40 +265,30 @@ export class NanoClient {
         // double-charge: fail with the payment id instead. No second payment, no re-POST.
         if (mime && !mime.includes("json")) {
           const snippet = String(await cr.text().catch(() => "")).replace(/\s+/g, " ").trim().slice(0, 160);
-          throw new NanoodleError(
-            "payment " + invoice.paymentId + " was sent, but the complete call answered HTTP " + cr.status +
-            " with " + mime + " instead of a result" + (snippet ? " (" + snippet + ")" : "") +
-            " — check " + (invoice.statusUrl || "the payment status") + " before paying again",
-            { code: "x402", status: cr.status, paymentId: invoice.paymentId });
+          throw paymentError(payment, "The complete call answered HTTP " + cr.status +
+            " with " + mime + " instead of a result" + (snippet ? " (" + snippet + ")." : "."));
         }
         let cj = null;
         if (mime.includes("json")) { try { cj = await cr.json(); } catch { /* fail closed below */ } }
         if (!cj || typeof cj !== "object") {
-          throw new NanoodleError(
-            "payment " + invoice.paymentId + " was sent, but completion returned no readable JSON receipt — check " +
-            (invoice.statusUrl || "the payment status") + " before paying again",
-            { code: "x402", paymentId: invoice.paymentId });
+          throw paymentError(payment, "Completion returned no readable JSON receipt.");
         }
         if (looksLikeResult(cj)) {
           // wrap so call sites keep their Response contract (ok/json/text/headers)
-          const response = { ok: true, status: 200, headers: cr.headers, json: async () => cj, text: async () => JSON.stringify(cj) };
-          return { paymentId: invoice.paymentId, statusUrl: invoice.statusUrl, response };
+          return { ok: true, status: 200, headers: cr.headers, json: async () => cj, text: async () => JSON.stringify(cj) };
         }
-        return { paymentId: invoice.paymentId, statusUrl: invoice.statusUrl };
+        return null;
       }
-      if (cr.status !== 402) throw await paidResponseError(cr, invoice.paymentId, "completion");
+      if (cr.status !== 402) throw paidResponseError(cr, payment);
       await cr.text().catch(() => {}); // drain the "not verified yet" body
       if (Date.now() >= deadline) {
-        throw new NanoodleError(
-          "payment window expired before the Nano deposit was detected (payment " + invoice.paymentId + ", " +
-          (invoice.amount || invoice.amountRaw) + " to " + invoice.payTo + ") — if you already sent it, check " +
-          (invoice.explorerUrl || invoice.statusUrl), { code: "x402-expired", paymentId: invoice.paymentId });
+        throw paymentError(payment, "Payment window expired before the Nano deposit was detected.", "x402-expired");
       }
       await sleep(this.pollIntervals.x402, signal);
     }
   }
 
-  async _postJson(path, body, signal) {
+  async _postJson(path, body, io) {
     const payload = JSON.stringify(body);
     if (payload.length > MEDIA_INLINE_MAX) {
       throw new NanoodleError("request body is too large (~4 MB max) — nanoodle sends media inline as base64; use smaller/shorter media");
@@ -237,8 +297,8 @@ export class NanoClient {
       method: "POST",
       headers: { "Content-Type": "application/json", ...this._auth() },
       body: payload,
-      signal,
-    }, signal);
+      signal: io.signal,
+    }, io);
   }
 
   async _pollJson(path, signal, remainingMs) {
@@ -276,7 +336,8 @@ export class NanoClient {
   }
 
   /** POST /api/v1/chat/completions (non-streaming). Returns the assistant text. */
-  async chat(messages, model, opts = {}, { onCost, signal } = {}) {
+  async chat(messages, model, opts = {}, io = {}) {
+    const { onCost } = io;
     const body = { model, messages };
     // Carbon has no sampling-temperature control; omit it rather than restoring a default.
     if (model !== "google/gemini-4-carbon") body.temperature = opts.temperature != null && opts.temperature !== "" ? +opts.temperature : 0.8;
@@ -289,10 +350,9 @@ export class NanoClient {
     // The legacy spellings (max_completion_tokens, max_output_tokens,
     // maxTokens) are never read here, so they can never leak into the body.
     if (opts.max_tokens != null) body.max_tokens = opts.max_tokens;
-    const r = await this._postJson("/api/v1/chat/completions", body, signal);
+    const r = await this._postJson("/api/v1/chat/completions", body, io);
     if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
-    const j = await r.json();
-    if (onCost) onCost(costWithHeaders(j, r));
+    const j = await readBilledJson(r, onCost);
     const msg = (j.choices && j.choices[0] && j.choices[0].message) || {};
     const txt = msg.content;
     // empty-string content is a billed-but-empty reply, not a protocol failure — return it
@@ -309,13 +369,11 @@ export class NanoClient {
    * POST /api/v1/decisions (⚖️ Decide). Returns the JSON ({ answers, usage:{ input_tokens, output_tokens, cost } }).
    * Decision models bill input tokens only; the real price rides usage.cost.
    */
-  async decide(body, { onCost, signal } = {}) {
-    const r = await this._postJson("/api/v1/decisions", body, signal);
+  async decide(body, io = {}) {
+    const { onCost } = io;
+    const r = await this._postJson("/api/v1/decisions", body, io);
     if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
-    const j = await r.json();
-    const c = j && j.usage && typeof j.usage.cost === "number" ? j.usage.cost : null;
-    if (onCost) onCost(costWithHeaders(c != null ? { ...j, cost: c } : j, r));
-    return j;
+    return readBilledJson(r, onCost, true);
   }
 
   /** POST /v1/images/generations (NOTE: not /api/v1). Returns data: / https URL(s).
@@ -323,15 +381,16 @@ export class NanoClient {
    * `layer` metadata aligned by index with urls (layer-decomposition models return
    * { z_index, name, description, bounding_box } per item), or null when no item
    * carries any. Items with neither b64_json nor url drop out of both arrays. */
-  async image({ prompt, model, size, imageDataUrl, maskDataUrl, extra, n = 1, multi = false, items = false }, { onCost, signal } = {}) {
+  async image({ prompt, model, size, imageDataUrl, maskDataUrl, extra, n = 1, multi = false, items = false }, io = {}) {
+    const { onCost } = io;
     const body = { model, size: size || "1024x1024", n, response_format: "b64_json" };
     if (prompt) body.prompt = prompt; // omit when blank — upscalers run with no instruction
     if (imageDataUrl) body.imageDataUrl = imageDataUrl; // string OR array (edit multi-reference)
     if (maskDataUrl) body.maskDataUrl = maskDataUrl; // white = repaint
     Object.assign(body, imageModelOpts(extra));
-    const r = await this._postJson("/v1/images/generations", body, signal);
+    const r = await this._postJson("/v1/images/generations", body, io);
     if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
-    const j = await r.json();
+    const j = await readBilledJson(r, onCost);
     const pairs = (j.data || [])
       .map((d) => {
         const url = d.b64_json ? "data:" + b64ImageMime(d.b64_json) + ";base64," + d.b64_json : d.url;
@@ -340,7 +399,6 @@ export class NanoClient {
       .filter(Boolean);
     const urls = pairs.map((p) => p.url);
     if (!urls.length) throw new NanoodleError("no image in response");
-    if (onCost) onCost(costWithHeaders(j, r));
     if (!multi) return urls[0];
     if (items) {
       const layers = pairs.map((p) => p.layer);
@@ -354,7 +412,8 @@ export class NanoClient {
   // keeping a resume registry (play's PENDING_VIDEO) records it before any await.
   // io.resume (a runId) skips the submit — and its charge — and goes straight to
   // polling: how a timed-out job is picked back up without paying twice.
-  async video(model, prompt, opts = {}, imageDataUrl, { onCost, onPoll, onRunId, resume, signal } = {}) {
+  async video(model, prompt, opts = {}, imageDataUrl, io = {}) {
+    const { onCost, onPoll, onRunId, resume, signal } = io;
     const is3d = opts.mediaKind === "model3d";
     const body = { model };
     // 3D omits an empty prompt (image-only models). Video still sends a blank prompt.
@@ -384,10 +443,9 @@ export class NanoClient {
     if (opts.refImages && opts.refImages.length) body[opts.refKey || "reference_images"] = opts.refImages; // wired refs win last
     let runId = resume || null;
     if (!runId) {
-      const r = await this._postJson("/api/generate-video", body, signal);
+      const r = await this._postJson("/api/generate-video", body, io);
       if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
-      const j = await r.json();
-      if (onCost) onCost(costWithHeaders(j, r));
+      const j = await readBilledJson(r, onCost);
       runId = j.runId || j.id;
       if (!runId) throw new NanoodleError("no runId returned");
       if (onRunId) onRunId(runId);
@@ -445,7 +503,8 @@ export class NanoClient {
    * response — runId + refund metadata the status poll needs); io.resume (that same job
    * object) skips the submit + charge and resumes polling a prior run's job.
    */
-  async audio(model, input, extra = {}, { onCost, onPoll, onRunId, resume, signal } = {}) {
+  async audio(model, input, extra = {}, io = {}) {
+    const { onCost, onPoll, onRunId, resume, signal } = io;
     if (resume) {
       const url = await this._pollAudio(model, resume, { onPoll, signal });
       if (!url) throw new NanoodleError("no audio url in response");
@@ -460,12 +519,11 @@ export class NanoClient {
       delete body.input;
       delete body.prompt;
     }
-    const r = await this._postJson("/api/v1/audio/speech", body, signal);
+    const r = await this._postJson("/api/v1/audio/speech", body, io);
     if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
     const ct = (r.headers && r.headers.get && r.headers.get("content-type")) || "";
     if (ct.includes("application/json")) {
-      const j = await r.json();
-      if (onCost) onCost(costWithHeaders(j, r));
+      const j = await readBilledJson(r, onCost);
       let url = j.url || j.audioUrl || (j.data && j.data.url) || (j.data && j.data.audioUrl);
       if (!url && (j.runId || j.id)) {
         if (onRunId) onRunId(j);
@@ -518,7 +576,8 @@ export class NanoClient {
   }
 
   /** POST /api/v1/audio/transcriptions (multipart; the audio form field MUST be "file"). */
-  async transcribe(model, audioUrl, language, { onCost, signal } = {}) {
+  async transcribe(model, audioUrl, language, io = {}) {
+    const { onCost, signal } = io;
     let bytes, mime;
     if (/^data:/i.test(audioUrl)) {
       ({ bytes, mime } = dataUrlBytes(audioUrl));
@@ -537,10 +596,9 @@ export class NanoClient {
     fd.append("model", model);
     if (language) fd.append("language", language);
     // no explicit Content-Type — fetch sets the multipart boundary
-    const r = await this._paidFetch(this.baseUrl + "/api/v1/audio/transcriptions", { method: "POST", headers: this._auth(), body: fd, signal }, signal);
+    const r = await this._paidFetch(this.baseUrl + "/api/v1/audio/transcriptions", { method: "POST", headers: this._auth(), body: fd, signal }, io);
     if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
-    const j = await r.json();
-    if (onCost) onCost(costWithHeaders(j, r));
+    const j = await readBilledJson(r, onCost);
     const txt = j.transcription != null ? j.transcription
       : j.text != null ? j.text
       : j.data && (j.data.transcription != null ? j.data.transcription : j.data.text);
@@ -585,7 +643,7 @@ export class NanoClient {
 
   /** Optional helper: POST /api/check-balance → { usd_balance }. */
   async checkBalance(signal) {
-    const r = await this._postJson("/api/check-balance", {}, signal);
+    const r = await this._postJson("/api/check-balance", {}, { signal });
     if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
     return r.json();
   }

@@ -2,9 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Workflow, RunError } from '../src/index.mjs';
 import { NanoClient } from '../src/client.mjs';
+import { PNG_B64 } from './harness/mock-server.mjs';
 
 const graph = (fields = {}) => ({ nodes: [{ id: 'n', type: 'image', fields: { prompt: 'hi', model: 'test', ...fields } }], links: [] });
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+const quote = (paymentId = 'pay_fixture') => json({ accepts: [{ scheme: 'nano', payTo: 'nano_test', paymentId, amount: '1' }] }, 402);
+const nextTurn = () => new Promise(resolve => setImmediate(resolve));
 
 for (const scope of ['run', 'node']) {
   test(`${scope} deadline prevents submission after synchronous progress blocks the timer`, async (t) => {
@@ -116,6 +119,183 @@ test('cancelled invoice body never reaches the payment callback', async () => {
   await assert.rejects(client.chat([], 'test', {}, { signal: ac.signal }), /cancel before payment/);
   assert.equal(payments, 0);
 });
+
+for (const mode of ['abort', 'run timeout', 'node timeout']) {
+  test(`x402 ${mode} waits for the entered callback and preserves the original recovery reference`, { timeout: 1500 }, async () => {
+    const controller = new AbortController();
+    const wallet = Promise.withResolvers(), entered = Promise.withResolvers(), stopped = Promise.withResolvers();
+    const calls = [];
+    const wf = Workflow.fromJSON(graph(mode === 'node timeout' ? { timeoutMs: 75 } : {}), {
+      apiKey: null, baseUrl: 'https://provider.test',
+      async payment(invoice) {
+        assert.equal(arguments.length, 1);
+        assert.equal(invoice.paymentId, 'pay_fixture');
+        entered.resolve();
+        // User callbacks can take time to return and can throw after broadcasting.
+        return wallet.promise;
+      },
+      async fetch(url, init) {
+        calls.push(new URL(url).pathname);
+        init.signal.addEventListener('abort', () => stopped.resolve(), { once: true });
+        return quote();
+      },
+    });
+    let published = false;
+    const run = wf.run({}, { signal: controller.signal, ...(mode === 'run timeout' ? { timeoutMs: 75 } : {}) });
+    run.then(() => { published = true; }, () => { published = true; });
+    try {
+      await entered.promise;
+      if (mode === 'abort') controller.abort(new Error('stop the run'));
+      await stopped.promise;
+      await nextTurn();
+      assert.equal(published, false, 'terminal result waits for the wallet callback');
+      if (mode === 'abort') wallet.reject(new Error('private wallet failure'));
+      else wallet.resolve();
+      await assert.rejects(run, e => {
+        assert.ok(e instanceof RunError);
+        const [payment] = e.result.payments;
+        assert.deepEqual(payment, {
+          paymentId: 'pay_fixture',
+          statusUrl: 'https://provider.test/api/x402/status/pay_fixture',
+          completeUrl: 'https://provider.test/api/x402/complete/pay_fixture',
+          stage: 'payment',
+          status: mode === 'abort' ? 'callback-failed' : 'callback-returned',
+          redeemed: false,
+          httpStatus: null,
+          requestId: null,
+          nodeId: 'n',
+        });
+        assert.match(e.result.nodes.n.error, /pay_fixture/);
+        assert.doesNotMatch(JSON.stringify(e.result), /nano_test|private wallet failure/);
+        assert.equal(e.result.errors[0].paymentId, payment.paymentId);
+        return true;
+      });
+      assert.deepEqual(calls, ['/v1/images/generations']);
+    } finally { wallet.resolve(); }
+  });
+}
+
+test('x402 cancellation can finish while completion I/O hangs and never starts replay', { timeout: 1500 }, async () => {
+  const controller = new AbortController();
+  const completion = Promise.withResolvers(), started = Promise.withResolvers();
+  let sends = 0, replays = 0;
+  const wf = Workflow.fromJSON(graph(), { apiKey: null, async payment() { sends++; }, async fetch(url, init) {
+    if (new URL(url).pathname.includes('/complete/')) {
+      started.resolve();
+      return completion.promise;
+    }
+    if (init.headers['x-x402-payment-id']) replays++;
+    return quote();
+  } });
+  const run = wf.run({}, { signal: controller.signal });
+  await started.promise;
+  controller.abort(new Error('stop completion polling'));
+  let snapshot, result;
+  try {
+    await assert.rejects(run, e => {
+      result = e.result;
+      const [payment] = result.payments;
+      assert.equal(payment.stage, 'completion');
+      assert.equal(payment.status, 'callback-returned');
+      assert.equal(payment.redeemed, false);
+      snapshot = JSON.stringify(result);
+      return true;
+    });
+  } finally { completion.resolve(json({ status: 'completed' })); }
+  await nextTurn();
+  assert.equal(sends, 1);
+  assert.equal(replays, 0);
+  assert.equal(JSON.stringify(result), snapshot);
+});
+
+test('one failed Decide request stops its parallel paid order and drains the wallet', { timeout: 3000 }, async () => {
+  const image = 'data:image/png;base64,' + PNG_B64;
+  const wallet = Promise.withResolvers(), entered = Promise.withResolvers(), stopped = Promise.withResolvers();
+  const calls = [];
+  const wf = Workflow.fromJSON({
+    nodes: [
+      { id: 'a', type: 'upload', fields: { image } },
+      { id: 'b', type: 'upload', fields: { image } },
+      { id: 'd', type: 'decide', fields: { mode: 'pick', model: 'perplexity/pplx-decider-v1.2' } },
+    ],
+    links: [
+      { from: { node: 'a', port: 'image' }, to: { node: 'd', port: 'img1' } },
+      { from: { node: 'b', port: 'image' }, to: { node: 'd', port: 'img2' } },
+    ],
+  }, {
+    apiKey: null,
+    async payment() {
+      entered.resolve();
+      await wallet.promise;
+    },
+    async fetch(url, init) {
+      calls.push(new URL(url).pathname);
+      if (calls.length === 1) {
+        init.signal.addEventListener('abort', () => stopped.resolve(), { once: true });
+        return quote();
+      }
+      await entered.promise;
+      return json({ error: 'other order unavailable' }, 500);
+    },
+  });
+  let published = false;
+  const run = wf.run();
+  run.then(() => { published = true; }, () => { published = true; });
+  try {
+    await stopped.promise;
+    await nextTurn();
+    assert.equal(published, false);
+    wallet.resolve();
+    await assert.rejects(run, e => {
+      assert.ok(e instanceof RunError);
+      assert.match(e.message, /other order unavailable/);
+      assert.equal(e.result.payments[0].nodeId, 'd');
+      assert.equal(e.result.payments[0].status, 'callback-returned');
+      assert.equal(e.result.payments[0].redeemed, false);
+      return true;
+    });
+    assert.deepEqual(calls, ['/api/v1/decisions', '/api/v1/decisions']);
+  } finally { wallet.resolve(); }
+});
+
+test('x402 records a redeemed payment when the provider returns the paid output', async () => {
+  const wf = Workflow.fromJSON(graph(), { apiKey: null, payment: async () => {}, fetch: async url =>
+    new URL(url).pathname.includes('/complete/') ? json({ data: [{ url: 'https://cdn.invalid/x.png' }] }) : quote(),
+  });
+  const result = await wf.run();
+  const [payment] = result.payments;
+  assert.equal(payment.paymentId, 'pay_fixture');
+  assert.equal(payment.status, 'callback-returned');
+  assert.equal(payment.stage, 'completion');
+  assert.equal(payment.redeemed, true);
+  assert.equal(result.get('Image').url, 'https://cdn.invalid/x.png');
+});
+
+for (const stage of ['completion', 'replay']) {
+  test(`x402 ${stage} recovery metadata survives workflow wrapping`, async () => {
+    const providerError = () => new Response('private provider error', { status: 502, headers: { 'x-request-id': 'request_fixture' } });
+    let sends = 0;
+    const wf = Workflow.fromJSON(graph(), { apiKey: null, async payment() { sends++; }, async fetch(url, init) {
+      if (init.headers['x-x402-payment-id']) return providerError();
+      if (new URL(url).pathname.includes('/complete/')) return stage === 'completion' ? providerError() : json({ status: 'completed' });
+      return quote();
+    } });
+    await assert.rejects(wf.run(), e => {
+      assert.ok(e instanceof RunError);
+      assert.equal(e.result.payments[0].httpStatus, 502);
+      assert.equal(e.result.payments[0].redeemed, false);
+      const { paymentId, requestId, statusUrl, completeUrl, code, status } = e.result.errors[0];
+      assert.deepEqual({ paymentId, requestId, code, status }, { paymentId: 'pay_fixture', requestId: 'request_fixture', code: 'x402', status: 502 });
+      assert.match(statusUrl, /status\/pay_fixture$/);
+      assert.match(completeUrl, /complete\/pay_fixture$/);
+      assert.equal(e.result.errors[0].stage, stage);
+      assert.match(e.message, /pay_fixture/);
+      assert.doesNotMatch(e.message, /private provider error/);
+      return true;
+    });
+    assert.equal(sends, 1);
+  });
+}
 
 for (const kind of ['video', 'audio']) {
   test(`${kind} polling stops on permanent auth error and retries a transient HTTP JSON error`, async () => {

@@ -12,17 +12,13 @@ import { b64ImageMime, bytesToDataUrl } from "./media.mjs";
 export const ENDPOINT_DEF_URL = "http://127.0.0.1:8787/v1/chat/completions";
 export const ENDPOINT_MODES = ["chat", "image", "video", "audio", "json"];
 
-export function endpointMode(n) {
-  const m = String((n && n.fields && n.fields.mode) || "chat").toLowerCase();
-  return ENDPOINT_MODES.includes(m) ? m : "chat";
-}
-
-export function endpointOutPort(n) {
-  const m = endpointMode(n);
-  if (m === "image") return { name: "image", type: "image" };
-  if (m === "video") return { name: "video", type: "video" };
-  if (m === "audio") return { name: "audio", type: "audio" };
-  return { name: "text", type: "text" };
+export function endpointOutPort(n, out) {
+  // Inspection knows the authored route. At runtime the parser already selected
+  // the primary port, including mode/URL wires and per-run settings overrides.
+  const emitted = out && ["text", "image", "video", "audio"].find(name => Object.hasOwn(out, name));
+  const mode = emitted || endpointResolveTarget(n).mode;
+  const name = mode === "chat" || mode === "json" ? "text" : mode;
+  return { name, type: name };
 }
 
 function endpointIsLoopbackHost(host) {
