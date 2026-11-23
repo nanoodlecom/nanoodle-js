@@ -296,6 +296,7 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
     remainingBalance: result.remainingBalance,
     errors: result.errors,
     gated: result.gated || [],
+    ...(result.payments?.length ? { payments: result.payments } : {}),
     nodes: Object.fromEntries(Object.entries(result.nodes).map(([id, r]) => [id, {
       status: r.status, ms: r.ms, costUsd: r.costUsd, error: r.error,
       ...(r.runId != null ? { runId: r.runId } : {}),

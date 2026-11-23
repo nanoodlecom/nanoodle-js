@@ -402,6 +402,15 @@ pays at most once; graphs with several paid nodes produce one small invoice
 per node. Chat and image nodes are live-verified; async video/audio job
 polling under accountless mode is untested upstream.
 
+When a run stops, it waits for wallet callbacks it already entered while
+cancelling the rest of the work. Give wallet operations their own timeout.
+`result.payments` (including on `RunError.result`) records each attempted
+payment's ID, status and completion URLs, callback outcome, last stage, and
+whether a successful provider response redeemed it. A callback can return
+after showing a QR code, or throw after submitting a transfer, so its outcome
+alone cannot confirm payment. Check the original payment status before paying
+again. The CLI includes these records in its JSON summary for paid runs.
+
 Copy-paste scripts (CLI, QR callback, wallet stub, bare chat):
 [examples/x402/](examples/x402/).
 

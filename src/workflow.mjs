@@ -114,7 +114,7 @@ class GateSkip extends Error {
 }
 
 export class RunResult {
-  constructor({ outputs, nodes, errors, gated = [], costUsd, costExact, remainingBalance }) {
+  constructor({ outputs, nodes, errors, gated = [], payments = [], costUsd, costExact, remainingBalance }) {
     /** { [friendlyKey | nodeId]: value } — sink node primary outputs (a sink skipped by a closed gate has none) */
     this.outputs = outputs;
     /**
@@ -140,6 +140,8 @@ export class RunResult {
     this.costExact = costExact;
     /** last remaining-balance the API reported, or null */
     this.remainingBalance = remainingBalance;
+    /** x402 wallet attempts and provider acknowledgement/recovery details for this run */
+    this.payments = payments;
   }
 
   /** Output lookup by friendly key or node id (case-insensitive). */
@@ -347,6 +349,8 @@ export class Workflow {
     const emit = (evt) => { if (onProgress) { try { onProgress(evt); } catch { /* listener errors never kill the run */ } } };
     const nodesRec = Object.fromEntries(graph.nodes.map(n => [n.id, null]));
     const errors = [];
+    const payments = [];
+    const canPay = !this.client.apiKey && this.client.payment;
     const cost = { total: 0, exact: true, balance: null };
     const byId = new Map(graph.nodes.map((n) => [n.id, n]));
     const promises = new Map();
@@ -356,7 +360,7 @@ export class Workflow {
     // callbacks from a runner that ignored its abort signal must not mutate anything.
     let runSettled = false;
     const frozen = (rec) => runSettled || rec.final === true;
-    const ctxFor = (node, rec, nodeSignal = ac.signal) => {
+    const ctxFor = (node, rec, nodeSignal, trackPayment) => {
       const report = (evt) => {
         if (frozen(rec)) return;
         emit(evt);
@@ -376,7 +380,7 @@ export class Workflow {
         rec.runId = runId;
         report({ type: "node-run-id", nodeId: node.id, name: displayName(node), runId });
       };
-      const io = { onCost, onPoll, onRunId, signal: nodeSignal };
+      const io = { onCost, onPoll, onRunId, signal: nodeSignal, trackPayment };
       return {
         chat: (messages, model, opts) => this.client.chat(messages, model, opts, io),
         decide: (body) => this.client.decide(body, io),
@@ -405,7 +409,17 @@ export class Workflow {
     const execNode = async (n) => {
       const rec = nodesRec[n.id];
       let nodeTimer = null, unlinkNode = null;
+      let nodeController = null;
       let nodeSignal = ac.signal;
+      const nodePayments = [];
+      const activePayments = canPay ? new Set() : null;
+      const trackPayment = canPay ? (record, drained) => {
+        record.nodeId = n.id;
+        nodePayments.push(record);
+        payments.push(record);
+        activePayments.add(drained);
+        drained.then(() => activePayments.delete(drained));
+      } : undefined;
       try {
         throwIfAborted(ac.signal);
         let inbound = graph.links.filter((l) => l.to.node === n.id);
@@ -480,13 +494,14 @@ export class Workflow {
         const t0 = Date.now();
         // The node deadline covers progress callbacks, the runner and media publication.
         const timeoutMs = Number(fields.timeoutMs);
-        if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
-          const nac = new AbortController();
-          const onRunAbort = () => nac.abort(ac.signal.reason);
+        const timedNode = Number.isFinite(timeoutMs) && timeoutMs > 0;
+        if (timedNode || canPay) {
+          nodeController = new AbortController();
+          const onRunAbort = () => nodeController.abort(ac.signal.reason);
           ac.signal.addEventListener("abort", onRunAbort, { once: true });
           unlinkNode = () => ac.signal.removeEventListener("abort", onRunAbort);
-          nodeSignal = nac.signal;
-          nodeTimer = startDeadline(nac, timeoutMs, `node timed out after ${timeoutMs}ms`, ac.signal);
+          nodeSignal = nodeController.signal;
+          nodeTimer = startDeadline(nodeController, timedNode ? timeoutMs : null, `node timed out after ${timeoutMs}ms`, ac.signal);
         }
         rec.started = true;
         emit({ type: "node-start", nodeId: n.id, name: displayName(n) });
@@ -500,7 +515,7 @@ export class Workflow {
         throwIfAborted(nodeSignal);
         const nodeForRun = { ...n, fields };
         const out = await withSignal(async () => {
-          const rawOut = await RUNNERS[n.type](nodeForRun, inp, ctxFor(n, rec, nodeSignal));
+          const rawOut = await RUNNERS[n.type](nodeForRun, inp, ctxFor(n, rec, nodeSignal, trackPayment));
           throwIfAborted(nodeSignal);
           return publishNodeMedia(this.client, nodeForRun, rawOut, nodeSignal);
         }, nodeSignal);
@@ -514,9 +529,18 @@ export class Workflow {
       } catch (e) {
         rec.final = true;
         if (e instanceof GateSkip) throw e;
+        // A node can make concurrent paid calls. Close the losing branch's
+        // transport, then wait only for any wallet callbacks already entered.
+        const failure = e;
         enforceDeadline(nodeSignal);
         if (ac.signal.aborted) e = abortReason(ac.signal);
         else if (nodeSignal.aborted) e = abortReason(nodeSignal);
+        if (canPay && nodeController && !nodeSignal.aborted) nodeController.abort(e);
+        if (activePayments?.size) {
+          await Promise.all(activePayments);
+          enforceDeadline(ac.signal);
+          if (ac.signal.aborted) e = abortReason(ac.signal);
+        }
         // ⚖️ Decide gate answered no: a settled, billed decision — not an error. Downstream skips.
         if (e && e.gate === true && !ac.signal.aborted) {
           rec.status = "gated";
@@ -529,11 +553,31 @@ export class Workflow {
         // A prompt-length rejection is free (nothing generated) and, once banked, preventable: the
         // next run budgets the LLM above this node and fits whatever is left. Say that, rather than
         // relaying "please shorten it" about a prompt the caller never wrote.
-        if (learnPromptCap(this._promptCaps, n, e.message)) {
-          e.message = e.message + " — noted: nanoodle keeps this model's prompt inside that limit from now on, so running again should succeed";
+        let message = e?.message ?? String(e);
+        if (learnPromptCap(this._promptCaps, n, message)) {
+          message += " — noted: nanoodle keeps this model's prompt inside that limit from now on, so running again should succeed";
         }
-        rec.error = e.message;
-        errors.push({ nodeId: n.id, name: displayName(n), message: e.message, ...(e && e.code ? { code: e.code } : {}) });
+        const error = { nodeId: n.id, name: displayName(n), ...(e?.code ? { code: e.code } : {}) };
+        const reference = canPay && typeof failure?.paymentId === "string" ? failure : null;
+        const payment = reference
+          ? nodePayments.find(p => p.paymentId === reference.paymentId)
+          : nodePayments.length === 1 ? nodePayments[0] : null;
+        if (payment || reference) {
+          const { paymentId, statusUrl, completeUrl, stage, status, requestId } = reference || {};
+          error.paymentId = paymentId ?? payment?.paymentId;
+          error.statusUrl = statusUrl ?? payment?.statusUrl;
+          error.completeUrl = completeUrl ?? payment?.completeUrl;
+          error.stage = stage ?? payment?.stage;
+          error.status = status ?? payment?.httpStatus ?? null;
+          error.requestId = requestId ?? payment?.requestId ?? null;
+        }
+        for (const p of nodePayments) {
+          if (e?.paymentId === p.paymentId) continue; // the typed transport error already gives that reference
+          if (p.status === "callback-failed") message += " The wallet callback failed and may already have sent a transfer.";
+          message += ` Payment ${p.paymentId}. Check ${p.statusUrl || "the payment status"} before paying again.`;
+        }
+        rec.error = message;
+        errors.push({ ...error, message });
         // fields.onError:"skip" — a failed (or timed-out) node is recorded and skipped; its
         // dependents see undefined ports. A run-level abort/timeout is never skipped.
         const onError = (effFields.get(n.id) || {}).onError;
@@ -541,11 +585,11 @@ export class Workflow {
           rec.status = "skipped";
           rec.skippedOnError = true;
           rec.out = {};
-          emit({ type: "node-skipped", nodeId: n.id, name: displayName(n), reason: "error", error: e.message });
+          emit({ type: "node-skipped", nodeId: n.id, name: displayName(n), reason: "error", error: message });
           return {};
         }
         rec.status = "error";
-        emit({ type: "node-error", nodeId: n.id, name: displayName(n), error: e.message });
+        emit({ type: "node-error", nodeId: n.id, name: displayName(n), error: message });
         throw e;
       } finally {
         if (nodeTimer) clearTimeout(nodeTimer);
@@ -589,6 +633,7 @@ export class Workflow {
       nodes: nodesRec,
       errors,
       gated,
+      payments: payments.map(p => ({ ...p })), // an injected fetch may still settle after abort
       costUsd: cost.total,
       costExact: cost.exact,
       remainingBalance: cost.balance,
@@ -619,7 +664,9 @@ export class Workflow {
           }
         }
       }
-      throw new RunError(msg, result, reason.code ? { code: reason.code } : {});
+      const pending = result.payments.filter(p => !p.redeemed);
+      const recovery = pending.length ? ` Check the original payment status before paying again (${pending.map(p => p.paymentId).join(", ")}).` : "";
+      throw new RunError(msg + recovery, result, reason.code ? { code: reason.code } : {});
     }
 
     if (failedSinks.length) {

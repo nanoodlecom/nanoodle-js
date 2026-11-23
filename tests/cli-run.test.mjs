@@ -80,6 +80,7 @@ test("CLI contract: run with no --out saves media under ./noodle-out and prints 
   assert.equal(summary.outputs.Image, join("noodle-out", "Image.png"));
   assert.equal(summary.costUsd, 0.0212);
   assert.deepEqual(summary.errors, []);
+  assert.equal(Object.hasOwn(summary, "payments"), false);
 
   // the media file really exists in the DEFAULT out dir, with the mock's PNG bytes
   const saved = await readFile(join(cwd, "noodle-out", "Image.png"));
@@ -255,6 +256,30 @@ test('CLI failure summary retains accepted job ID for recovery', async (t) => {
   const summary = JSON.parse(r.stdout);
   assert.equal(summary.nodes.v.runId, 'accepted-job');
   assert.equal(summary.nodes.v.status, 'error');
+});
+
+test("CLI --pay JSON reports the original payment after a completion failure", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /v1/images/generations", {
+    status: 402, json: { accepts: [{ scheme: "nano", payTo: "nano_test", paymentId: "pay_cli", amount: "1" }] },
+  });
+  srv.script("POST /api/x402/complete/pay_cli", {
+    status: 502, headers: { "x-request-id": "request_cli" }, json: { error: "private provider error" },
+  });
+  const cwd = await mkdtemp(join(tmpdir(), "nanoodle-cli-pay-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const graphPath = join(cwd, "g.json");
+  await writeFile(graphPath, JSON.stringify({ nodes: [{ id: "n", type: "image", fields: { model: "test", prompt: "hi" } }] }));
+  const r = await runCli(["run", graphPath, "--pay", "--json"], { cwd, env: { NANOGPT_BASE_URL: srv.url } });
+  assert.equal(r.status, 1, r.stderr);
+  const summary = JSON.parse(r.stdout);
+  assert.equal(summary.payments[0].paymentId, "pay_cli");
+  assert.equal(summary.payments[0].statusUrl, srv.url + "/api/x402/status/pay_cli");
+  assert.equal(summary.payments[0].status, "callback-returned");
+  assert.equal(summary.payments[0].redeemed, false);
+  assert.equal(summary.errors[0].requestId, "request_cli");
+  assert.doesNotMatch(r.stdout, /nano_test|private provider error/);
 });
 
 test('CLI preserves distinct media outputs when sanitized filenames or suffixes collide', async () => {

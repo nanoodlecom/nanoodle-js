@@ -6,14 +6,14 @@ import { NanoodleError } from "./errors.mjs";
 const checks = new WeakMap();
 
 export function startDeadline(controller, timeoutMs, message, parentSignal) {
-  const until = performance.now() + Number(timeoutMs);
+  const until = timeoutMs == null ? Infinity : performance.now() + Number(timeoutMs);
   const expire = () => controller.abort(new NanoodleError(message, { code: "timeout" }));
   const signal = controller.signal;
   checks.set(signal, () => {
     enforceDeadline(parentSignal);
     if (!signal.aborted && performance.now() >= until) expire();
   });
-  return setTimeout(expire, timeoutMs);
+  return timeoutMs == null ? null : setTimeout(expire, timeoutMs);
 }
 
 export function enforceDeadline(signal) {
