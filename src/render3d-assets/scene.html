@@ -1,4 +1,5 @@
 <!doctype html><html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self' data: blob:; img-src data: blob:; base-uri 'none'; form-action 'none'">
 <script type="importmap">{"imports":{"three":"/three.module.js","three/addons/":"/addons/"}}</script>
 </head><body style="margin:0;background:transparent;overflow:hidden">
 <canvas id="c" style="display:block"></canvas>
@@ -47,6 +48,9 @@ window.__render3d = {
   info: null,
   apply(f) {
     const W = f.width || 800, H = f.height || 600;
+    if (!Number.isInteger(W) || !Number.isInteger(H) || W < 16 || H < 16 || W > 2048 || H > 2048) {
+      throw new Error('render3d dimensions must be 16–2048 pixels');
+    }
     renderer.setSize(W, H, false);
     canvas.width = W; canvas.height = H;
     cam.aspect = W / H; cam.updateProjectionMatrix();
@@ -58,17 +62,17 @@ window.__render3d = {
     else { scene.background = new THREE.Color(f.background); renderer.setClearAlpha(1); }
 
     // isolate: hide every part except the chosen one (index, name, or "largest")
-    parts.forEach((m, i) => {
-      let vis = true;
-      if (f.isolate !== undefined && f.isolate !== null && f.isolate !== '') {
-        if (f.isolate === 'largest') {
-          let best = 0, bestVol = -1;
-          parts.forEach((p, j) => { const s = new THREE.Box3().setFromObject(p).getSize(new THREE.Vector3()); const v = s.x * s.y * s.z; if (v > bestVol) { bestVol = v; best = j; } });
-          vis = i === best;
-        } else if (typeof f.isolate === 'number') vis = i === f.isolate;
-        else vis = m.name === String(f.isolate);
-      }
-      m.visible = vis;
+    let isolated = f.isolate;
+    if (isolated === 'largest') {
+      let largest = -1;
+      parts.forEach((part, index) => {
+        const size = new THREE.Box3().setFromObject(part).getSize(new THREE.Vector3());
+        const volume = size.x * size.y * size.z;
+        if (volume > largest) { largest = volume; isolated = index; }
+      });
+    }
+    parts.forEach((part, index) => {
+      part.visible = isolated == null || isolated === '' || (typeof isolated === 'number' ? index === isolated : part.name === isolated);
     });
 
     // explode: offset each part from the model center along its own centroid ray
@@ -87,6 +91,7 @@ window.__render3d = {
     // so clipPos sweeping -1 -> 1 slices the model away along +axis.
     if (f.clipAxis && f.clipAxis !== 'none') {
       const axis = { x: new THREE.Vector3(1, 0, 0), y: new THREE.Vector3(0, 1, 0), z: new THREE.Vector3(0, 0, 1) }[f.clipAxis];
+      if (!axis) throw new Error('render3d slice axis must be x, y or z');
       const through = center.clone().add(axis.clone().multiplyScalar((f.clipPos ?? 0) * radius));
       const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(axis.clone().negate(), through);
       renderer.clippingPlanes = [plane];
@@ -122,16 +127,19 @@ window.__render3d = {
   },
 };
 
-// Auto mode (headless screenshot drivers, e.g. the Rust executor): fields
-// arrive in the URL fragment (#f=<json>); apply once on load and retitle.
-const autoFields = (() => {
-  try {
-    if (location.hash.startsWith('#f=')) return JSON.parse(decodeURIComponent(location.hash.slice(3)));
-  } catch { /* fall through */ }
-  return null;
-})();
+const manager = new THREE.LoadingManager();
+const modelUrl = new URL('/model.glb', location.href).href;
+let externalAsset = false;
+manager.setURLModifier(source => {
+  const url = new URL(source, location.href);
+  if (url.href === modelUrl || url.protocol === 'data:' || url.protocol === 'blob:') return url.href;
+  externalAsset = true;
+  throw new Error('render3d needs a self-contained model without external assets');
+});
 
-new GLTFLoader().load('/model.glb', (g) => {
+try {
+  const g = await new GLTFLoader(manager).loadAsync(modelUrl);
+  if (externalAsset) throw new Error('render3d needs a self-contained model without external assets');
   root = g.scene;
   scene.add(root);
   const box = new THREE.Box3().setFromObject(root);
@@ -139,10 +147,25 @@ new GLTFLoader().load('/model.glb', (g) => {
   const size = box.getSize(new THREE.Vector3());
   radius = Math.max(size.x, size.y, size.z) / 2 || 1;
   collectParts();
+  if (!parts.length || ![radius, ...center.toArray()].every(Number.isFinite)) {
+    throw new Error('render3d model has no renderable mesh bounds');
+  }
   if (g.animations && g.animations.length) { mixer = new THREE.AnimationMixer(root); clips = g.animations; }
   window.__render3d.info = { parts: parts.length, clips: clips.map((c) => c.name), radius };
   window.__render3d.ready = true;
   document.title = 'READY';
-  if (autoFields) { window.__render3d.apply(autoFields); document.title = 'DONE'; }
-}, undefined, (e) => { window.__render3d.error = String(e && e.message || e); document.title = 'ERROR'; });
+  // The Rust driver captures the canvas only after the scene has rendered.
+  // The PNG in the DOM lets it distinguish a rendered frame from a blank window.
+  if (location.hash.startsWith('#f=')) {
+    window.__render3d.apply(JSON.parse(decodeURIComponent(location.hash.slice(3))));
+    const result = document.createElement('meta');
+    result.name = 'render3d-png';
+    result.content = canvas.toDataURL('image/png');
+    document.head.append(result);
+    document.title = 'DONE';
+  }
+} catch (error) {
+  window.__render3d.error = externalAsset ? 'render3d needs a self-contained model without external assets' : String(error?.message || error);
+  document.title = 'ERROR';
+}
 </script></body></html>

@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { Workflow } from "../src/index.mjs";
-import { render3dSceneFields, findChromium } from "../src/render3d.mjs";
+import { render3dSceneFields, render3dMedia, findChromium } from "../src/render3d.mjs";
 import { decodePng } from "../src/local-media.mjs";
 
 // render3d (Edge Styles S2): a local node that renders a GLB — camera,
@@ -102,6 +103,29 @@ test("render3dSceneFields: strings map to typed scene fields", () => {
   assert.ok(!("clipAxis" in d));
   assert.ok(!("isolate" in d));
   assert.equal(render3dSceneFields({ isolate: "largest" }).isolate, "largest");
+  assert.equal(render3dSceneFields({ animClip: 0 }).animClip, 0);
+});
+
+test("render budgets are checked before obtaining the model", async () => {
+  const opts = { fetch: () => assert.fail("an invalid render must not download a model") };
+  const model = "https://example.invalid/model.glb";
+  await assert.rejects(render3dMedia(model, { width: 2049 }, opts), /dimensions/);
+  await assert.rejects(render3dMedia(model, { mode: "video", fps: 60, duration: 10 }, opts), /240 frames/);
+  await assert.rejects(render3dMedia(model, { mode: "video", width: 319 }, opts), /even dimensions/);
+});
+
+test("Chromium rejects a model that references an unbundled asset", async (t) => {
+  if (!(await findChromium())) { t.skip("no chromium discoverable"); return; }
+  let requests = 0;
+  const asset = createServer((_req, res) => { requests++; res.writeHead(404).end(); });
+  await new Promise(resolve => asset.listen(0, "127.0.0.1", resolve));
+  t.after(() => asset.close());
+  const glb = twoCubeGlb();
+  const model = JSON.parse(glb.subarray(20, 20 + glb.readUInt32LE(12)));
+  model.buffers[0].uri = `http://127.0.0.1:${asset.address().port}/model.bin`;
+  const url = "data:model/gltf+json;base64," + Buffer.from(JSON.stringify(model)).toString("base64");
+  await assert.rejects(render3dMedia(url), /self-contained model/);
+  assert.equal(requests, 0);
 });
 
 test("render3d node: renders both parts; explode separates; clip cuts", async (t) => {
