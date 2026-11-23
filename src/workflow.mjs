@@ -1,6 +1,7 @@
 import { NanoodleError, RunError, UnsupportedNodeError } from "./errors.mjs";
 import { abortReason, enforceDeadline, normalizeTimeoutMs, startDeadline, throwIfAborted } from "./deadline.mjs";
 import { NODE_TYPES, displayName, isInputPort, lockedNode, materialize, topoSort, wireIssue, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
+import { COMPETING_INPUT_WIRES, competingInputIssues, staticCompetingInputIssues } from "./input-wires.mjs";
 import { endpointOutPort } from "./endpoint.mjs";
 import { MEDIA_INPUT_KINDS, deriveInputs, deriveOutputs, deriveSettings, resolveInputKey, resolveSettingKey } from "./io.mjs";
 import { NanoClient } from "./client.mjs";
@@ -305,6 +306,8 @@ export class Workflow {
     for (const { entry, value } of settingAssignments) {
       effFields.get(entry.nodeId)[entry.field] = this._coerceSetting(entry, value);
     }
+    const inputConflict = staticCompetingInputIssues(graph, order, branches, node => effFields.get(node.id))[0];
+    if (inputConflict) throw new NanoodleError(inputConflict, { code: COMPETING_INPUT_WIRES });
     const explicit = new Set();
     for (const { entry, value } of inputAssignments) {
       effFields.get(entry.nodeId)[entry.field] = this._coerceInput(entry, value, mediaCoerceOpts);
@@ -442,8 +445,7 @@ export class Workflow {
             return {};
           }
         }
-        const inp = {};
-        let fields = effFields.get(n.id);
+        const supplied = [];
         let upstreamFail = null, gatedBy = null, skippedIn = 0;
         for (const l of inbound) {
           let srcOut;
@@ -457,22 +459,7 @@ export class Workflow {
             continue;
           }
           const v = srcOut[l.from.port];
-          if (isInputPort(n, l.to.port)) {
-            // Node boundary: a relative content URL from the upstream provider is
-            // resolved (authed redirect → absolute file URL, or inlined bytes)
-            // before this node builds videoUrl / videoDataUrl / audio / image.
-            inp[l.to.port] = (typeof v === "string" && v && HANDED_MEDIA_PORT.test(l.to.port))
-              ? await withSignal(() => this.client.resolveContentUrl(v, { signal: ac.signal }), ac.signal)
-              : v;
-          }
-          // Custom endpoint url/mode: a Choice path like "/post" must ride inp so
-          // endpointResolveTarget can join it onto the typed host. Overwriting
-          // fields.url with "/post" rejects the joined URL.
-          else if (n.type === "endpoint" && (l.to.port === "url" || l.to.port === "mode")) {
-            if (v != null) inp[l.to.port] = v;
-          }
-          // A wire overrides a typed field when the declared source port emits a value.
-          else if (v != null) fields = { ...fields, [l.to.port]: v };
+          if (v != null) supplied.push({ link: l, value: v });
         }
         // a real failure upstream wins over a gate (the browser runners agree): that is an error
         if (upstreamFail) throw new NanoodleError("upstream failed: " + upstreamFail);
@@ -489,6 +476,26 @@ export class Workflow {
           if (gr) gr.skipped.push(n.id);
           emit({ type: "node-skipped", nodeId: n.id, name: displayName(n), reason: "gated", gatedBy });
           throw new GateSkip(gatedBy);
+        }
+        throwIfAborted(ac.signal);
+        const conflict = competingInputIssues(supplied.map(({ link }) => link))[0];
+        if (conflict) throw new NanoodleError(conflict, { code: COMPETING_INPUT_WIRES });
+        const inp = {};
+        let fields = effFields.get(n.id);
+        for (const { link, value } of supplied) {
+          const port = link.to.port;
+          if (isInputPort(n, port)) {
+            // Resolve an upstream provider's content URL before the consumer builds its payload.
+            inp[port] = (typeof value === "string" && value && HANDED_MEDIA_PORT.test(port))
+              ? await withSignal(() => this.client.resolveContentUrl(value, { signal: ac.signal }), ac.signal)
+              : value;
+          }
+          // Custom endpoint url/mode: a Choice path like "/post" must ride inp so
+          // endpointResolveTarget can join it onto the typed host.
+          else if (n.type === "endpoint" && (port === "url" || port === "mode")) {
+            inp[port] = value;
+          }
+          else fields = { ...fields, [port]: value };
         }
         throwIfAborted(ac.signal);
         // Prompt length caps (see prompt-caps.mjs). Many image/video models reject an over-long
