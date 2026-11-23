@@ -1,8 +1,7 @@
 import { NanoodleError } from "./errors.mjs";
+import { INPUT_SPECS, SETTING_SPECS } from "./io-specs.mjs";
 
-/* Dynamic input-port families (mirrors the nanoodle app's runGraph). A wire landing on one of
-   these ports — or on a port declared in NODE_TYPES[type].inputs — is a data input; a wire
-   landing on ANY other port is a field override (wired prompt/system/lyrics/q/...). */
+/* Dynamic input-port families also used by the runners to collect their values. */
 export const IMG_PORT_RE = /^img\d*$/;      // llm vision references, decide candidates
 export const EDIT_IMG_RE = /^image\d*$/;    // edit multi-reference: image, image2, ...
 export const VID_PORT_RE = /^vid\d*$/;
@@ -11,8 +10,39 @@ export const REF_PORT_RE = /^ref\d*$/;      // tvideo reference images
 export const FRAME_PORT_RE = /^frame[1-9]\d*$/;  // vframes outputs
 export const MAX_FRAMES = 48;
 
-const DYNAMIC_INPUT_RES = [IMG_PORT_RE, EDIT_IMG_RE, VID_PORT_RE, CLIP_PORT_RE, REF_PORT_RE];
-const DYNAMIC_INPUT_NAMES = new Set(["audio", "endframe"]);
+const DYNAMIC_INPUTS = new Map([
+  ["llm", [IMG_PORT_RE]],
+  ["decide", [IMG_PORT_RE]],
+  ["edit", [EDIT_IMG_RE]],
+  ["tvideo", [REF_PORT_RE]],
+  ["vedit", [REF_PORT_RE]],
+  ["combine", [VID_PORT_RE, CLIP_PORT_RE]],
+]);
+
+// Runtime-consumed fields that aren't surfaced as workflow inputs or settings.
+const LORA_FIELDS = ["loras", "loraUrl", "loraStrength"];
+const IMAGE_FIELDS = ["modelOpts", "aspect", "customCivitaiAir", "negativePrompt", ...LORA_FIELDS];
+const VIDEO_FIELDS = ["modelOpts", ...LORA_FIELDS];
+const AUDIO_FIELDS = ["response_format", "extraJson"];
+const EXTRA_WIRED_FIELDS = new Map([
+  ["upload", ["optional"]],
+  ["aupload", ["optional"]],
+  ["vupload", ["optional"]],
+  ["mupload", ["optional"]],
+  ["choice", ["options", "selected"]],
+  ["image", ["sel", ...IMAGE_FIELDS]],
+  ["edit", IMAGE_FIELDS],
+  ["inpaint", ["prompt", ...IMAGE_FIELDS]],
+  ["tvideo", VIDEO_FIELDS],
+  ["ivideo", VIDEO_FIELDS],
+  ["vedit", ["aspect", "duration", ...VIDEO_FIELDS]],
+  ["lipsync", ["aspect", "duration", "modelOpts"]],
+  ["model3d", ["modelOpts"]],
+  ["music", AUDIO_FIELDS],
+  ["remix", AUDIO_FIELDS],
+  ["tts", AUDIO_FIELDS],
+  ["endpoint", ["system", "size"]],
+]);
 
 /**
  * Highest frameN port wired OUT of a vframes node. fields.frames is shape-affecting:
@@ -46,7 +76,7 @@ export const NODE_TYPES = {
   mupload: { title: "3D input",        inputs: [], outputs: [{ name: "model", type: "model3d" }], local: true },
   choice:  { title: "Choice",          inputs: [], outputs: [{ name: "text", type: "text" }], local: true },
   join:    { title: "Join",            inputs: ["a", "b"], outputs: [{ name: "text", type: "text" }], local: true },
-  llm:     { title: "LLM",             inputs: [], outputs: [{ name: "text", type: "text" }], network: true },
+  llm:     { title: "LLM",             inputs: ["audio", "video"], outputs: [{ name: "text", type: "text" }], network: true },
   image:   { title: "Image",           inputs: [], outputs: [{ name: "image", type: "image" }], extraSourcePorts: ["images"], network: true },
   edit:    { title: "Edit",            inputs: [], outputs: [{ name: "image", type: "image" }], extraSourcePorts: ["images", "layers"], network: true },
   inpaint: { title: "Inpaint",         inputs: ["image", "mask"], outputs: [{ name: "image", type: "image" }], extraSourcePorts: ["images", "layers"], network: true },
@@ -54,9 +84,9 @@ export const NODE_TYPES = {
   vision:  { title: "Vision",          inputs: ["image"], outputs: [{ name: "text", type: "text" }], network: true },
   decide:  { title: "Decide",          inputs: ["text"], outputs: [{ name: "text", type: "text" }, { name: "image", type: "image" }], extraSourcePorts: ["yes", "no", "decision"], network: true }, // img1… candidates (IMG_PORT_RE)
   tvideo:  { title: "Text→Video",      inputs: [], outputs: [{ name: "video", type: "video" }], network: true },
-  ivideo:  { title: "Image→Video",     inputs: ["image"], outputs: [{ name: "video", type: "video" }], network: true },
+  ivideo:  { title: "Image→Video",     inputs: ["image", "endframe"], outputs: [{ name: "video", type: "video" }], network: true },
   model3d: { title: "3D model",        inputs: ["image", "model"], outputs: [{ name: "model", type: "model3d" }], network: true },
-  vedit:   { title: "Video edit",      inputs: ["video"], outputs: [{ name: "video", type: "video" }], network: true },
+  vedit:   { title: "Video edit",      inputs: ["video", "image"], outputs: [{ name: "video", type: "video" }], network: true },
   vframes: { title: "Video → frames",  inputs: ["video"], outputs: [{ name: "frame1", type: "image" }], local: true, framesOut: true }, // dynamic frame1..N
   render3d: { title: "Render 3D",      inputs: ["model"], outputs: [{ name: "image", type: "image" }, { name: "video", type: "video" }], local: true },
   combine: { title: "Combine videos",  inputs: [], outputs: [{ name: "video", type: "video" }], local: true },
@@ -103,19 +133,43 @@ export function lockedNode(node) {
 /** Is a wire landing on `port` of `node` a data input (vs a field override)? */
 export function isInputPort(node, port) {
   const t = NODE_TYPES[node.type];
-  if (t && (t.inputs || []).includes(port)) return true;
-  if (DYNAMIC_INPUT_NAMES.has(port)) return true;
-  return DYNAMIC_INPUT_RES.some((re) => re.test(port));
+  return t?.inputs?.includes(port) || DYNAMIC_INPUTS.get(node.type)?.some((re) => re.test(port));
 }
 
 /** Check the possible source ports without depending on what a particular run emits. */
-export function sourceWireIssue(source, { from, to }) {
-  if (!source || source.unknown) return;
+function isSourcePort(source, port) {
   const type = NODE_TYPES[source.type];
-  const port = from.port;
-  if (type?.outputs?.some(output => output.name === port) || type?.extraSourcePorts?.includes(port)) return;
-  if (type?.framesOut && FRAME_PORT_RE.test(port) && Number(port.slice(5)) <= MAX_FRAMES) return;
-  return `wire ${from.node}.${port} → ${to.node}.${to.port} uses undeclared source port "${port}" on ${displayName(source)}`;
+  return type?.outputs?.some(output => output.name === port) || type?.extraSourcePorts?.includes(port) ||
+    (type?.framesOut && FRAME_PORT_RE.test(port) && Number(port.slice(5)) <= MAX_FRAMES);
+}
+
+function isTargetPort(target, port) {
+  return isInputPort(target, port) ||
+    INPUT_SPECS[target.type]?.some(spec => spec.f === port) ||
+    SETTING_SPECS[target.type]?.some(spec => spec.f === port) ||
+    EXTRA_WIRED_FIELDS.get(target.type)?.includes(port) ||
+    (port === "timeoutMs" && !NODE_TYPES[target.type].note);
+}
+
+/** Report the first problem with a link, using the same checks on load and before a run. */
+export function wireIssue({ from, to }, byId) {
+  const source = byId.get(from.node);
+  const target = byId.get(to.node);
+  const wire = `wire ${from.node ?? "(missing)"}.${from.port} → ${to.node ?? "(missing)"}.${to.port}`;
+  if (!source) return { code: "missing-wire-node", message: `${wire} references missing source node "${from.node ?? ""}"` };
+  if (!target) return { code: "missing-wire-node", message: `${wire} references missing target node "${to.node ?? ""}"` };
+  if (!source.unknown && !isSourcePort(source, from.port)) {
+    return { code: "invalid-source-port", message: `${wire} uses undeclared source port "${from.port}" on ${displayName(source)}` };
+  }
+  if (!target.unknown && !isTargetPort(target, to.port)) {
+    return { code: "invalid-target-port", message: `${wire} uses undeclared target port "${to.port}" on ${displayName(target)}` };
+  }
+  if (target.type === "llm" && to.port === "video") {
+    return {
+      code: "unsupported-target-port",
+      message: `${wire} uses unsupported LLM input "video" in the JavaScript executor. Run this workflow in the nanoodle editor or player to use the clip.`,
+    };
+  }
 }
 
 /**
@@ -160,9 +214,8 @@ function scrubMediaPlaceholders(n, warnings) {
  * - `audio` type aliases to `tts` (legacy saves)
  * - unknown node types are KEPT but flagged (`unknown: true`) + a warning; run() fails fast on them
  * - media fields that aren't a data:/http(s) URL (prose placeholders, file paths) are blanked + a warning
- * - links are kept only when both endpoints exist
  * - links into music/tts port "text" migrate to "prompt"
- * - undeclared source ports are kept with a warning so the wire can be repaired
+ * - links with missing nodes or undeclared ports are kept with a warning so they can be repaired
  * @returns {{ nodes, links, warnings: string[] }}
  */
 export function materialize(data) {
@@ -180,7 +233,7 @@ export function materialize(data) {
     const type = raw.type === "audio" ? "tts" : raw.type === "decide-branch" ? "decide" : raw.type;
     const n = { id: String(raw.id), type, name: raw.name, fields: { ...(raw.fields || {}) } };
     if (raw.type === "decide-branch") n.fields.branch = true;
-    if (!NODE_TYPES[type]) {
+    if (!Object.hasOwn(NODE_TYPES, type)) {
       n.unknown = true;
       warnings.push(`unknown node type "${raw.type}" (node ${n.id}) — kept, but running this workflow will fail; you may need a newer nanoodle library`);
     } else {
@@ -188,22 +241,23 @@ export function materialize(data) {
     }
     nodes.push(n);
   }
-  const ids = new Set(nodes.map((n) => n.id));
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const links = [];
   for (const l of data.links || []) {
-    if (!l || !l.from || !l.to) continue;
-    const from = { node: String(l.from.node), port: String(l.from.port) };
-    const to = { node: String(l.to.node), port: String(l.to.port) };
-    if (!ids.has(from.node) || !ids.has(to.node)) continue;
+    const from = normalizeEndpoint(l?.from);
+    const to = normalizeEndpoint(l?.to);
     const toNode = byId.get(to.node);
-    if ((toNode.type === "music" || toNode.type === "tts") && to.port === "text") to.port = "prompt"; // legacy port migration
-    const link = { id: l.id, from, to };
-    const issue = sourceWireIssue(byId.get(from.node), link);
-    if (issue) warnings.push(issue);
+    if ((toNode?.type === "music" || toNode?.type === "tts") && to.port === "text") to.port = "prompt"; // legacy port migration
+    const link = { id: l?.id, from, to };
+    const issue = wireIssue(link, byId);
+    if (issue) warnings.push(issue.message);
     links.push(link);
   }
   return { nodes, links, warnings };
+}
+
+function normalizeEndpoint(endpoint) {
+  return { node: endpoint?.node == null ? null : String(endpoint.node), port: String(endpoint?.port ?? "") };
 }
 
 /**
@@ -214,7 +268,9 @@ export function topoSort(graph) {
   const indeg = new Map(graph.nodes.map((n) => [n.id, 0]));
   const outAdj = new Map(graph.nodes.map((n) => [n.id, []]));
   for (const l of graph.links) {
-    indeg.set(l.to.node, (indeg.get(l.to.node) || 0) + 1);
+    // Inspection still sorts the existing nodes when a retained wire dangles.
+    if (!indeg.has(l.from.node) || !indeg.has(l.to.node)) continue;
+    indeg.set(l.to.node, indeg.get(l.to.node) + 1);
     outAdj.get(l.from.node).push(l.to.node);
   }
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));

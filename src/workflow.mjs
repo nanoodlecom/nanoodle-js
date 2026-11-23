@@ -1,6 +1,6 @@
 import { NanoodleError, RunError, UnsupportedNodeError } from "./errors.mjs";
-import { abortReason, enforceDeadline, startDeadline, throwIfAborted } from "./deadline.mjs";
-import { NODE_TYPES, displayName, isInputPort, lockedNode, materialize, sourceWireIssue, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
+import { abortReason, enforceDeadline, normalizeTimeoutMs, startDeadline, throwIfAborted } from "./deadline.mjs";
+import { NODE_TYPES, displayName, isInputPort, lockedNode, materialize, topoSort, wireIssue, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
 import { endpointOutPort } from "./endpoint.mjs";
 import { MEDIA_INPUT_KINDS, deriveInputs, deriveOutputs, deriveSettings, resolveInputKey, resolveSettingKey } from "./io.mjs";
 import { NanoClient } from "./client.mjs";
@@ -248,6 +248,20 @@ export class Workflow {
     const { settings = {}, defaults = true, timeoutMs, signal, onProgress } = runOpts;
     const graph = this.graph;
 
+    for (const n of graph.nodes) {
+      if (n.unknown) {
+        throw new UnsupportedNodeError(
+          `node ${n.id}: unknown node type '${n.type}' — this graph needs a newer nanoodle library`,
+          { nodeId: n.id, nodeType: n.type });
+      }
+    }
+
+    const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+    for (const link of graph.links) {
+      const issue = wireIssue(link, byId);
+      if (issue) throw new NanoodleError(issue.message, { code: issue.code });
+    }
+
     // bare scalar → the single required input
     if (!isPlainObject(inputs)) {
       const required = this.inputs.filter((i) => !i.optional);
@@ -278,20 +292,6 @@ export class Workflow {
       settingAssignments.push({ entry, value });
     }
 
-    // unknown node types fail fast — before any network call
-    for (const n of graph.nodes) {
-      if (n.unknown) {
-        throw new UnsupportedNodeError(
-          `node ${n.id}: unknown node type '${n.type}' — this graph needs a newer nanoodle library`,
-          { nodeId: n.id, nodeType: n.type });
-      }
-    }
-
-    const byId = new Map(graph.nodes.map((n) => [n.id, n]));
-    for (const link of graph.links) {
-      const issue = sourceWireIssue(byId.get(link.from.node), link);
-      if (issue) throw new NanoodleError(issue, { code: "invalid-source-port" });
-    }
     const order = topoSort(graph); // throws naming cyclic nodes
     const branches = planBranches(graph, order.map(n => n.id));
 
@@ -334,6 +334,11 @@ export class Workflow {
       }
     }
 
+    const runTimeoutMs = normalizeTimeoutMs(timeoutMs, "run timeoutMs");
+    for (const n of graph.nodes) {
+      normalizeTimeoutMs(effFields.get(n.id).timeoutMs, `node ${n.id} timeoutMs`);
+    }
+
     // API key (or an x402 payment callback) required only when the graph actually calls NanoGPT
     if (!this.client.apiKey && !this.client.payment && hasNetwork) {
       throw new NanoodleError("no API key — pass { apiKey } to Workflow.load/fromJSON, set NANOGPT_API_KEY, or pass { payment } for accountless x402 runs (this workflow calls the NanoGPT API)");
@@ -347,8 +352,8 @@ export class Workflow {
       if (signal.aborted) ac.abort(signal.reason);
       else signal.addEventListener("abort", onOuterAbort, { once: true });
     }
-    if (timeoutMs) {
-      timer = startDeadline(ac, timeoutMs, `run timed out after ${timeoutMs}ms`);
+    if (runTimeoutMs != null) {
+      timer = startDeadline(ac, runTimeoutMs, `run timed out after ${runTimeoutMs}ms`);
     }
 
     const emit = (evt) => { if (onProgress) { try { onProgress(evt); } catch { /* listener errors never kill the run */ } } };
@@ -496,15 +501,15 @@ export class Workflow {
         throwIfAborted(ac.signal);
         const t0 = Date.now();
         // The node deadline covers progress callbacks, the runner and media publication.
-        const timeoutMs = Number(fields.timeoutMs);
-        const timedNode = Number.isFinite(timeoutMs) && timeoutMs > 0;
-        if (timedNode || canPay) {
+        // Incoming wires can override the stored timeout after preflight.
+        const timeoutMs = normalizeTimeoutMs(fields.timeoutMs, `node ${n.id} timeoutMs`);
+        if (timeoutMs != null || canPay) {
           nodeController = new AbortController();
           const onRunAbort = () => nodeController.abort(ac.signal.reason);
           ac.signal.addEventListener("abort", onRunAbort, { once: true });
           unlinkNode = () => ac.signal.removeEventListener("abort", onRunAbort);
           nodeSignal = nodeController.signal;
-          nodeTimer = startDeadline(nodeController, timedNode ? timeoutMs : null, `node timed out after ${timeoutMs}ms`, ac.signal);
+          nodeTimer = startDeadline(nodeController, timeoutMs, `node timed out after ${timeoutMs}ms`, ac.signal);
         }
         rec.started = true;
         emit({ type: "node-start", nodeId: n.id, name: displayName(n) });

@@ -170,6 +170,8 @@ const result = await wf.run(
 Failures in lanes no output depends on only appear in `result.errors`.
 Unknown node types, missing required inputs, bad keys, and a missing API key
 all fail **before** anything is spent.
+The run and per-node `timeoutMs` settings accept milliseconds from `0` to
+`2147483647`. Omit the value or use `0` to leave that deadline unset.
 
 ### Gates (Decide said no)
 

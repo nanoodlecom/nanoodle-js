@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { Workflow, UnsupportedNodeError, RunError, materialize } from "../src/index.mjs";
+import { Workflow, UnsupportedNodeError, RunError, materialize, topoSort } from "../src/index.mjs";
 import { startMockServer, mockOpts, chatJson, PNG_B64 } from "./harness/mock-server.mjs";
 
 const fixture = (name) => fileURLToPath(new URL("./fixtures/" + name, import.meta.url));
@@ -19,7 +19,7 @@ test("loader: legacy 'audio' type aliases to tts + inbound 'text' port migrates 
   assert.equal(links[0].to.port, "prompt");
 });
 
-test("loader: unknown node type is kept with a warning; links to missing nodes dropped; minimal {nodes} form accepted", () => {
+test("loader: unknown nodes and dangling wires are kept with warnings; minimal {nodes} form accepted", () => {
   const { nodes, links, warnings } = materialize({
     nodes: [
       { id: "n1", type: "hologram", fields: {} },
@@ -32,10 +32,67 @@ test("loader: unknown node type is kept with a warning; links to missing nodes d
   });
   assert.equal(nodes.length, 2);
   assert.equal(nodes[0].unknown, true);
-  assert.equal(links.length, 1); // l1 dropped (missing endpoint)
+  assert.deepEqual(links.map((link) => link.id), ["l1", "l2"]);
   assert.match(warnings[0], /unknown node type "hologram"/);
+  assert.match(warnings[1], /wire n2\.text → nGone\.a references missing target node "nGone"/);
+  assert.deepEqual(topoSort({nodes, links}).map((node) => node.id), ["n2", "n1"]);
   assert.ok(materialize({ nodes: [] })); // minimal form
   assert.throws(() => materialize({ hello: 1 }), /not a nanoodle graph/);
+});
+
+test("dangling wires and undeclared destinations fail before a fallback can reach the provider", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /api/v1/chat/completions", chatJson("ok"));
+  const nodes = [
+    { id: "source", type: "text", fields: { text: "source value" } },
+    { id: "request", type: "llm", fields: { model: "m", prompt: "stored fallback", promtp: "authored typo" } },
+  ];
+  const from = { node: "source", port: "text" };
+  const to = { node: "request", port: "prompt" };
+  for (const [badFrom, badTo, code, message] of [
+    [{ ...from, node: "absent" }, to, "missing-wire-node",
+      /wire absent\.text → request\.prompt references missing source node "absent"/],
+    [from, { ...to, node: "absent" }, "missing-wire-node",
+      /wire source\.text → absent\.prompt references missing target node "absent"/],
+    [undefined, to, "missing-wire-node",
+      /references missing source node/],
+    [from, { port: "prompt" }, "missing-wire-node",
+      /references missing target node/],
+    [from, { ...to, port: "promtp" }, "invalid-target-port",
+      /wire source\.text → request\.promtp uses undeclared target port "promtp" on LLM/],
+    [from, { ...to, port: "ref1" }, "invalid-target-port",
+      /wire source\.text → request\.ref1 uses undeclared target port "ref1" on LLM/],
+  ]) {
+    const data = { nodes, links: [{ id: "wire", from: badFrom, to: badTo }] };
+    const wf = Workflow.fromJSON(data, mockOpts(srv));
+    assert.equal(wf.graph.links[0].id, "wire");
+    assert.equal(wf.warnings.length, 1);
+    assert.match(wf.warnings[0], message);
+    const events = [];
+    await assert.rejects(wf.run({}, { onProgress: (event) => events.push(event) }), { code, message });
+    assert.deepEqual(events, []);
+    assert.deepEqual(srv.requests, []);
+  }
+
+  const valid = Workflow.fromJSON({ nodes, links: [{ id: "wire", from, to }] }, mockOpts(srv));
+  assert.deepEqual(valid.warnings, []);
+  await valid.run();
+  assert.equal(srv.requests.length, 1);
+  assert.equal(srv.requests[0].json.messages.at(-1).content, "source value");
+});
+
+test("a browser LLM video wire reports where to run it before submitting the stored prompt", async () => {
+  const wf = Workflow.fromJSON({
+    nodes: [
+      { id: "clip", type: "vupload", fields: { video: "https://example.test/source.mp4" } },
+      { id: "llm", type: "llm", fields: { model: "video-chat", prompt: "describe the clip" } },
+    ],
+    links: [{ from: { node: "clip", port: "video" }, to: { node: "llm", port: "video" } }],
+  }, { ...noNet, fetch: () => assert.fail("unexpected provider traffic") });
+  const message = /wire clip\.video → llm\.video uses unsupported LLM input "video" in the JavaScript executor.*nanoodle editor or player/;
+  assert.match(wf.warnings[0], message);
+  await assert.rejects(wf.run(), { code: "unsupported-target-port", message });
 });
 
 test("unknown node type: load warns, run fails fast with UnsupportedNodeError", async () => {
