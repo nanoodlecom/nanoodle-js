@@ -434,6 +434,22 @@ function nodeUnitUsd(node, catItem, graph) {
     const refCount = (modelHasRefs && graph && Array.isArray(graph.links))
       ? graph.links.filter((l) => l.to && l.to.node === node.id && REF_PORT_RE.test(l.to.port)).length
       : 0;
+    const mode = f.modelOpts?.mode ?? sp.defaults?.mode ?? pp.mode?.default ?? "auto";
+    if (pricing?.duration_meter === "requested_whole_seconds" &&
+        (pricing.text_to_video_per_duration || pricing.image_to_video_per_duration) &&
+        !refCount && mode !== "reference-to-video" && (node.type === "tvideo" || node.type === "ivideo")) {
+      const image = node.type === "ivideo";
+      if (mode !== "auto" && mode !== (image ? "image-to-video" : "text-to-video")) return null;
+      const hasEndFrame = image && (graph?.links || []).some(l => l.to?.node === node.id && l.to.port === "endframe");
+      const rates = image
+        ? (hasEndFrame && pricing.first_last_frame_per_duration) || pricing.image_to_video_per_duration
+        : pricing.text_to_video_per_duration;
+      // The node-owned duration wins over modelOpts, just as on the wire.
+      const seconds = Number(f.duration == null || f.duration === ""
+        ? pp.duration?.default ?? f.modelOpts?.duration ?? sp.defaults?.duration ?? pricing.default_duration
+        : f.duration);
+      return Number.isInteger(seconds) ? _num(rates?.[seconds]) : null;
+    }
     const audioCtx = { params: (sp.parameters && typeof sp.parameters === "object") ? sp.parameters : {}, defaults: sp.defaults || {} };
     const sourceLink = (graph?.links || []).find(l => l.to?.node === node.id && l.to.port === "video");
     const source = sourceLink && (graph.nodes || []).find(n => n.id === sourceLink.from.node);

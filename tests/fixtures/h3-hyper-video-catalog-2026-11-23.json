@@ -1,0 +1,90 @@
+{
+  "id": "minimax/h3-hyper",
+  "pricing": {
+    "currency": "USD",
+    "unit": "USD/clip",
+    "outputs": 1,
+    "resolution": "768p",
+    "generated_audio": "required",
+    "duration_meter": "requested_whole_seconds",
+    "min_duration": 4,
+    "max_duration": 15,
+    "text_to_video_per_duration": {
+      "4": 0.1,
+      "5": 0.13,
+      "6": 0.16,
+      "7": 0.2,
+      "8": 0.23,
+      "9": 0.27,
+      "10": 0.31,
+      "11": 0.35,
+      "12": 0.4,
+      "13": 0.45,
+      "14": 0.5,
+      "15": 0.55
+    },
+    "image_to_video_per_duration": {
+      "4": 0.11,
+      "5": 0.15,
+      "6": 0.18,
+      "7": 0.22,
+      "8": 0.26,
+      "9": 0.3,
+      "10": 0.35,
+      "11": 0.4,
+      "12": 0.45,
+      "13": 0.5,
+      "14": 0.56,
+      "15": 0.62
+    },
+    "first_last_frame_per_duration": {
+      "4": 0.11,
+      "5": 0.15,
+      "6": 0.18,
+      "7": 0.22,
+      "8": 0.26,
+      "9": 0.3,
+      "10": 0.35,
+      "11": 0.4,
+      "12": 0.45,
+      "13": 0.5,
+      "14": 0.56,
+      "15": 0.62
+    },
+    "reference_to_video": {
+      "duration": 6,
+      "per_image_count": {
+        "1": 0.11,
+        "3": 0.1736
+      },
+      "video_references": false,
+      "audio_references": false
+    }
+  },
+  "supported_parameters": {
+    "parameters": {
+      "mode": {
+        "default": "auto"
+      },
+      "duration": {
+        "default": "6"
+      },
+      "resolution": {
+        "default": "768p"
+      },
+      "aspect_ratio": {
+        "default": "16:9"
+      },
+      "reference_images": {
+        "default": ""
+      }
+    },
+    "defaults": {
+      "mode": "auto",
+      "duration": "6",
+      "resolution": "768p",
+      "aspect_ratio": "16:9",
+      "reference_images": ""
+    }
+  }
+}
