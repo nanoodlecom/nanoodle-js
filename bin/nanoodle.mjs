@@ -18,7 +18,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, extname } from "node:path";
 import process from "node:process";
 import { MEDIA_INPUT_KINDS } from "../src/io.mjs";
-import { Workflow, RunError, mediaFromFile } from "../src/index.mjs";
+import { Workflow, NanoodleError, RunError, mediaFromFile } from "../src/index.mjs";
 import { MediaRef, extForMime, sniffMime } from "../src/media.mjs";
 
 // Node schedules a 1 ms timer for delays above the signed 32-bit limit.
@@ -105,6 +105,68 @@ async function resolveValue(v) {
   return mediaFromFile(path);
 }
 
+async function loadWorkflow(graphPath, { keyFlag, envFile, pay }) {
+  // key precedence: --key > --env-file > NANOGPT_API_KEY (same .env parsing as scripts/live-spot-check.mjs)
+  let apiKey = keyFlag ?? process.env.NANOGPT_API_KEY;
+  if (envFile && keyFlag == null) {
+    let envText;
+    try { envText = await readFile(envFile, "utf8"); }
+    catch (e) { throw new NanoodleError(`--env-file: cannot read ${envFile}: ${e.message}`, { code: e.code }); }
+    const m = envText.match(/^NANOGPT_API_KEY\s*=\s*"?([^"\n]+)"?/m);
+    if (!m) throw new NanoodleError(`--env-file: no NANOGPT_API_KEY entry in ${envFile}`);
+    apiKey = m[1].trim();
+  }
+
+  // --pay = accountless x402: the key (flag or env) is deliberately ignored, each paid call
+  // prints a Nano invoice on stderr and the run resumes once the deposit is seen on-chain.
+  // The send happens in the user's own wallet — the CLI never asks for a seed or key.
+  let payment;
+  if (pay) {
+    apiKey = null; // null, not undefined — undefined would let Workflow's NANOGPT_API_KEY env fallback re-inject a key
+    const { qrTerminal } = await import("../src/qr.mjs");
+    payment = async (inv) => {
+      const mins = inv.expiresAt ? Math.max(1, Math.round((inv.expiresAt - Date.now()) / 60000)) : null;
+      console.error(`\n⚡ payment required: ${inv.amount || inv.amountRaw + " raw"}${inv.amountUsd != null ? ` (~$${inv.amountUsd})` : ""}`);
+      console.error(qrTerminal(inv.uri));
+      console.error("scan with your Nano wallet (dark terminals scan best), or send to:");
+      console.error("  " + inv.payTo);
+      console.error("  " + inv.uri);
+      if (inv.explorerUrl) console.error("  explorer: " + inv.explorerUrl);
+      console.error(`waiting for the deposit…${mins ? ` (invoice expires in ~${mins} min,` : " ("}Ctrl-C aborts)\n`);
+    };
+  }
+
+  return Workflow.load(graphPath, { apiKey, payment, baseUrl: process.env.NANOGPT_BASE_URL || undefined });
+}
+
+function printRunSummary(result, outputs) {
+  console.log(JSON.stringify({
+    outputs,
+    costUsd: result.costUsd,
+    costExact: result.costExact,
+    remainingBalance: result.remainingBalance,
+    errors: result.errors,
+    gated: result.gated || [],
+    ...(result.payments?.length ? { payments: result.payments } : {}),
+    nodes: Object.fromEntries(Object.entries(result.nodes).map(([id, r]) => [id, {
+      status: r.status, ms: r.ms, costUsd: r.costUsd, error: r.error,
+      ...(r.runId != null ? { runId: r.runId } : {}),
+      ...(r.gate ? { gate: r.gate } : {}), ...(r.gatedBy ? { gatedBy: r.gatedBy } : {}),
+    }])),
+  }, null, 2));
+}
+
+function reportUnstartedRun(error) {
+  const message = error?.message || String(error);
+  const { code, nodeId, nodeType } = error ?? {};
+  console.error("error: " + message);
+  printRunSummary({
+    costUsd: 0, costExact: true, remainingBalance: null, nodes: {},
+    errors: [{ message, code, nodeId, nodeType }],
+  }, {});
+  process.exitCode = 1;
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const cmd = argv.shift();
@@ -166,37 +228,13 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
   }
   if (!graphPath) usage();
 
-  // key precedence: --key > --env-file > NANOGPT_API_KEY (same .env parsing as scripts/live-spot-check.mjs)
-  let apiKey = keyFlag ?? process.env.NANOGPT_API_KEY;
-  if (envFile && keyFlag == null) {
-    let envText;
-    try { envText = await readFile(envFile, "utf8"); }
-    catch (e) { console.error(`--env-file: cannot read ${envFile}: ${e.message}`); process.exit(1); }
-    const m = envText.match(/^NANOGPT_API_KEY\s*=\s*"?([^"\n]+)"?/m);
-    if (!m) { console.error(`--env-file: no NANOGPT_API_KEY entry in ${envFile}`); process.exit(1); }
-    apiKey = m[1].trim();
+  let wf;
+  try {
+    wf = await loadWorkflow(graphPath, { keyFlag, envFile, pay });
+  } catch (e) {
+    if (cmd === "inspect") throw e;
+    return reportUnstartedRun(e);
   }
-
-  // --pay = accountless x402: the key (flag or env) is deliberately ignored, each paid call
-  // prints a Nano invoice on stderr and the run resumes once the deposit is seen on-chain.
-  // The send happens in the user's own wallet — the CLI never asks for a seed or key.
-  let payment;
-  if (pay) {
-    apiKey = null; // null, not undefined — undefined would let Workflow's NANOGPT_API_KEY env fallback re-inject a key
-    const { qrTerminal } = await import("../src/qr.mjs");
-    payment = async (inv) => {
-      const mins = inv.expiresAt ? Math.max(1, Math.round((inv.expiresAt - Date.now()) / 60000)) : null;
-      console.error(`\n⚡ payment required: ${inv.amount || inv.amountRaw + " raw"}${inv.amountUsd != null ? ` (~$${inv.amountUsd})` : ""}`);
-      console.error(qrTerminal(inv.uri));
-      console.error("scan with your Nano wallet (dark terminals scan best), or send to:");
-      console.error("  " + inv.payTo);
-      console.error("  " + inv.uri);
-      if (inv.explorerUrl) console.error("  explorer: " + inv.explorerUrl);
-      console.error(`waiting for the deposit…${mins ? ` (invoice expires in ~${mins} min,` : " ("}Ctrl-C aborts)\n`);
-    };
-  }
-
-  const wf = await Workflow.load(graphPath, { apiKey, payment, baseUrl: process.env.NANOGPT_BASE_URL || undefined });
 
   if (cmd === "inspect") {
     const pad = (s, n) => String(s).padEnd(n);
@@ -244,22 +282,24 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
   }
 
   // ---- run ----
-  const inputs = Object.create(null);
-  for (const arg of inputArgs) {
-    const [k, v] = parseKv(arg, "--input");
-    inputs[k] = await resolveValue(v);
-  }
-  const settings = Object.create(null);
-  for (const arg of setArgs) {
-    const [k, v] = parseKv(arg, "--set");
-    settings[k] = v;
-  }
-
   let result;
+  let started = false;
   try {
+    const inputs = Object.create(null);
+    for (const arg of inputArgs) {
+      const [k, v] = parseKv(arg, "--input");
+      inputs[k] = await resolveValue(v);
+    }
+    const settings = Object.create(null);
+    for (const arg of setArgs) {
+      const [k, v] = parseKv(arg, "--set");
+      settings[k] = v;
+    }
     result = await wf.run(inputs, {
       settings, timeoutMs,
-      onProgress: quiet ? undefined : (e) => {
+      onProgress: (e) => {
+        if (e.type === "node-start") started = true;
+        if (quiet) return;
         if (e.type === "node-start") console.error(`▶ ${e.name} (${e.nodeId})`);
         if (e.type === "node-done") console.error(`✔ ${e.name} (${e.nodeId}) ${e.ms}ms${e.costUsd != null ? ` $${e.costUsd}` : ""}`);
         if (e.type === "node-error") console.error(`✖ ${e.name} (${e.nodeId}): ${e.error}`);
@@ -272,10 +312,8 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
       console.error("run failed: " + e.message);
       result = e.result;
       process.exitCode = 1;
-    } else {
-      console.error("error: " + e.message);
-      process.exit(1);
-    }
+    } else if (!started) return reportUnstartedRun(e);
+    else throw e;
   }
 
   // media outputs land under --out (default ./noodle-out; created only if there is media to save)
@@ -310,20 +348,7 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
   }
 
   // the run summary is ALWAYS the JSON on stdout (contract shared with nanoodle-py and the docs)
-  console.log(JSON.stringify({
-    outputs: printable,
-    costUsd: result.costUsd,
-    costExact: result.costExact,
-    remainingBalance: result.remainingBalance,
-    errors: result.errors,
-    gated: result.gated || [],
-    ...(result.payments?.length ? { payments: result.payments } : {}),
-    nodes: Object.fromEntries(Object.entries(result.nodes).map(([id, r]) => [id, {
-      status: r.status, ms: r.ms, costUsd: r.costUsd, error: r.error,
-      ...(r.runId != null ? { runId: r.runId } : {}),
-      ...(r.gate ? { gate: r.gate } : {}), ...(r.gatedBy ? { gatedBy: r.gatedBy } : {}),
-    }])),
-  }, null, 2));
+  printRunSummary(result, printable);
   if (!quiet) {
     const approx = result.costExact ? "" : "≥ ";
     console.error(`cost: ${approx}$${result.costUsd}${result.remainingBalance != null ? ` · balance: $${result.remainingBalance}` : ""}`);

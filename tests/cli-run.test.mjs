@@ -141,6 +141,58 @@ test("CLI contract: a failed sink exits 1 but still emits the JSON summary with 
   assert.ok(summary.errors.length >= 1, "summary.errors must name the failure");
 });
 
+test("CLI reports preflight failures as one zero-cost run summary", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /api/v1/chat/completions", chatJson("unexpected request"));
+  const cwd = await mkdtemp(join(tmpdir(), "nanoodle-cli-preflight-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+
+  const source = { id: "source", type: "text", fields: { text: "wired value" } };
+  const writer = { id: "writer", type: "llm", fields: { model: "fixture", prompt: "stored prompt" } };
+  const wire = (from, to) => ({ from: { node: from, port: "text" }, to: { node: "writer", port: to } });
+  const files = {
+    "invalid-target.json": { nodes: [source, writer], links: [wire("source", "promtp")] },
+    "missing-source.json": { nodes: [writer], links: [wire("source", "prompt")] },
+    "required.json": { nodes: [{ ...writer, fields: { ...writer.fields, prompt: "" } }] },
+    "deadline.json": { nodes: [{ ...writer, fields: { ...writer.fields, timeoutMs: 2147483648 } }] },
+    "unknown.json": { nodes: [{ id: "future", type: "future-node" }] },
+    "valid.json": { nodes: [writer] },
+  };
+  await Promise.all(Object.entries(files).map(([path, data]) => writeFile(join(cwd, path), JSON.stringify(data))));
+  await writeFile(join(cwd, "malformed.json"), "{");
+  const cases = [
+    { file: "missing.json", message: /ENOENT/, code: "ENOENT" },
+    { file: "malformed.json", message: /JSON/i },
+    { file: "invalid-target.json", message: /undeclared target port "promtp"/, code: "invalid-target-port" },
+    { file: "missing-source.json", message: /missing source node "source"/, code: "missing-wire-node" },
+    { file: "required.json", message: /missing required input.*writer\.prompt/, json: false },
+    { file: "deadline.json", message: /node writer timeoutMs expects milliseconds/, code: "invalid-timeout" },
+    { file: "unknown.json", message: /unknown node type/, nodeId: "future", nodeType: "future-node" },
+    { file: "valid.json", args: ["--set", "missing.model=foo"], message: /unknown setting/ },
+    { file: "valid.json", args: ["--input", "writer.prompt=@missing.txt"], message: /missing\.txt/, code: "ENOENT" },
+    { file: "valid.json", args: ["--env-file", "missing.env"], message: /--env-file: cannot read missing\.env/, code: "ENOENT" },
+  ];
+  for (const { file, args = [], message, code, nodeId, nodeType, json = true } of cases) {
+    const r = await runCli(["run", file, ...args, ...(json ? ["--json"] : [])], {
+      cwd, env: { NANOGPT_BASE_URL: srv.url },
+    });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, message);
+    const { errors, ...summary } = JSON.parse(r.stdout);
+    assert.deepEqual(summary, {
+      outputs: {}, costUsd: 0, costExact: true, remainingBalance: null, gated: [], nodes: {},
+    });
+    assert.equal(errors.length, 1);
+    assert.match(errors[0].message, message);
+    assert.equal(errors[0].code, code);
+    assert.equal(errors[0].nodeId, nodeId);
+    assert.equal(errors[0].nodeType, nodeType);
+    assert.equal(srv.requests.length, 0);
+  }
+  await assert.rejects(stat(join(cwd, "noodle-out")), { code: "ENOENT" });
+});
+
 test("CLI contract: --help exits 0 and reads like docs (runnable examples, default out dir, share URLs)", async () => {
   const r = await runCli(["--help"]);
   assert.equal(r.status, 0);
