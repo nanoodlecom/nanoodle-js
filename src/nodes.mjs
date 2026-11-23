@@ -8,6 +8,7 @@ import {
   resizeCropImage, trimAudioToWav, extractAudioToWav,
   extractVideoFrames, concatVideos, muxSoundtrack, maskToSource, fitImageInline, fitImageJpeg,
 } from "./local-media.mjs";
+import { render3dMedia } from "./render3d.mjs";
 import { decideRun, decideImageLimits } from "./decide.mjs";
 import { cleanVoiceRun, CLEANVOICE_DEFAULT_MODEL } from "./cleanvoice.mjs";
 import { runEndpoint } from "./endpoint.mjs";
@@ -569,6 +570,12 @@ export const RUNNERS = {
       ...media,
       onProgress: ctx && ctx.progress,
     });
+  },
+
+  async render3d(n, inp, ctx) {
+    if (!inp.model) throw new NanoodleError("render3d: connect a model first");
+    const media = mediaOpts(ctx);
+    return render3dMedia(inp.model, n.fields || {}, { ...media, onProgress: ctx && ctx.progress });
   },
 
   async combine(n, inp, ctx) {
