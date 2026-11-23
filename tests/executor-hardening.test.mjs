@@ -60,6 +60,46 @@ test("vframes: frames=1 with frame3 wired still emits frame3 (no starve)", async
   assert.match(result.get("Out").url, /^data:image\//);
 });
 
+test("vframes counts supplied by wires honor outbound frames and the extraction interval", async (t) => {
+  if (!hasFfmpeg) return t.skip("ffmpeg not on PATH");
+  const vid = await mediaFromFile(media("clipA.mp4"));
+  for (const [mode, selection] of [
+    ["legacy gap", { gap: "0.04" }],
+    ["stride and range", { stride: "2", startSec: "0.04", endSec: "0.64" }],
+  ]) {
+    await t.test(mode, async () => {
+      const wf = Workflow.fromJSON({
+        nodes: [
+          { id: "v", type: "vupload", fields: {} },
+          { id: "count", type: "text", fields: { text: "1" } },
+          { id: "f", type: "vframes", fields: { frames: "1", dir: "start", ...selection } },
+          { id: "r", type: "resize", name: "Out", fields: { mode: "fit", width: "32", height: "32" } },
+        ],
+        links: [
+          { from: { node: "v", port: "video" }, to: { node: "f", port: "video" } },
+          { from: { node: "count", port: "text" }, to: { node: "f", port: "frames" } },
+          { from: { node: "f", port: "frame3" }, to: { node: "r", port: "image" } },
+        ],
+      }, { apiKey: null, fetch: () => assert.fail("unexpected network request") });
+      for (const [requested, emitted] of [["1", 3], ["5", 5]]) {
+        const result = await wf.run({ Video: vid, "count.text": requested });
+        assert.equal(Object.keys(result.nodes.f.out).length, emitted);
+        assert.equal(result.nodes.r.status, "done");
+        assert.match(result.get("Out").url, /^data:image\//);
+      }
+      if (selection.stride) {
+        await assert.rejects(wf.run({ Video: vid }, { settings: { "f.endSec": 0.13 } }), error => {
+          // Two samples fit from 0.04 to 0.13 at stride 2. The floor cannot expand that interval.
+          assert.deepEqual(Object.keys(error.result.nodes.f.out), ["frame1", "frame2"]);
+          assert.equal(error.result.nodes.r.error, "no image input");
+          return true;
+        });
+      }
+      assert.equal(wf.graph.nodes.find(node => node.id === "f").fields.frames, "1");
+    });
+  }
+});
+
 test("deriveSettings: vframes frames min rises to wired floor", () => {
   const graph = {
     nodes: [{ id: "f", type: "vframes", fields: { frames: "1" } }],
