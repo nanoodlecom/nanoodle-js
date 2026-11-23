@@ -21,6 +21,9 @@ import { MEDIA_INPUT_KINDS } from "../src/io.mjs";
 import { Workflow, RunError, mediaFromFile } from "../src/index.mjs";
 import { MediaRef, extForMime, sniffMime } from "../src/media.mjs";
 
+// Node schedules a 1 ms timer for delays above the signed 32-bit limit.
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+
 const HELP = `nanoodle — run nanoodle.com visual AI workflows from the terminal
 
 usage:
@@ -46,7 +49,7 @@ flags:
   --pay         accountless run — no API key or account: each paid call prints a Nano (XNO)
                 invoice as a scannable QR + nano: URI on stderr and waits for the deposit
                 (x402; ignores any configured key; self-custody wallet does the send)
-  --timeout ms  overall run timeout
+  --timeout ms  overall run timeout (0 disables it; maximum ${MAX_TIMEOUT_MS} ms)
 
 examples:
   # scaffold the starter graph and see its inputs/outputs — no API key needed
@@ -80,6 +83,17 @@ function parseKv(arg, flag) {
   const eq = arg.indexOf("=");
   if (eq < 1) { console.error(`${flag} expects key=value, got: ${arg}`); process.exit(1); }
   return [arg.slice(0, eq), arg.slice(eq + 1)];
+}
+
+function parseTimeout(value) {
+  const decimal = /^(?<mantissa>[+-]?(?:\d+(?:\.\d*)?|\.\d+))(?:e[+-]?\d+)?$/i.exec(value.trim());
+  const timeoutMs = Number(value);
+  if (!decimal || timeoutMs < 0 || timeoutMs > MAX_TIMEOUT_MS ||
+      (timeoutMs === 0 && /[1-9]/.test(decimal.groups.mantissa))) {
+    console.error(`--timeout expects milliseconds between 0 and ${MAX_TIMEOUT_MS}`);
+    usage();
+  }
+  return timeoutMs;
 }
 
 const TEXT_EXT = new Set([".txt", ".md", ".json", ".csv", ".html", ".xml"]);
@@ -124,21 +138,28 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
   let graphPath = null, outDir = null, quiet = false, keyFlag = null, envFile = null, timeoutMs, pay = false;
   const inputArgs = [], setArgs = [];
   let i = 0;
-  const val = (flag) => { // a value-taking flag at end of argv is a usage error, not a TypeError
+  const val = (flag) => {
     const v = argv[++i];
-    if (v === undefined) { console.error(`${flag} expects a value`); usage(); }
+    if (v === undefined || handlers.has(v) || ["--help", "-h", "--version"].includes(v)) {
+      console.error(`${flag} expects a value`);
+      usage();
+    }
     return v;
   };
+  const handlers = new Map([
+    ["--input", flag => inputArgs.push(val(flag))],
+    ["--set", flag => setArgs.push(val(flag))],
+    ["--out", flag => { outDir = val(flag); }],
+    ["--json", () => { quiet = true; }],
+    ["--key", flag => { keyFlag = val(flag); }],
+    ["--env-file", flag => { envFile = val(flag); }],
+    ["--pay", () => { pay = true; }],
+    ["--timeout", flag => { timeoutMs = parseTimeout(val(flag)); }],
+  ]);
   for (; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--input") inputArgs.push(val("--input"));
-    else if (a === "--set") setArgs.push(val("--set"));
-    else if (a === "--out") outDir = val("--out");
-    else if (a === "--json") quiet = true;
-    else if (a === "--key") keyFlag = val("--key");
-    else if (a === "--env-file") envFile = val("--env-file");
-    else if (a === "--pay") pay = true;
-    else if (a === "--timeout") timeoutMs = +val("--timeout");
+    const handle = handlers.get(a);
+    if (handle) handle(a);
     else if (a.startsWith("-")) { console.error("unknown flag: " + a); usage(); }
     else if (!graphPath) graphPath = a;
     else { console.error("unexpected argument: " + a); usage(); }

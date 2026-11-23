@@ -287,6 +287,30 @@ test("endpoint output metadata recognizes an authored route prefix and the run h
   assert.deepEqual(wf.outputs[0].ports, [{ name: "audio", type: "audio" }]);
 });
 
+test("an endpoint wire can read a dynamic route's output and tolerate an empty alternative", async () => {
+  const movie = "https://cdn.example/movie.mp4";
+  const wf = Workflow.fromJSON({
+    nodes: [
+      { id: "route", name: "Route", type: "choice", fields: { options: "chat: /chat\nvideo: /movie" } },
+      { id: "e", type: "endpoint", fields: { url: "https://custom.example/v1", mode: "chat", prompt: "hi" } },
+      { id: "label", type: "text", fields: { text: "done" } },
+      { id: "result", type: "join", fields: {} },
+    ],
+    links: [
+      { from: { node: "route", port: "text" }, to: { node: "e", port: "url" } },
+      { from: { node: "e", port: "video" }, to: { node: "result", port: "a" } },
+      { from: { node: "label", port: "text" }, to: { node: "result", port: "b" } },
+    ],
+  }, { fetch: async (url) => {
+    if (url === "https://custom.example/chat") return Response.json({ choices: [{ message: { content: "ok" } }] });
+    assert.equal(url, "https://custom.example/movie");
+    return Response.json({ url: movie });
+  } });
+  assert.deepEqual(wf.warnings, []);
+  assert.equal((await wf.run()).get("result"), "done");
+  assert.equal((await wf.run({ Route: "video: /movie" })).get("result"), movie + " done");
+});
+
 test("video estimate: an untouched audio switch bills the catalog default", () => {
   const pricing = {
     text_to_video_with_audio_per_second: 0.2,

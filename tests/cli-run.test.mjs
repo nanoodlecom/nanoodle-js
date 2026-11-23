@@ -25,7 +25,8 @@ const starterFixture = join(here, "fixtures", "starter-graph.json");
 // event loop can never answer the child CLI's request (deadlock until undici's 5-min timeout)
 function runCli(args, { env = {}, cwd } = {}) {
   return new Promise((resolve, reject) => {
-    const p = spawn(process.execPath, [bin, ...args], {
+    // End Node's own option parsing so Nanoodle sees --env-file itself.
+    const p = spawn(process.execPath, ["--", bin, ...args], {
       cwd,
       env: { ...process.env, NANOGPT_API_KEY: "test-key", ...env },
     });
@@ -256,6 +257,53 @@ test('CLI failure summary retains accepted job ID for recovery', async (t) => {
   const summary = JSON.parse(r.stdout);
   assert.equal(summary.nodes.v.runId, 'accepted-job');
   assert.equal(summary.nodes.v.status, 'error');
+});
+
+test("CLI rejects malformed or out-of-range --timeout before running the workflow", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  scriptStarterRoutes(srv);
+  const cwd = await mkdtemp(join(tmpdir(), "nanoodle-cli-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  for (const value of ["nonsense", "", "  ", "500ms", "0x20", "Infinity", "-1", "2147483648", "1e-500"]) {
+    const r = await runCli(["run", starterFixture, "--timeout", value, "--json"], {
+      cwd, env: { NANOGPT_BASE_URL: srv.url },
+    });
+    assert.equal(r.status, 1, JSON.stringify(value));
+    assert.equal(r.stdout, "", JSON.stringify(value));
+    assert.match(r.stderr, /--timeout expects milliseconds between 0 and 2147483647/);
+    assert.equal(srv.requests.length, 0);
+  }
+});
+
+test("CLI reports a missing option value before another flag", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  scriptStarterRoutes(srv);
+  const cwd = await mkdtemp(join(tmpdir(), "nanoodle-cli-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  for (const flag of ["--timeout", "--input", "--set", "--out", "--key", "--env-file"]) {
+    const r = await runCli(["run", starterFixture, flag, "--json"], {
+      cwd, env: { NANOGPT_BASE_URL: srv.url },
+    });
+    assert.equal(r.status, 1, flag);
+    assert.equal(r.stdout, "", flag);
+    assert.match(r.stderr, new RegExp(`${flag} expects a value`));
+    assert.equal(srv.requests.length, 0);
+  }
+});
+
+test("CLI preserves valid timeouts, dash-leading input names, and quiet JSON output", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "nanoodle-cli-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const graph = join(cwd, "g.json");
+  await writeFile(graph, JSON.stringify({ nodes: [{ id: "t", type: "text", name: "--prompt", fields: { text: "saved" } }] }));
+  for (const value of ["0", "1500.5", "2e3", "2147483647"]) {
+    const r = await runCli(["run", graph, "--timeout", value, "--input", "--prompt=--hello", "--json"], { cwd });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stderr, "");
+    assert.equal(JSON.parse(r.stdout).outputs["--prompt"], "--hello");
+  }
 });
 
 test("CLI --pay JSON reports the original payment after a completion failure", async (t) => {

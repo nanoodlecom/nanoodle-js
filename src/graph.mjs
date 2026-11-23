@@ -8,7 +8,7 @@ export const EDIT_IMG_RE = /^image\d*$/;    // edit multi-reference: image, imag
 export const VID_PORT_RE = /^vid\d*$/;
 export const CLIP_PORT_RE = /^clip\d*$/;    // combine clips
 export const REF_PORT_RE = /^ref\d*$/;      // tvideo reference images
-export const FRAME_PORT_RE = /^frame\d+$/;  // vframes outputs
+export const FRAME_PORT_RE = /^frame[1-9]\d*$/;  // vframes outputs
 export const MAX_FRAMES = 48;
 
 const DYNAMIC_INPUT_RES = [IMG_PORT_RE, EDIT_IMG_RE, VID_PORT_RE, CLIP_PORT_RE, REF_PORT_RE];
@@ -24,8 +24,8 @@ export function wiredFramesFloor(graph, nodeId) {
   let floor = 1;
   for (const l of (graph && graph.links) || []) {
     if (l.from.node !== nodeId) continue;
-    const m = /^frame(\d+)$/.exec(String(l.from.port));
-    if (m) floor = Math.max(floor, parseInt(m[1], 10) || 1);
+    const port = String(l.from.port);
+    if (FRAME_PORT_RE.test(port)) floor = Math.max(floor, Number(port.slice(5)));
   }
   return Math.min(floor, MAX_FRAMES);
 }
@@ -33,6 +33,7 @@ export function wiredFramesFloor(graph, nodeId) {
 /**
  * Node-type registry (execution-relevant subset of the app's NODE_TYPES).
  * flags: local (pure logic / on-device media) | network (calls NanoGPT) | note.
+ * extraSourcePorts lists runtime outputs that are absent from the standard port list.
  * Local media: pure-JS first (MP4CAT / PCM-WAV / PNG); ffmpeg on PATH is the heavy fallback.
  */
 export const NODE_TYPES = {
@@ -46,12 +47,12 @@ export const NODE_TYPES = {
   choice:  { title: "Choice",          inputs: [], outputs: [{ name: "text", type: "text" }], local: true },
   join:    { title: "Join",            inputs: ["a", "b"], outputs: [{ name: "text", type: "text" }], local: true },
   llm:     { title: "LLM",             inputs: [], outputs: [{ name: "text", type: "text" }], network: true },
-  image:   { title: "Image",           inputs: [], outputs: [{ name: "image", type: "image" }], network: true },
-  edit:    { title: "Edit",            inputs: [], outputs: [{ name: "image", type: "image" }], network: true },
-  inpaint: { title: "Inpaint",         inputs: ["image", "mask"], outputs: [{ name: "image", type: "image" }], network: true },
+  image:   { title: "Image",           inputs: [], outputs: [{ name: "image", type: "image" }], extraSourcePorts: ["images"], network: true },
+  edit:    { title: "Edit",            inputs: [], outputs: [{ name: "image", type: "image" }], extraSourcePorts: ["images", "layers"], network: true },
+  inpaint: { title: "Inpaint",         inputs: ["image", "mask"], outputs: [{ name: "image", type: "image" }], extraSourcePorts: ["images", "layers"], network: true },
   resize:  { title: "Resize / crop",   inputs: ["image"], outputs: [{ name: "image", type: "image" }], local: true },
   vision:  { title: "Vision",          inputs: ["image"], outputs: [{ name: "text", type: "text" }], network: true },
-  decide:  { title: "Decide",          inputs: ["text"], outputs: [{ name: "text", type: "text" }, { name: "image", type: "image" }], network: true }, // img1… candidates (IMG_PORT_RE)
+  decide:  { title: "Decide",          inputs: ["text"], outputs: [{ name: "text", type: "text" }, { name: "image", type: "image" }], extraSourcePorts: ["yes", "no", "decision"], network: true }, // img1… candidates (IMG_PORT_RE)
   tvideo:  { title: "Text→Video",      inputs: [], outputs: [{ name: "video", type: "video" }], network: true },
   ivideo:  { title: "Image→Video",     inputs: ["image"], outputs: [{ name: "video", type: "video" }], network: true },
   model3d: { title: "3D model",        inputs: ["image", "model"], outputs: [{ name: "model", type: "model3d" }], network: true },
@@ -70,7 +71,7 @@ export const NODE_TYPES = {
   cleanvoice: { title: "Clean voice", inputs: ["audio", "video"], outputs: [{ name: "audio", type: "audio" }], network: true },
   // Custom URL — not a NanoGPT call, so `network` stays unset (no API key required).
   // Output port follows the selected route mode (see deriveOutputs / endpointOutPort).
-  endpoint: { title: "Custom endpoint", inputs: ["text", "image", "audio", "video"], outputs: [{ name: "text", type: "text" }] },
+  endpoint: { title: "Custom endpoint", inputs: ["text", "image", "audio", "video"], outputs: [{ name: "text", type: "text" }], extraSourcePorts: ["image", "audio", "video", "images"] },
   comment: { title: "Comment",         inputs: [], outputs: [], note: true, local: true },
 };
 
@@ -105,6 +106,16 @@ export function isInputPort(node, port) {
   if (t && (t.inputs || []).includes(port)) return true;
   if (DYNAMIC_INPUT_NAMES.has(port)) return true;
   return DYNAMIC_INPUT_RES.some((re) => re.test(port));
+}
+
+/** Check the possible source ports without depending on what a particular run emits. */
+export function sourceWireIssue(source, { from, to }) {
+  if (!source || source.unknown) return;
+  const type = NODE_TYPES[source.type];
+  const port = from.port;
+  if (type?.outputs?.some(output => output.name === port) || type?.extraSourcePorts?.includes(port)) return;
+  if (type?.framesOut && FRAME_PORT_RE.test(port) && Number(port.slice(5)) <= MAX_FRAMES) return;
+  return `wire ${from.node}.${port} → ${to.node}.${to.port} uses undeclared source port "${port}" on ${displayName(source)}`;
 }
 
 /**
@@ -151,6 +162,7 @@ function scrubMediaPlaceholders(n, warnings) {
  * - media fields that aren't a data:/http(s) URL (prose placeholders, file paths) are blanked + a warning
  * - links are kept only when both endpoints exist
  * - links into music/tts port "text" migrate to "prompt"
+ * - undeclared source ports are kept with a warning so the wire can be repaired
  * @returns {{ nodes, links, warnings: string[] }}
  */
 export function materialize(data) {
@@ -186,7 +198,10 @@ export function materialize(data) {
     if (!ids.has(from.node) || !ids.has(to.node)) continue;
     const toNode = byId.get(to.node);
     if ((toNode.type === "music" || toNode.type === "tts") && to.port === "text") to.port = "prompt"; // legacy port migration
-    links.push({ id: l.id, from, to });
+    const link = { id: l.id, from, to };
+    const issue = sourceWireIssue(byId.get(from.node), link);
+    if (issue) warnings.push(issue);
+    links.push(link);
   }
   return { nodes, links, warnings };
 }
