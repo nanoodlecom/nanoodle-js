@@ -397,27 +397,40 @@ export function deriveSettings(graph) {
  * Refuses wired fields with a clear error.
  */
 export function resolveSettingKey(graph, settings, userKey) {
-  const norm = String(userKey).trim().toLowerCase();
-  const exact = settings.find((s) => s.key.toLowerCase() === norm);
-  if (exact) return exact;
+  const spelling = String(userKey).trim();
+  const norm = spelling.toLowerCase();
+  const dot = spelling.lastIndexOf(".");
+  if (dot >= 0) {
+    const spelledHead = spelling.slice(0, dot);
+    const head = spelledHead.toLowerCase(), field = spelling.slice(dot + 1).toLowerCase();
+    const wiredError = `setting "${userKey}": that field is wired from another node and can't be overridden`;
+    const canonical = new Map(settings.filter((s) => s.key.toLowerCase() === norm).map((s) => [s.nodeId, s]));
+    const wired = new Set();
+    for (const { to } of graph.links) {
+      if (to.port.toLowerCase() !== field) continue;
+      wired.add(to.node);
+      // A wire reserves the canonical address even when the settings list omits it.
+      if (`${to.node}.${to.port}`.toLowerCase() === norm) canonical.set(to.node, null);
+    }
 
-  const dot = norm.lastIndexOf(".");
-  if (dot > 0) {
-    const head = norm.slice(0, dot), field = norm.slice(dot + 1);
-    const nodes = graph.nodes.filter((n) =>
-      n.id.toLowerCase() === head ||
-      (n.name || "").trim().toLowerCase() === head ||
-      displayName(n).toLowerCase() === head);
+    const addressed = canonical.has(spelledHead) ? [spelledHead] : [...canonical.keys()];
+    if (addressed.length === 1) {
+      const spec = canonical.get(addressed[0]);
+      if (spec) return spec;
+      throw new NanoodleError(wiredError);
+    }
+    if (addressed.length > 1) {
+      const keys = addressed.map((id) => canonical.get(id)?.key ?? `${id}.${field} (wired)`);
+      throw new NanoodleError(`setting "${userKey}" is ambiguous — matches ${keys.join(", ")}`);
+    }
+
+    const nodes = graph.nodes.filter((n) => displayName(n).toLowerCase() === head);
     const cand = settings.filter((s) => nodes.some((n) => n.id === s.nodeId) && s.field.toLowerCase() === field);
     if (cand.length === 1) return cand[0];
     if (cand.length > 1) {
       throw new NanoodleError(`setting "${userKey}" is ambiguous — matches ${cand.map((c) => c.key).join(", ")}`);
     }
-    for (const n of nodes) {
-      if (graph.links.some((l) => l.to.node === n.id && l.to.port.toLowerCase() === field)) {
-        throw new NanoodleError(`setting "${userKey}": that field is wired from another node and can't be overridden`);
-      }
-    }
+    if (nodes.some((n) => wired.has(n.id))) throw new NanoodleError(wiredError);
   }
 
   const byField = settings.filter((s) => s.field.toLowerCase() === norm || s.label.toLowerCase() === norm);

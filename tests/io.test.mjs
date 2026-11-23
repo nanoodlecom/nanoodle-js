@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { Workflow } from "../src/index.mjs";
+import { resolveSettingKey } from "../src/io.mjs";
 import { startMockServer, mockOpts, chatJson, PNG_B64 } from "./harness/mock-server.mjs";
 
 const fixture = (name) => fileURLToPath(new URL("./fixtures/" + name, import.meta.url));
@@ -116,6 +117,52 @@ test("settings override applies; wired setting refused; unknown setting lists ke
 
   await assert.rejects(wf.run({}, { settings: { "n3.prompt": "sneaky" } }), /wired from another node and can't be overridden/);
   await assert.rejects(wf.run({}, { settings: { nope: 1 } }), /unknown setting "nope".*n3\.model/s);
+});
+
+test("a wired canonical setting takes precedence over another node's friendly alias", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /api/v1/chat/completions", chatJson("ok"));
+
+  const wf = Workflow.fromJSON({
+    nodes: [
+      { id: "draft", type: "llm", name: "writer", fields: { model: "draft-model", prompt: "Draft prompt" } },
+      { id: "writer", type: "llm", name: "Final.Writer", fields: { model: "stored-model", prompt: "Actual prompt" } },
+      { id: "model", type: "text", fields: { text: "wired-model" } },
+    ],
+    links: [{ from: { node: "model", port: "text" }, to: { node: "writer", port: "model" } }],
+  }, mockOpts(srv));
+
+  for (const key of ["writer.model", "  WRITEr.MODEL  ", "Final.Writer.Model"]) {
+    await assert.rejects(wf.run({}, { settings: { [key]: "override-model" } }), /wired from another node/);
+  }
+  assert.equal(srv.requests.length, 0);
+
+  await wf.run({}, { settings: { Model: "override-model" } });
+  const sent = srv.of("POST /api/v1/chat/completions").map(({ json }) => [json.messages.at(-1).content, json.model]);
+  assert.deepEqual(Object.fromEntries(sent), { "Draft prompt": "override-model", "Actual prompt": "wired-model" });
+});
+
+test("dotted setting addresses respect exact node ID case and retain friendly aliases", () => {
+  const wf = Workflow.fromJSON({
+    nodes: [
+      { id: "chapter.writer", type: "llm", name: "First draft", fields: {} },
+      { id: "chapter.Writer", type: "llm", name: "Final.Draft", fields: {} },
+      { id: "alias", type: "llm", name: "chapter.Writer", fields: {} },
+      { id: "speech-node", type: "tts", fields: {} },
+      { id: "model", type: "text", fields: { text: "wired-model" } },
+    ],
+    links: [{ from: { node: "model", port: "text" }, to: { node: "chapter.writer", port: "model" } }],
+  }, noNet);
+  const key = (name) => resolveSettingKey(wf.graph, wf.settings, name).key;
+  assert.equal(key("chapter.writer.MAXTOKENS"), "chapter.writer.maxTokens");
+  assert.equal(key("chapter.Writer.MAXTOKENS"), "chapter.Writer.maxTokens");
+  assert.throws(() => key("chapter.WRITER.maxTokens"), /ambiguous.*chapter\.writer\.maxTokens.*chapter\.Writer\.maxTokens/);
+  assert.throws(() => key("chapter.writer.MODEL"), /wired from another node/);
+  assert.equal(key("chapter.Writer.MODEL"), "chapter.Writer.model");
+  assert.throws(() => key("chapter.WRITER.MODEL"), /ambiguous.*chapter\.Writer\.model.*chapter\.writer\.model \(wired\)/);
+  assert.equal(key("  FINAL.DRAFT.Model  "), "chapter.Writer.model");
+  assert.equal(key("Speech.voice"), "speech-node.voice");
 });
 
 test("duplicate sink display names get ' 2' suffixes; node-id keys always work", async () => {
