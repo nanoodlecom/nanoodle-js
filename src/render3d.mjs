@@ -178,6 +178,27 @@ class Cdp {
   }
 }
 
+export function waitForDevTools(child, signal) {
+  return new Promise((res, rej) => {
+    let buf = "";
+    const fail = error => { signal.removeEventListener("abort", onAbort); rej(error); };
+    const onAbort = () => fail(abortReason(signal));
+    signal.addEventListener("abort", onAbort, { once: true });
+    child.stderr.on("data", (d) => {
+      if (buf === null) return;
+      buf += d;
+      const m = /DevTools listening on (ws:\/\/\S+)\s/.exec(buf);
+      if (m) { buf = null; signal.removeEventListener("abort", onAbort); res(m[1]); }
+      // Arbitrary stderr chunk boundaries can put the readiness line before a
+      // large burst of diagnostics. Scan first and retain only the trailing bytes.
+      else buf = buf.slice(-8192);
+    });
+    child.once("exit", () => fail(new NanoodleError("render3d: Chromium exited during startup")));
+    child.once("error", () => fail(new NanoodleError("render3d: could not launch Chromium")));
+    if (signal.aborted) onAbort();
+  });
+}
+
 async function launchScene(glbBytes, signal) {
   const exe = await findChromium();
   if (!exe) throw noChromiumError();
@@ -206,21 +227,7 @@ async function launchScene(glbBytes, signal) {
     ], { stdio: ["ignore", "ignore", "pipe"] });
     exited = new Promise(resolve => child.once("close", resolve));
     signal.addEventListener("abort", cleanup, { once: true });
-    const wsUrl = await new Promise((res, rej) => {
-      let buf = "";
-      const fail = error => { signal.removeEventListener("abort", onAbort); rej(error); };
-      const onAbort = () => fail(abortReason(signal));
-      signal.addEventListener("abort", onAbort, { once: true });
-      child.stderr.on("data", (d) => {
-        if (buf === null) return;
-        buf = (buf + d).slice(-8192);
-        const m = /DevTools listening on (ws:\/\/\S+)\s/.exec(buf);
-        if (m) { buf = null; signal.removeEventListener("abort", onAbort); res(m[1]); }
-      });
-      child.once("exit", () => fail(new NanoodleError("render3d: Chromium exited during startup")));
-      child.once("error", () => fail(new NanoodleError("render3d: could not launch Chromium")));
-      if (signal.aborted) onAbort();
-    });
+    const wsUrl = await waitForDevTools(child, signal);
     throwIfAborted(signal);
     ws = new WebSocket(wsUrl);
     await new Promise((res, rej) => {

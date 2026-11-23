@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
+import { PassThrough } from "node:stream";
 import { Workflow } from "../src/index.mjs";
 import { unpackGlb } from "../src/gltf-scene.mjs";
-import { render3dSceneFields, render3dMedia, findChromium } from "../src/render3d.mjs";
+import { render3dSceneFields, render3dMedia, findChromium, waitForDevTools } from "../src/render3d.mjs";
 import { decodePng } from "../src/local-media.mjs";
 import { MP4CAT } from "../src/mp4cat.mjs";
 
@@ -126,6 +128,17 @@ test("render budgets are checked before obtaining the model", async () => {
 test("render3d selects the primary workflow output for the render mode", () => {
   assert.equal(Workflow.fromJSON(graph({})).outputs[0].ports[0].name, "image");
   assert.equal(Workflow.fromJSON(graph({ mode: "video" })).outputs[0].ports[0].name, "video");
+});
+
+test("Chromium readiness survives a split address followed by a large stderr chunk", async () => {
+  const child = new EventEmitter();
+  child.stderr = new PassThrough();
+  const abort = new AbortController();
+  const ready = waitForDevTools(child, abort.signal);
+  child.stderr.write("DevTools listening on ws://127.0.0.1:1234/devtools/");
+  child.stderr.end("browser/test\n" + "diagnostic output\n".repeat(1000));
+  abort.abort(new Error("DevTools address was lost"));
+  assert.equal(await ready, "ws://127.0.0.1:1234/devtools/browser/test");
 });
 
 test("render3d rejects external glTF buffers and GLB images before starting Chromium", async (t) => {
