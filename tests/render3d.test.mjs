@@ -121,6 +121,12 @@ test("render3d selects the primary workflow output for the render mode", () => {
 
 test("Chromium rejects a model that references an unbundled asset", async (t) => {
   if (!(await findChromium())) { t.skip("no chromium discoverable"); return; }
+  const commands = [];
+  const send = WebSocket.prototype.send;
+  t.mock.method(WebSocket.prototype, "send", function (data) {
+    commands.push(JSON.parse(data));
+    return send.call(this, data);
+  });
   let requests = 0;
   const asset = createServer((_req, res) => { requests++; res.writeHead(404).end(); });
   await new Promise(resolve => asset.listen(0, "127.0.0.1", resolve));
@@ -129,13 +135,22 @@ test("Chromium rejects a model that references an unbundled asset", async (t) =>
   const model = JSON.parse(glb.subarray(20, 20 + glb.readUInt32LE(12)));
   model.buffers[0].uri = `http://127.0.0.1:${asset.address().port}/model.bin`;
   const url = "data:model/gltf+json;base64," + Buffer.from(JSON.stringify(model)).toString("base64");
-  await assert.rejects(render3dMedia(url), /self-contained model/);
+  await assert.rejects(render3dMedia(url, {}, { signal: AbortSignal.timeout(30_000) }), /self-contained model/);
   assert.equal(requests, 0);
+  assert.equal(commands.some(command => command.method === "Target.createTarget"), false, "use Chromium's existing incognito page");
+  const targets = commands.findIndex(command => command.method === "Target.getTargets");
+  const attach = commands.findIndex(command => command.method === "Target.attachToTarget");
+  const navigate = commands.findIndex(command => command.method === "Page.navigate");
+  const probe = commands.findIndex(command => command.method === "Runtime.evaluate");
+  assert.ok(targets >= 0 && targets < attach && attach < navigate && navigate < probe);
+  assert.notEqual(commands[probe].params.awaitPromise, true, "a discarded document must not own the readiness wait");
 });
 
 test("render3d node: renders both parts; explode separates; clip cuts", async (t) => {
   if (!(await findChromium())) { t.skip("no chromium discoverable"); return; }
-  const run = async (fields) => (await Workflow.fromJSON(graph(fields), { apiKey: "fixture" }).run({})).nodes.r.out;
+  const run = async (fields) => (await Workflow.fromJSON(graph(fields), { apiKey: "fixture" }).run({}, {
+    signal: AbortSignal.timeout(30_000),
+  })).nodes.r.out;
 
   const plain = await pixels((await run({ azimuth: "0", elevation: "0" })).image);
   assert.equal(plain.width, 320);

@@ -140,10 +140,12 @@ function serveScene(glbBytes) {
 /** Minimal CDP client over the built-in WebSocket. */
 class Cdp {
   constructor(ws) { this.ws = ws; this.id = 0; this.pending = new Map();
-    ws.addEventListener("close", () => {
+    const disconnect = () => {
       for (const { rej } of this.pending.values()) rej(new NanoodleError("render3d: Chromium disconnected"));
       this.pending.clear();
-    });
+    };
+    ws.addEventListener("close", disconnect);
+    ws.addEventListener("error", disconnect);
     ws.addEventListener("message", (ev) => {
       const m = JSON.parse(ev.data);
       if (m.id && this.pending.has(m.id)) { const { res, rej } = this.pending.get(m.id); this.pending.delete(m.id); m.error ? rej(new Error(m.error.message)) : res(m.result); }
@@ -161,86 +163,99 @@ class Cdp {
 async function launchScene(glbBytes, signal) {
   const exe = await findChromium();
   if (!exe) throw noChromiumError();
+  throwIfAborted(signal);
   const profile = await fsp.mkdtemp(path.join(os.tmpdir(), "nanoodle-render3d-profile-"));
-  let server;
-  try {
-    server = await serveScene(glbBytes);
-  } catch (error) {
-    await fsp.rm(profile, { recursive: true, force: true });
-    throw error;
-  }
-  const port = server.address().port;
-  const child = cp.spawn(exe, [
-    "--headless=new", "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1",
-    `--user-data-dir=${profile}`,
-    "--no-sandbox", "--incognito", "--no-first-run", "--no-proxy-server", "--disable-background-networking",
-    "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "about:blank",
-  ], { stdio: ["ignore", "ignore", "pipe"] });
-  const exited = new Promise(resolve => child.once("close", resolve));
-  let ws;
+  let server, child, exited, ws;
   let cleaning;
   const cleanup = () => cleaning ??= (async () => {
     signal.removeEventListener("abort", cleanup);
     try { ws?.close(); } catch { /* gone */ }
-    try { child.kill("SIGKILL"); } catch { /* gone */ }
-    server.close();
-    server.closeAllConnections();
+    try { child?.kill("SIGKILL"); } catch { /* gone */ }
+    server?.close();
+    server?.closeAllConnections();
     await exited;
     await fsp.rm(profile, { recursive: true, force: true }).catch(() => {});
   })();
-  signal.addEventListener("abort", cleanup, { once: true });
   try {
+    server = await serveScene(glbBytes);
     throwIfAborted(signal);
+    const url = `http://127.0.0.1:${server.address().port}/scene.html`;
+    child = cp.spawn(exe, [
+      "--headless=new", "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1",
+      `--user-data-dir=${profile}`,
+      "--no-sandbox", "--incognito", "--no-first-run", "--no-proxy-server", "--disable-background-networking",
+      "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "about:blank",
+    ], { stdio: ["ignore", "ignore", "pipe"] });
+    exited = new Promise(resolve => child.once("close", resolve));
+    signal.addEventListener("abort", cleanup, { once: true });
     const wsUrl = await new Promise((res, rej) => {
       let buf = "";
-      const to = setTimeout(() => rej(new NanoodleError("render3d: Chromium did not start in time")), 30000);
+      const fail = error => { signal.removeEventListener("abort", onAbort); rej(error); };
+      const onAbort = () => fail(abortReason(signal));
+      signal.addEventListener("abort", onAbort, { once: true });
       child.stderr.on("data", (d) => {
+        if (buf === null) return;
         buf = (buf + d).slice(-8192);
-        const m = /DevTools listening on (ws:\/\/\S+)/.exec(buf);
-        if (m) { clearTimeout(to); res(m[1]); }
+        const m = /DevTools listening on (ws:\/\/\S+)\s/.exec(buf);
+        if (m) { buf = null; signal.removeEventListener("abort", onAbort); res(m[1]); }
       });
-      child.on("exit", () => { clearTimeout(to); rej(new NanoodleError("render3d: Chromium exited during startup")); });
-      child.on("error", () => { clearTimeout(to); rej(new NanoodleError("render3d: could not launch Chromium")); });
+      child.once("exit", () => fail(new NanoodleError("render3d: Chromium exited during startup")));
+      child.once("error", () => fail(new NanoodleError("render3d: could not launch Chromium")));
+      if (signal.aborted) onAbort();
     });
     throwIfAborted(signal);
     ws = new WebSocket(wsUrl);
     await new Promise((res, rej) => {
       ws.addEventListener("open", res, { once: true });
-      ws.addEventListener("error", rej, { once: true });
-      ws.addEventListener("close", () => rej(new NanoodleError("render3d: Chromium disconnected")), { once: true });
+      const fail = () => rej(new NanoodleError("render3d: could not connect to Chromium"));
+      ws.addEventListener("error", fail, { once: true });
+      ws.addEventListener("close", fail, { once: true });
     });
+    throwIfAborted(signal);
     const cdp = new Cdp(ws);
-    const { targetId } = await cdp.send("Target.createTarget", { url: `http://127.0.0.1:${port}/scene.html` });
-    const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
+    // The process's initial tab belongs to the incognito context. Creating a
+    // CDP target without a context instead uses the default profile, where
+    // full Chrome can stall on the first navigation.
+    let target;
+    while (!target) {
+      throwIfAborted(signal);
+      const { targetInfos } = await cdp.send("Target.getTargets");
+      target = targetInfos.find(info => info.type === "page" && info.url === "about:blank");
+      if (!target) await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    const { sessionId } = await cdp.send("Target.attachToTarget", { targetId: target.targetId, flatten: true });
+    const navigation = await cdp.send("Page.navigate", { url }, sessionId);
+    if (navigation.errorText || navigation.isDownload) {
+      throw new NanoodleError("render3d: scene navigation failed: " + (navigation.errorText || "unexpected download"));
+    }
     const evaluate = async (expression) => {
-      // The target's first navigation can destroy the initial execution
-      // context mid-evaluate (reported either as a protocol error or as
-      // exceptionDetails); retry those, surface everything else.
-      for (let attempt = 0; ; attempt++) {
-        let r;
-        try {
-          r = await cdp.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, sessionId);
-        } catch (e) {
-          if (/Execution context was destroyed|Cannot find context/i.test(e.message || "") && attempt < 20) {
-            await new Promise((done) => setTimeout(done, 250));
-            continue;
-          }
-          throw e;
-        }
-        if (!r.exceptionDetails) return r.result && r.result.value;
-        const desc = (r.exceptionDetails.exception && r.exceptionDetails.exception.description) || r.exceptionDetails.text || "unknown";
-        if (/Execution context was destroyed|Cannot find context/i.test(desc) && attempt < 20) {
-          await new Promise((done) => setTimeout(done, 250));
-          continue;
-        }
-        throw new NanoodleError("render3d scene error: " + desc);
-      }
+      throwIfAborted(signal);
+      const r = await cdp.send("Runtime.evaluate", { expression, returnByValue: true }, sessionId);
+      throwIfAborted(signal);
+      if (!r.exceptionDetails) return r.result?.value;
+      const desc = r.exceptionDetails.exception?.description || r.exceptionDetails.text || "unknown";
+      throw new NanoodleError("render3d scene error: " + desc);
     };
-    const ready = await evaluate(`new Promise((res) => { const t = setInterval(() => {
-      if (window.__render3d && window.__render3d.error) { clearInterval(t); res("error:" + window.__render3d.error); }
-      else if (window.__render3d && window.__render3d.ready) { clearInterval(t); res("ready"); }
-    }, 50); })`);
-    if (ready !== "ready") throw new NanoodleError("render3d: " + ready);
+    // CDP can still evaluate in the old document while navigation commits.
+    // Probe synchronously so a discarded document cannot strand an awaited
+    // browser-side promise, and accept only the document we asked to load.
+    const probe = `(() => {
+      if (location.href !== ${JSON.stringify(url)}) return null;
+      const scene = window.__render3d;
+      const loaded = document.readyState === "complete";
+      return { loaded, initialized: !!scene, ready: scene?.ready, error: scene?.error };
+    })()`;
+    for (;;) {
+      let state;
+      try { state = await evaluate(probe); }
+      catch (error) {
+        if (!/Execution context was destroyed|Cannot find context/i.test(error.message)) throw error;
+      }
+      if (state?.error) throw new NanoodleError("render3d: " + state.error);
+      if (state?.loaded && !state.initialized) throw new NanoodleError("render3d: scene did not initialize");
+      if (state?.loaded && state.ready) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
     return { evaluate, cleanup };
   } catch (e) {
     await cleanup();

@@ -623,7 +623,12 @@ export class Workflow {
     for (const o of this.outputs) {
       const rec = nodesRec[o.nodeId];
       if (!rec || !(rec.status === "done" || (rec.status === "gated" && rec.out))) continue;
-      const primary = o.type === "endpoint" ? endpointOutPort(byId.get(o.nodeId), rec.out) : o.ports[0];
+      let primary = o.ports[0];
+      if (o.type === "endpoint") primary = endpointOutPort(byId.get(o.nodeId), rec.out);
+      else if (o.type === "render3d") {
+        // Render 3D emits only one port. Settings and wires can change its mode after inspection.
+        primary = o.ports.find(p => Object.hasOwn(rec.out, p.name)) ?? primary;
+      }
       const value = this._wrapValue(rec.out[primary.name], primary.type);
       outputEntries.push([o.key, value], [o.nodeId, value]);
     }
