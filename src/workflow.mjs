@@ -1,6 +1,6 @@
 import { NanoodleError, RunError, UnsupportedNodeError } from "./errors.mjs";
 import { abortReason, enforceDeadline, normalizeTimeoutMs, startDeadline, throwIfAborted } from "./deadline.mjs";
-import { NODE_TYPES, displayName, isInputPort, lockedNode, materialize, sourceWireIssue, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
+import { NODE_TYPES, displayName, isInputPort, lockedNode, materialize, topoSort, wireIssue, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
 import { endpointOutPort } from "./endpoint.mjs";
 import { MEDIA_INPUT_KINDS, deriveInputs, deriveOutputs, deriveSettings, resolveInputKey, resolveSettingKey } from "./io.mjs";
 import { NanoClient } from "./client.mjs";
@@ -248,6 +248,20 @@ export class Workflow {
     const { settings = {}, defaults = true, timeoutMs, signal, onProgress } = runOpts;
     const graph = this.graph;
 
+    for (const n of graph.nodes) {
+      if (n.unknown) {
+        throw new UnsupportedNodeError(
+          `node ${n.id}: unknown node type '${n.type}' — this graph needs a newer nanoodle library`,
+          { nodeId: n.id, nodeType: n.type });
+      }
+    }
+
+    const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+    for (const link of graph.links) {
+      const issue = wireIssue(link, byId);
+      if (issue) throw new NanoodleError(issue.message, { code: issue.code });
+    }
+
     // bare scalar → the single required input
     if (!isPlainObject(inputs)) {
       const required = this.inputs.filter((i) => !i.optional);
@@ -278,20 +292,6 @@ export class Workflow {
       settingAssignments.push({ entry, value });
     }
 
-    // unknown node types fail fast — before any network call
-    for (const n of graph.nodes) {
-      if (n.unknown) {
-        throw new UnsupportedNodeError(
-          `node ${n.id}: unknown node type '${n.type}' — this graph needs a newer nanoodle library`,
-          { nodeId: n.id, nodeType: n.type });
-      }
-    }
-
-    const byId = new Map(graph.nodes.map((n) => [n.id, n]));
-    for (const link of graph.links) {
-      const issue = sourceWireIssue(byId.get(link.from.node), link);
-      if (issue) throw new NanoodleError(issue, { code: "invalid-source-port" });
-    }
     const order = topoSort(graph); // throws naming cyclic nodes
     const branches = planBranches(graph, order.map(n => n.id));
 

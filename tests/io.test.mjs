@@ -243,8 +243,8 @@ test("author-marked optional input (fields.optional): derived, skippable, keeps 
       { id: "n3", type: "join", fields: { sep: "+" } },
     ],
     links: [
-      { from: { node: "n1", port: "text" }, to: { node: "n3", port: "text1" } },
-      { from: { node: "n2", port: "text" }, to: { node: "n3", port: "text2" } },
+      { from: { node: "n1", port: "text" }, to: { node: "n3", port: "a" } },
+      { from: { node: "n2", port: "text" }, to: { node: "n3", port: "b" } },
     ],
   }, noNet);
   const extra = wf.inputs.find((i) => i.nodeId === "n2");
@@ -253,6 +253,7 @@ test("author-marked optional input (fields.optional): derived, skippable, keeps 
   assert.equal(wf.inputs.find((i) => i.nodeId === "n1").optional, false);
   const result = await wf.run({ Text: "hi" });   // optional input omitted → runs, empty value
   assert.equal(result.nodes.n2.out.text, "");
+  assert.equal(result.nodes.n3.out.text, "hi");
   assert.equal(result.nodes.n2.status, "done");
 });
 

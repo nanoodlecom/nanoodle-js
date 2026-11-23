@@ -21,8 +21,8 @@ Verified against /home/ntc/dev/nanoodlecom/nanoodle/index.html (editor). The �
 
 ## Loader semantics (applyGraphData, index.html:8815-8860) — REPLICATE THESE
 - Type alias: `audio` → `tts` (legacy).
-- Unknown node type → node silently skipped (library: keep node but error only if it must run — see DESIGN; simplest faithful behavior: drop unknown-type nodes AND their links, but surface a warning).
-- Links kept only if BOTH endpoints exist after node filtering.
+- The library keeps unknown nodes and wires with missing endpoint nodes or undeclared ports. Inspection reports a warning, and execution rejects the graph before sending any provider requests.
+- An LLM video input is recognized on load. Use the nanoodle editor or player to run a workflow wired to this input.
 - Migration: links into a `music`/`tts` node with `to.port === "text"` are rewritten to `"prompt"`.
 - Media fields are `data:` URLs inline in `fields` (image/audio/video/mask). Share links may have them blanked to "".
 - Library extension: a media field value that is NOT a `data:`/`http(s)` URL (a prose placeholder, a bare file path, an object) is blanked at load with a warning — the input then surfaces as genuinely required instead of posting garbage to the API. Authors/agents: leave media fields `""` and supply the file at run time.
