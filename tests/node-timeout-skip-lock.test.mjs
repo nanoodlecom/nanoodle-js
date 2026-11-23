@@ -26,13 +26,13 @@ function fakeFetch(seen = []) {
 }
 const opts = (seen) => ({ apiKey: "test-key", baseUrl: "http://fake.invalid", fetch: fakeFetch(seen), quiet: true });
 
-/** draft → writers w1,w2 → join → decider llm */
-function writersGraph(m1, m2, extra = {}) {
+/** draft → writers w1,w2 → join → decider llm. Timebox only the writer that stalls. */
+function writersGraph(m1, m2, secondWriterFields = {}) {
   return {
     nodes: [
       { id: "d", type: "text", name: "Draft", fields: { text: "hello" } },
-      { id: "w1", type: "llm", fields: { model: m1, onError: "skip", ...extra } },
-      { id: "w2", type: "llm", fields: { model: m2, onError: "skip", ...extra } },
+      { id: "w1", type: "llm", fields: { model: m1, onError: "skip" } },
+      { id: "w2", type: "llm", fields: { model: m2, onError: "skip", ...secondWriterFields } },
       { id: "j", type: "join", fields: { sep: "|" } },
       { id: "dec", type: "llm", name: "Decider", fields: { model: "judge" } },
     ],
@@ -65,8 +65,9 @@ test("timeoutMs + onError skip: decider runs with the surviving writer", async (
   const seen = [];
   const wf = Workflow.fromJSON(writersGraph("ok", "hang", { timeoutMs: 50 }), opts(seen));
   const r = await wf.run({});
+  assert.equal(r.nodes.w1.status, "done");
   assert.equal(r.nodes.w2.status, "skipped");
-  assert.match(r.errors.find((e) => e.nodeId === "w2").message, /timed out/);
+  assert.match(r.errors.find((e) => e.nodeId === "w2").message, /node timed out after 50ms/);
   assert.equal(r.errors.find((e) => e.nodeId === "w2").code, "timeout");
   assert.equal(r.nodes.dec.out.text, "judge:ok:hello");
 });
