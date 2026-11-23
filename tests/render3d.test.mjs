@@ -114,6 +114,11 @@ test("render budgets are checked before obtaining the model", async () => {
   await assert.rejects(render3dMedia(model, { mode: "video", width: 319 }, opts), /even dimensions/);
 });
 
+test("render3d selects the primary workflow output for the render mode", () => {
+  assert.equal(Workflow.fromJSON(graph({})).outputs[0].ports[0].name, "image");
+  assert.equal(Workflow.fromJSON(graph({ mode: "video" })).outputs[0].ports[0].name, "video");
+});
+
 test("Chromium rejects a model that references an unbundled asset", async (t) => {
   if (!(await findChromium())) { t.skip("no chromium discoverable"); return; }
   let requests = 0;

@@ -177,6 +177,7 @@ export function deriveOutputs(graph) {
     }
     // Custom endpoint's output port follows fields.mode (chat→text, image, video, audio, json→text).
     if (n.type === "endpoint") ports = [endpointOutPort(n)];
+    if (n.type === "render3d" && n.fields?.mode === "video") ports = [ports[1], ports[0]];
     return { key, nodeId: n.id, type: n.type, ports };
   });
 }
