@@ -63,32 +63,6 @@ test("wired field can't be supplied as an input (clear error)", async () => {
   await assert.rejects(wf.run({ "n2.prompt": "x" }), /wired from another node/);
 });
 
-test("an undeclared source port warns on load and blocks requests instead of using the stored field", async () => {
-  const requests = [];
-  const events = [];
-  const wf = Workflow.fromJSON({
-    nodes: [
-      { id: "source", type: "text", fields: { text: "intended prompt" } },
-      { id: "writer", type: "llm", fields: { model: "fixture", prompt: "stored fallback" } },
-    ],
-    links: [{ id: "wire", from: { node: "source", port: "obsoletePort" }, to: { node: "writer", port: "prompt" } }],
-  }, { ...noNet, fetch: async (_url, options) => {
-    requests.push(JSON.parse(options.body));
-    return Response.json({ choices: [{ message: { content: "billed" } }] });
-  } });
-
-  assert.equal(wf.graph.links[0].id, "wire");
-  const message = /wire source\.obsoletePort → writer\.prompt uses undeclared source port "obsoletePort" on Text/;
-  assert.equal(wf.warnings.length, 1);
-  assert.match(wf.warnings[0], message);
-  await assert.rejects(wf.run({}, { onProgress: event => events.push(event) }), {
-    code: "invalid-source-port",
-    message,
-  });
-  assert.deepEqual(requests, []);
-  assert.deepEqual(events, []);
-});
-
 test("missing required input with no default errors upfront, before any node runs", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());

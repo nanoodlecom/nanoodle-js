@@ -392,9 +392,9 @@ test("util.inspect of Workflow/NanoClient never contains the API key (but auth h
   assert.equal(srv.requests[0].headers["authorization"], "Bearer test-key"); // the key still works
 });
 
-/* ---------------- undefined upstream value must not clobber a typed field ---------------- */
+/* ---------------- invalid source ports ---------------- */
 
-test("link from a nonexistent source port leaves the typed field intact (app applies only v != null)", async (t) => {
+test("an undeclared source port warns on load and blocks requests with a stored fallback", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());
   srv.script("POST /api/v1/chat/completions", chatJson("ok"));
@@ -406,8 +406,17 @@ test("link from a nonexistent source port leaves the typed field intact (app app
     ],
     links: [{ id: "l1", from: { node: "n1", port: "bogus" }, to: { node: "n2", port: "prompt" } }],
   }, mockOpts(srv));
-  await wf.run({});
-  assert.equal(srv.requests[0].json.messages.at(-1).content, "typed prompt");
+  const message = /wire n1\.bogus → n2\.prompt uses undeclared source port "bogus" on Text/;
+  assert.equal(wf.graph.links[0].id, "l1");
+  assert.equal(wf.warnings.length, 1);
+  assert.match(wf.warnings[0], message);
+  const events = [];
+  await assert.rejects(wf.run({}, { onProgress: event => events.push(event) }), {
+    code: "invalid-source-port",
+    message,
+  });
+  assert.deepEqual(srv.requests, []);
+  assert.deepEqual(events, []);
 });
 
 /* ---------------- non-string settings coerced ---------------- */
