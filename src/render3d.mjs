@@ -309,7 +309,8 @@ function runProc(bin, args, signal) {
  * Render a model. fields.mode "image" (default) → { image } PNG data URL.
  * fields.mode "video" → { video } MP4 data URL: frames sweep the turntable
  * (fields.turntable degrees, default 360) or the named clip's timeline,
- * at fields.fps over fields.duration seconds.
+ * at fields.fps over fields.duration seconds rounded to whole frames.
+ * The requested duration must fit at least one frame at that frame rate.
  */
 export async function render3dMedia(modelUrl, fields = {}, { fetch: fetchFn, signal, onProgress } = {}) {
   if (!modelUrl) throw new NanoodleError("render3d: no model input");
@@ -318,11 +319,17 @@ export async function render3dMedia(modelUrl, fields = {}, { fetch: fetchFn, sig
   const mode = fields.mode === "video" ? "video" : "image";
   const fps = Math.round(Number(fields.fps ?? 24));
   const duration = Number(fields.duration ?? 2);
-  const frames = Math.max(2, Math.round(fps * duration));
-  if (mode === "video" && (!Number.isFinite(fps) || fps < 1 || fps > 60 ||
-      !Number.isFinite(duration) || duration < 0.1 || duration > 10 || frames > 240 ||
-      base.width * base.height * frames > 200_000_000 || base.width % 2 || base.height % 2)) {
-    throw new NanoodleError("render3d video needs even dimensions, 1–60 fps, 0.1–10 seconds, at most 240 frames and 200 million pixels");
+  const requestedFrames = fps * duration;
+  const frames = Math.round(requestedFrames);
+  if (mode === "video") {
+    if (!Number.isFinite(fps) || fps < 1 || fps > 60 ||
+        !Number.isFinite(duration) || duration < 0.1 || duration > 10 || frames > 240 ||
+        base.width * base.height * frames > 200_000_000 || base.width % 2 || base.height % 2) {
+      throw new NanoodleError("render3d video needs even dimensions, 1–60 fps, 0.1–10 seconds, at most 240 frames and 200 million pixels");
+    }
+    if (requestedFrames < 1) {
+      throw new NanoodleError("render3d video duration must be at least one frame at the selected fps");
+    }
   }
   const deadline = AbortSignal.timeout(RENDER_TIMEOUT_MS);
   const renderSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
@@ -343,7 +350,7 @@ export async function render3dMedia(modelUrl, fields = {}, { fetch: fetchFn, sig
     try {
       for (let i = 0; i < frames; i++) {
         throwIfAborted(renderSignal);
-        const t = i / (frames - 1);
+        const t = frames === 1 ? 0 : i / (frames - 1);
         const f = { ...base };
         if (turntable) f.azimuth = base.azimuth + turntable * t;
         if (base.animClip !== undefined) f.animTime = duration * t;

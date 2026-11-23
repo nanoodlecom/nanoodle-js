@@ -1,9 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { Workflow } from "../src/index.mjs";
 import { unpackGlb } from "../src/gltf-scene.mjs";
 import { render3dSceneFields, render3dMedia, findChromium } from "../src/render3d.mjs";
 import { decodePng } from "../src/local-media.mjs";
+import { MP4CAT } from "../src/mp4cat.mjs";
 
 // render3d (Edge Styles S2): a local node that renders a GLB — camera,
 // clip plane (slice-3D), explode over scene-graph parts. The render tests
@@ -115,6 +118,9 @@ test("render budgets are checked before obtaining the model", async () => {
   await assert.rejects(render3dMedia(model, { width: 2049 }, opts), /dimensions/);
   await assert.rejects(render3dMedia(model, { mode: "video", fps: 60, duration: 10 }, opts), /240 frames/);
   await assert.rejects(render3dMedia(model, { mode: "video", width: 319 }, opts), /even dimensions/);
+  for (const duration of [0.1, 0.9]) {
+    await assert.rejects(render3dMedia(model, { mode: "video", fps: 1, duration }, opts), /at least one frame/);
+  }
 });
 
 test("render3d selects the primary workflow output for the render mode", () => {
@@ -179,4 +185,32 @@ test("render3d node: renders both parts; explode separates; clip cuts", async (t
   const iso = await pixels((await run({ azimuth: "0", elevation: "0", isolate: "0" }, gltfUrl(json))).image);
   assert.ok(countColor(iso, isRed) > 500);
   assert.equal(countColor(iso, isBlue), 0);
+});
+
+test("render3d video rounds to one frame and renders the start of each sweep", async (t) => {
+  if (!(await findChromium())) return t.skip("no chromium discoverable");
+  if (spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status !== 0) return t.skip("no ffmpeg on PATH");
+
+  const poses = [];
+  const send = WebSocket.prototype.send;
+  const apply = "window.__render3d.apply(";
+  t.mock.method(WebSocket.prototype, "send", function (data) {
+    const { method, params } = JSON.parse(data);
+    if (method === "Runtime.evaluate" && params.expression.startsWith(apply)) {
+      poses.push(JSON.parse(params.expression.slice(apply.length, -1)));
+    }
+    return send.call(this, data);
+  });
+
+  const fox = await readFile(new URL("./fixtures/fox/Fox.glb", import.meta.url));
+  const model = "data:model/gltf-binary;base64," + fox.toString("base64");
+  const { video } = await render3dMedia(model, {
+    mode: "video", width: 64, height: 64, fps: 4, duration: 0.3,
+    azimuth: 17, turntable: 80, animClip: 0, animTime: 2, clipAxis: "x", clipSweep: true,
+  }, { signal: AbortSignal.timeout(30_000) });
+  assert.match(video, /^data:video\/mp4;base64,/);
+  const [track] = MP4CAT.parseMp4(Buffer.from(video.split(",")[1], "base64")).tracks;
+  assert.equal(track.samples.length, 1);
+  assert.equal(track.samples[0].dur / track.timescale, 0.25);
+  assert.deepEqual(poses.map(({ azimuth, animTime, clipPos }) => [azimuth, animTime, clipPos]), [[17, 0, 1.05]]);
 });
