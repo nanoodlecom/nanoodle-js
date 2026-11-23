@@ -23,6 +23,7 @@ Verified against /home/ntc/dev/nanoodlecom/nanoodle/index.html (editor). The �
 - Type alias: `audio` → `tts` (legacy).
 - The library keeps unknown nodes and wires with missing endpoint nodes or undeclared ports. Inspection reports a warning, and execution rejects the graph before sending any provider requests.
 - An LLM video input is recognized on load. Use the nanoodle editor or player to run a workflow wired to this input.
+- A single input can receive a value from one active source at a time. Inspection reports competing unconditional sources, and execution rejects them before sending any requests. Mutually exclusive branches may use the same input when only the selected branch supplies it.
 - Migration: links into a `music`/`tts` node with `to.port === "text"` are rewritten to `"prompt"`.
 - Media fields are `data:` URLs inline in `fields` (image/audio/video/mask). Share links may have them blanked to "".
 - Library extension: a media field value that is NOT a `data:`/`http(s)` URL (a prose placeholder, a bare file path, an object) is blanked at load with a warning — the input then surfaces as genuinely required instead of posting garbage to the API. Authors/agents: leave media fields `""` and supply the file at run time.

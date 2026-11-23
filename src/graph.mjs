@@ -1,5 +1,7 @@
 import { NanoodleError } from "./errors.mjs";
 import { INPUT_SPECS, SETTING_SPECS } from "./io-specs.mjs";
+import { planBranches } from "./branches.mjs";
+import { competingInputIssues, staticCompetingInputIssues } from "./input-wires.mjs";
 
 /* Dynamic input-port families also used by the runners to collect their values. */
 export const IMG_PORT_RE = /^img\d*$/;      // llm vision references, decide candidates
@@ -243,6 +245,7 @@ export function materialize(data) {
   }
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const links = [];
+  const validLinks = [];
   for (const l of data.links || []) {
     const from = normalizeEndpoint(l?.from);
     const to = normalizeEndpoint(l?.to);
@@ -251,7 +254,19 @@ export function materialize(data) {
     const link = { id: l?.id, from, to };
     const issue = wireIssue(link, byId);
     if (issue) warnings.push(issue.message);
+    else validLinks.push(link);
     links.push(link);
+  }
+  if (competingInputIssues(validLinks).length) {
+    const validGraph = { nodes, links: validLinks };
+    try {
+      const order = topoSort(validGraph);
+      const branches = planBranches(validGraph, order.map(node => node.id));
+      warnings.push(...staticCompetingInputIssues(validGraph, order, branches));
+    } catch (error) {
+      if (!(error instanceof NanoodleError)) throw error;
+      // Invalid routing or cycles will be reported by run's graph preflight.
+    }
   }
   return { nodes, links, warnings };
 }
