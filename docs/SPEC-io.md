@@ -18,10 +18,12 @@ Required unless marked optional. `def` = prefilled default.
 - The app labels an input with its generic spec label ("Image prompt", "Text", ...), EXCEPT:
   when a node contributes exactly ONE required input AND has a custom name, that custom name is the label (PR #138).
 - upload nodes feeding role ports get role labels ("End frame", "Reference N", "Image N") — UI nicety; library can skip.
-- Unique key = (nodeId, field). LIBRARY RESOLUTION ORDER for a user-supplied key (case-insensitive, trimmed):
-  1. exact node custom name (if that node has exactly one derived input → that input; ambiguous → error listing candidates)
-  2. "nodeId.field" (e.g. "n2.prompt") and bare nodeId (if single input on the node)
-  3. the input's label / field name if unique across inputs
+- Friendly keys are unique and are suffixed when they collide with another input name or address.
+  LIBRARY RESOLUTION ORDER for a user-supplied key (case-insensitive, trimmed):
+  1. the derived input key
+  2. "nodeId.field" (e.g. "n2.prompt") and bare nodeId (if single input on the node). Exact node ID spelling distinguishes case variants. A wire reserves its qualified address.
+  3. node custom name if it resolves to a single input
+  4. the input's label / field name if unique across inputs
   Unknown key → error listing available input names.
 - If the workflow has exactly one required input, allow a bare scalar: run("hello").
 

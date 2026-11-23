@@ -8,9 +8,9 @@ export { INPUT_SPECS, SETTING_SPECS };
 
 // Allocate the final key, not just a count of the unsuffixed name: an authored
 // "Out 2" can otherwise collide with the suffix generated for a second "Out".
-function uniqueKey(base, used, reserved = new Set()) {
+function uniqueKey(base, used, isReserved) {
   let key = base;
-  for (let suffix = 2; used.has(key.toLowerCase()) || reserved.has(key.toLowerCase()); suffix++) key = base + " " + suffix;
+  for (let suffix = 2; used.has(key.toLowerCase()) || isReserved(key.toLowerCase()); suffix++) key = base + " " + suffix;
   used.add(key.toLowerCase());
   return key;
 }
@@ -71,15 +71,32 @@ export function deriveInputs(graph) {
   // Friendly keys: a node's custom name labels its input when it contributes exactly one
   // REQUIRED input (app PR #138) — or exactly one input at all, so an author-optional
   // renamed node (e.g. an optional "Style reference" upload) keeps its name as the key.
-  // Otherwise the generic spec label. Dedupe with " 2", " 3".
+  // Otherwise the generic spec label. Suffix collisions with other names or addresses.
+  const byNode = new Map();
+  for (const e of entries) {
+    if (!byNode.has(e.nodeId)) byNode.set(e.nodeId, []);
+    byNode.get(e.nodeId).push(e);
+  }
+  const reserved = new Map();
+  const reserve = (address, owner) => {
+    const key = address.trim().toLowerCase();
+    reserved.set(key, reserved.has(key) && reserved.get(key) !== owner ? null : owner);
+  };
+  for (const e of entries) {
+    reserve(`${e.nodeId}.${e.field}`, e);
+    if (byNode.get(e.nodeId).length === 1) reserve(e.nodeId, e);
+  }
+  for (const { to } of graph.links) {
+    if (to.node != null) reserve(`${to.node}.${to.port}`, null);
+  }
   const used = new Set();
   for (const e of entries) {
-    const nodeEntries = entries.filter((x) => x.nodeId === e.nodeId);
+    const nodeEntries = byNode.get(e.nodeId);
     const required = nodeEntries.filter((x) => !x.optional);
     const custom = (e._node.name || "").trim();
     const names = (required.length === 1 && required[0] === e) ||
                   (required.length === 0 && nodeEntries.length === 1);
-    e.key = uniqueKey(custom && names ? custom : e.label, used);
+    e.key = uniqueKey(custom && names ? custom : e.label, used, key => reserved.has(key) && reserved.get(key) !== e);
   }
   for (const e of entries) delete e._node;
   return entries;
@@ -93,12 +110,44 @@ function ambiguous(userKey, candidates) {
 
 /**
  * Resolve a user-supplied input name to a derived input entry (case-insensitive, trimmed).
- * Order: derived key → exact node custom name → nodeId.field / bare nodeId → label/field if unique.
+ * Order: derived key → nodeId.field / bare nodeId → node custom name → label/field if unique.
  */
 export function resolveInputKey(graph, inputs, userKey) {
-  const norm = String(userKey).trim().toLowerCase();
+  const spelling = String(userKey).trim();
+  const norm = spelling.toLowerCase();
   const byKey = inputs.filter((i) => i.key.toLowerCase() === norm);
   if (byKey.length === 1) return byKey[0];
+
+  const dot = spelling.lastIndexOf(".");
+  if (dot > 0) {
+    const head = spelling.slice(0, dot);
+    const field = spelling.slice(dot + 1).toLowerCase();
+    const canonical = new Map(inputs.filter(i => `${i.nodeId}.${i.field}`.trim().toLowerCase() === norm)
+      .map(i => [i.nodeId, i]));
+    for (const { to } of graph.links) {
+      if (to.node != null && `${to.node}.${to.port}`.trim().toLowerCase() === norm) {
+        canonical.set(to.node, null);
+      }
+    }
+    const addressed = canonical.has(head) ? [head] : [...canonical.keys()];
+    if (addressed.length === 1) {
+      const input = canonical.get(addressed[0]);
+      if (input) return input;
+      throw new NanoodleError(`"${userKey}" is wired from another node in this workflow and can't be supplied as an input`);
+    }
+    if (addressed.length > 1) {
+      const keys = addressed.map(id => {
+        const input = canonical.get(id);
+        return input ? `${id}.${input.field}` : `${id}.${field} (wired)`;
+      });
+      throw new NanoodleError(`input "${userKey}" is ambiguous — matches ${keys.join(", ")}`);
+    }
+  }
+  const byNode = inputs.filter(i => i.nodeId.trim().toLowerCase() === norm);
+  const exact = byNode.filter(i => i.nodeId === spelling);
+  const addressed = exact.length ? exact : byNode;
+  if (addressed.length === 1) return addressed[0];
+  if (addressed.length > 1) throw ambiguous(userKey, addressed);
 
   const named = graph.nodes.filter((n) => (n.name || "").trim().toLowerCase() === norm);
   if (named.length) {
@@ -106,20 +155,6 @@ export function resolveInputKey(graph, inputs, userKey) {
     if (cand.length === 1) return cand[0];
     if (cand.length > 1) throw ambiguous(userKey, cand);
   }
-
-  const dot = norm.lastIndexOf(".");
-  if (dot > 0) {
-    const nid = norm.slice(0, dot), field = norm.slice(dot + 1);
-    const hit = inputs.find((i) => i.nodeId.toLowerCase() === nid && i.field.toLowerCase() === field);
-    if (hit) return hit;
-    const node = graph.nodes.find((n) => n.id.toLowerCase() === nid);
-    if (node && graph.links.some((l) => l.to.node === node.id && l.to.port.toLowerCase() === field)) {
-      throw new NanoodleError(`"${userKey}" is wired from another node in this workflow and can't be supplied as an input`);
-    }
-  }
-  const byNode = inputs.filter((i) => i.nodeId.toLowerCase() === norm);
-  if (byNode.length === 1) return byNode[0];
-  if (byNode.length > 1) throw ambiguous(userKey, byNode);
 
   const byLabel = inputs.filter((i) => i.label.toLowerCase() === norm || i.field.toLowerCase() === norm);
   if (byLabel.length === 1) return byLabel[0];
@@ -149,7 +184,7 @@ export function deriveOutputs(graph) {
   const used = new Set();
   return sinks.map((n) => {
     const aliases = new Set(sinks.filter(other => other.id !== n.id).map(other => other.id.toLowerCase()));
-    const key = uniqueKey(displayName(n), used, aliases);
+    const key = uniqueKey(displayName(n), used, key => aliases.has(key));
     const t = NODE_TYPES[n.type];
     let ports = t.outputs.map((p) => ({ ...p }));
     // vframes grows frame1..frameN from max(fields.frames, wired floor) (mirrors browser)
