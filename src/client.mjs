@@ -87,6 +87,20 @@ export function costWithHeaders(j, r) {
   };
 }
 
+/** Account for a successful HTTP response even if its body cannot be decoded or used. */
+async function readBilledJson(response, onCost, useUsageCost = false) {
+  let body;
+  try {
+    body = await response.json();
+    return body;
+  } finally {
+    if (onCost) {
+      const usage = useUsageCost && typeof body?.usage?.cost === "number" ? body.usage.cost : null;
+      onCost(costWithHeaders(usage != null ? { ...body, cost: usage } : body, response));
+    }
+  }
+}
+
 function abortError(reason) {
   return reason instanceof Error ? reason : new NanoodleError(reason ? String(reason) : "run aborted", { code: "aborted" });
 }
@@ -338,8 +352,7 @@ export class NanoClient {
     if (opts.max_tokens != null) body.max_tokens = opts.max_tokens;
     const r = await this._postJson("/api/v1/chat/completions", body, io);
     if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
-    const j = await r.json();
-    if (onCost) onCost(costWithHeaders(j, r));
+    const j = await readBilledJson(r, onCost);
     const msg = (j.choices && j.choices[0] && j.choices[0].message) || {};
     const txt = msg.content;
     // empty-string content is a billed-but-empty reply, not a protocol failure — return it
@@ -360,10 +373,7 @@ export class NanoClient {
     const { onCost } = io;
     const r = await this._postJson("/api/v1/decisions", body, io);
     if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
-    const j = await r.json();
-    const c = j && j.usage && typeof j.usage.cost === "number" ? j.usage.cost : null;
-    if (onCost) onCost(costWithHeaders(c != null ? { ...j, cost: c } : j, r));
-    return j;
+    return readBilledJson(r, onCost, true);
   }
 
   /** POST /v1/images/generations (NOTE: not /api/v1). Returns data: / https URL(s).
@@ -380,7 +390,7 @@ export class NanoClient {
     Object.assign(body, imageModelOpts(extra));
     const r = await this._postJson("/v1/images/generations", body, io);
     if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
-    const j = await r.json();
+    const j = await readBilledJson(r, onCost);
     const pairs = (j.data || [])
       .map((d) => {
         const url = d.b64_json ? "data:" + b64ImageMime(d.b64_json) + ";base64," + d.b64_json : d.url;
@@ -389,7 +399,6 @@ export class NanoClient {
       .filter(Boolean);
     const urls = pairs.map((p) => p.url);
     if (!urls.length) throw new NanoodleError("no image in response");
-    if (onCost) onCost(costWithHeaders(j, r));
     if (!multi) return urls[0];
     if (items) {
       const layers = pairs.map((p) => p.layer);
@@ -436,8 +445,7 @@ export class NanoClient {
     if (!runId) {
       const r = await this._postJson("/api/generate-video", body, io);
       if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
-      const j = await r.json();
-      if (onCost) onCost(costWithHeaders(j, r));
+      const j = await readBilledJson(r, onCost);
       runId = j.runId || j.id;
       if (!runId) throw new NanoodleError("no runId returned");
       if (onRunId) onRunId(runId);
@@ -515,8 +523,7 @@ export class NanoClient {
     if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
     const ct = (r.headers && r.headers.get && r.headers.get("content-type")) || "";
     if (ct.includes("application/json")) {
-      const j = await r.json();
-      if (onCost) onCost(costWithHeaders(j, r));
+      const j = await readBilledJson(r, onCost);
       let url = j.url || j.audioUrl || (j.data && j.data.url) || (j.data && j.data.audioUrl);
       if (!url && (j.runId || j.id)) {
         if (onRunId) onRunId(j);
@@ -591,8 +598,7 @@ export class NanoClient {
     // no explicit Content-Type — fetch sets the multipart boundary
     const r = await this._paidFetch(this.baseUrl + "/api/v1/audio/transcriptions", { method: "POST", headers: this._auth(), body: fd, signal }, io);
     if (!r.ok) throw httpError(r.status, await r.text(), r.headers);
-    const j = await r.json();
-    if (onCost) onCost(costWithHeaders(j, r));
+    const j = await readBilledJson(r, onCost);
     const txt = j.transcription != null ? j.transcription
       : j.text != null ? j.text
       : j.data && (j.data.transcription != null ? j.data.transcription : j.data.text);
