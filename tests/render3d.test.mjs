@@ -137,11 +137,12 @@ test("Chromium rejects a model that references an unbundled asset", async (t) =>
   const url = "data:model/gltf+json;base64," + Buffer.from(JSON.stringify(model)).toString("base64");
   await assert.rejects(render3dMedia(url, {}, { signal: AbortSignal.timeout(30_000) }), /self-contained model/);
   assert.equal(requests, 0);
-  assert.equal(commands.find(command => command.method === "Target.createTarget")?.params.url, "about:blank");
+  assert.equal(commands.some(command => command.method === "Target.createTarget"), false, "use Chromium's existing incognito page");
+  const targets = commands.findIndex(command => command.method === "Target.getTargets");
   const attach = commands.findIndex(command => command.method === "Target.attachToTarget");
   const navigate = commands.findIndex(command => command.method === "Page.navigate");
   const probe = commands.findIndex(command => command.method === "Runtime.evaluate");
-  assert.ok(attach >= 0 && attach < navigate && navigate < probe);
+  assert.ok(targets >= 0 && targets < attach && attach < navigate && navigate < probe);
   assert.notEqual(commands[probe].params.awaitPromise, true, "a discarded document must not own the readiness wait");
 });
 

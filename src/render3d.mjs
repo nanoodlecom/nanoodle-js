@@ -213,8 +213,17 @@ async function launchScene(glbBytes, signal) {
     });
     throwIfAborted(signal);
     const cdp = new Cdp(ws);
-    const { targetId } = await cdp.send("Target.createTarget", { url: "about:blank" });
-    const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
+    // The process's initial tab belongs to the incognito context. Creating a
+    // CDP target without a context instead uses the default profile, where
+    // full Chrome can stall on the first navigation.
+    let target;
+    while (!target) {
+      throwIfAborted(signal);
+      const { targetInfos } = await cdp.send("Target.getTargets");
+      target = targetInfos.find(info => info.type === "page" && info.url === "about:blank");
+      if (!target) await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    const { sessionId } = await cdp.send("Target.attachToTarget", { targetId: target.targetId, flatten: true });
     const navigation = await cdp.send("Page.navigate", { url }, sessionId);
     if (navigation.errorText || navigation.isDownload) {
       throw new NanoodleError("render3d: scene navigation failed: " + (navigation.errorText || "unexpected download"));
