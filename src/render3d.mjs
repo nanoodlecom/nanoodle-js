@@ -14,7 +14,8 @@
  */
 import { NanoodleError } from "./errors.mjs";
 import { abortReason, throwIfAborted } from "./deadline.mjs";
-import { dataUrlBytes } from "./media.mjs";
+import { unpackGlb } from "./gltf-scene.mjs";
+import { dataUrlBytes, sniffMime } from "./media.mjs";
 
 let cp, fsp, os, path, http, loading;
 function builtins() {
@@ -118,6 +119,23 @@ async function urlBytes(url, fetchFn, signal) {
     parts.push(part);
   }
   return Buffer.concat(parts, total);
+}
+
+function checkModelAssets(bytes) {
+  let model;
+  try {
+    model = sniffMime(bytes) === "model/gltf-binary"
+      ? unpackGlb(bytes).json
+      : JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    // Let the scene loader report invalid models.
+    return;
+  }
+  for (const assets of [model?.buffers, model?.images]) {
+    if (Array.isArray(assets) && assets.some(asset => typeof asset?.uri === "string" && !/^data:/i.test(asset.uri))) {
+      throw new NanoodleError("render3d needs a self-contained model without external assets");
+    }
+  }
 }
 
 function serveScene(glbBytes) {
@@ -294,7 +312,6 @@ function runProc(bin, args, signal) {
  * at fields.fps over fields.duration seconds.
  */
 export async function render3dMedia(modelUrl, fields = {}, { fetch: fetchFn, signal, onProgress } = {}) {
-  await builtins();
   if (!modelUrl) throw new NanoodleError("render3d: no model input");
   const base = render3dSceneFields(fields);
   if (base.width > 2048 || base.height > 2048) throw new NanoodleError("render3d dimensions must be 16–2048 pixels");
@@ -312,8 +329,10 @@ export async function render3dMedia(modelUrl, fields = {}, { fetch: fetchFn, sig
   let close;
   try {
     throwIfAborted(renderSignal);
-    const glb = await urlBytes(typeof modelUrl === "object" ? modelUrl?.url : modelUrl, fetchFn, renderSignal);
-    const { evaluate, cleanup } = await launchScene(glb, renderSignal);
+    const bytes = await urlBytes(typeof modelUrl === "object" ? modelUrl?.url : modelUrl, fetchFn, renderSignal);
+    throwIfAborted(renderSignal);
+    checkModelAssets(bytes);
+    const { evaluate, cleanup } = await launchScene(bytes, renderSignal);
     close = cleanup;
     if (mode === "image") {
       const png = await renderFrame(evaluate, base);
