@@ -65,7 +65,8 @@ export function deriveInputs(graph) {
     if (!specs) continue;
     for (const s of specs) {
       if (fed(n.id, s.f)) continue;
-      entries.push(mk(n, s.f, s.label, s.kind, s.optional, s.def));
+      const optional = s.optional || (n.type === "endpoint" && s.f === "prompt" && fed(n.id, "text"));
+      entries.push(mk(n, s.f, s.label, s.kind, optional, s.def));
     }
   }
   // Friendly keys: a node's custom name labels its input when it contributes exactly one
