@@ -148,3 +148,30 @@ test("MiniMax H3 Hyper uses the catalog mode and duration instead of its cheapes
     assert.equal(estimate.unpriced, 1);
   }
 });
+
+test("MiniMax H3 Hyper leaves authored references on the legacy quote path", () => {
+  const reference = "https://fixture.invalid/image.png";
+  for (const reference_images of [[reference], JSON.stringify([reference]), reference]) {
+    const estimate = estimateGraphCost(h3Video("tvideo", { modelOpts: { reference_images } }), h3Catalog);
+    const legacy = estimateGraphCost(h3Video("tvideo", {
+      modelOpts: { mode: "reference-to-video", reference_images },
+    }), h3Catalog);
+    assert.deepEqual(estimate, legacy);
+  }
+  for (const reference_images of [[], "[]", ""]) {
+    assert.equal(estimateGraphCost(h3Video("tvideo", { modelOpts: { reference_images } }), h3Catalog).usd, 0.16);
+  }
+});
+
+test("MiniMax H3 Hyper leaves a wired duration unpriced instead of quoting the stored fallback", async t => {
+  const server = await startMockServer();
+  t.after(() => server.close());
+  server.script("POST /api/generate-video", { json: { runId: "h3-wired-offline-fixture" } });
+  server.script("GET /api/video/status", { json: { status: "COMPLETED", output: { url: "https://cdn.example/fixture.mp4" } } });
+  const graph = h3Video("tvideo", { duration: "4" });
+  graph.nodes.push({ id: "seconds", type: "choice", fields: { options: "4\n15", selected: "15" } });
+  graph.links.push({ from: { node: "seconds", port: "text" }, to: { node: "h3", port: "duration" } });
+  await Workflow.fromJSON(graph, mockOpts(server, { catalog: h3Catalog })).run({});
+  assert.equal(server.of("POST /api/generate-video")[0].json.duration, "15");
+  assert.equal(estimateGraphCost(graph, h3Catalog).unpriced, 1);
+});

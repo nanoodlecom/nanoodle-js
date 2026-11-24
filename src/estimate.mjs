@@ -413,6 +413,17 @@ function lipsyncAudioSeconds(node, graph) {
   return avatarAudioEstSeconds(src, txt, null);
 }
 
+const VIDEO_REFERENCE_KEYS = ["reference_images", "reference_image_urls", "referenceImages"];
+
+function hasAuthoredVideoRefs(options) {
+  return VIDEO_REFERENCE_KEYS.some(key => {
+    const value = options?.[key];
+    if (Array.isArray(value)) return value.length > 0;
+    // Catalog fields can carry a list as text, including an empty JSON array.
+    return typeof value === "string" && !/^\s*(?:\[\s*\])?\s*$/.test(value);
+  });
+}
+
 // One node's USD/run from its chosen model + settings. `catItem` is the raw
 // catalog entry for node.fields.model (null → unpriceable). `graph` is needed
 // only to detect wired reference-image ports (video ref tier).
@@ -428,7 +439,7 @@ function nodeUnitUsd(node, catItem, graph) {
   }
   if (kind === "video") {
     const sp = m.supported_parameters || {}, pp = sp.parameters || sp;
-    const modelHasRefs = ["reference_images", "reference_image_urls", "referenceImages"].some((k) => k in pp) ||
+    const modelHasRefs = VIDEO_REFERENCE_KEYS.some((k) => k in pp) ||
       pricingAdvertisesRefs(pricing); // twin of modelRefSpec: refs the run WILL send must forecast at the ref tier
     // Count, not a boolean: H3 LoRA adds reference_image_or_audio once per wired refN port.
     const refCount = (modelHasRefs && graph && Array.isArray(graph.links))
@@ -437,7 +448,10 @@ function nodeUnitUsd(node, catItem, graph) {
     const mode = f.modelOpts?.mode ?? sp.defaults?.mode ?? pp.mode?.default ?? "auto";
     if (pricing?.duration_meter === "requested_whole_seconds" &&
         (pricing.text_to_video_per_duration || pricing.image_to_video_per_duration) &&
-        !refCount && mode !== "reference-to-video" && (node.type === "tvideo" || node.type === "ivideo")) {
+        !refCount && mode !== "reference-to-video" && (node.type === "tvideo" || node.type === "ivideo") &&
+        !hasAuthoredVideoRefs(f.modelOpts)) {
+      // A runtime wire can replace the stored duration after a forecast is made.
+      if ((graph?.links || []).some(l => l.to?.node === node.id && l.to.port === "duration")) return null;
       const image = node.type === "ivideo";
       if (mode !== "auto" && mode !== (image ? "image-to-video" : "text-to-video")) return null;
       const hasEndFrame = image && (graph?.links || []).some(l => l.to?.node === node.id && l.to.port === "endframe");
