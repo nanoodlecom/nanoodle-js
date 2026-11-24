@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { estimateGraphCost } from "../src/index.mjs";
+import { estimateGraphCost, Workflow } from "../src/index.mjs";
 
+import { mockOpts, PNG_DATA_URL, startMockServer } from "./harness/mock-server.mjs";
 // Public provider catalog snapshot, not a payment receipt. No network/paid calls.
 const catalog = JSON.parse(readFileSync(new URL("./fixtures/media-billing-catalog-2026-10-31.json", import.meta.url)));
 const quote = (kind, model, duration, modelOpts = {}, resolution = "1080p") => estimateGraphCost({
@@ -95,4 +96,82 @@ test("VEED Clean Audio retains its documented started-minute billing intervals",
     near(result.usd, Math.max(pricing.minimum || 0,
       Math.ceil(seconds / pricing.billing_interval_seconds) * pricing.per_billing_interval));
   }
+});
+
+const h3Hyper = JSON.parse(readFileSync(new URL("./fixtures/h3-hyper-video-catalog-2026-11-23.json", import.meta.url)));
+const h3Catalog = { video: [h3Hyper] };
+
+function h3Video(type, fields, image = PNG_DATA_URL, endframe = false) {
+  const nodes = [{ id: "h3", type, fields: { model: h3Hyper.id, prompt: "A drawn paper boat rocks gently on rainwater.", ...fields } }];
+  const links = [];
+  if (type === "ivideo") {
+    nodes.unshift({ id: "still", type: "upload", fields: { image } });
+    links.push({ from: { node: "still", port: "image" }, to: { node: "h3", port: "image" } });
+    if (endframe) links.push({ from: { node: "still", port: "image" }, to: { node: "h3", port: "endframe" } });
+  }
+  return { nodes, links };
+}
+
+test("MiniMax H3 Hyper bills the requested 15-second image-to-video lane", async (t) => {
+  const server = await startMockServer();
+  t.after(() => server.close());
+  server.script("POST /api/generate-video", { json: { runId: "h3-offline-fixture", cost: 0.62 } });
+  server.script("GET /api/video/status", { json: { status: "COMPLETED", output: { url: "https://cdn.example/fixture.mp4" } } });
+
+  const graph = h3Video("ivideo", { duration: "15", resolution: "768p", modelOpts: { mode: "image-to-video", duration: "4" } });
+  const result = await Workflow.fromJSON(graph, mockOpts(server, { catalog: h3Catalog })).run({});
+  assert.deepEqual(server.of("POST /api/generate-video").map(request => request.json), [{
+    model: h3Hyper.id, prompt: "A drawn paper boat rocks gently on rainwater.",
+    duration: "15", aspect_ratio: "16:9", resolution: "768p",
+    imageDataUrl: PNG_DATA_URL, mode: "image-to-video",
+  }]);
+  assert.equal(result.costUsd, 0.62);
+  const estimate = estimateGraphCost(graph, h3Catalog);
+  assert.equal(estimate.usd, 0.62);
+  assert.equal(estimate.exact, false);
+});
+
+test("MiniMax H3 Hyper uses the catalog mode and duration instead of its cheapest clip", () => {
+  for (const [type, duration, expected] of [
+    ["ivideo", "4", 0.11], ["ivideo", undefined, 0.18],
+    ["tvideo", "4", 0.10], ["tvideo", "15", 0.55],
+  ]) {
+    assert.equal(estimateGraphCost(h3Video(type, { duration }), h3Catalog).usd, expected);
+  }
+  const firstLastModel = structuredClone(h3Hyper);
+  firstLastModel.pricing.first_last_frame_per_duration["15"] = 0.61;
+  const firstLast = h3Video("ivideo", { duration: "15" }, PNG_DATA_URL, true);
+  assert.equal(estimateGraphCost(firstLast, { video: [firstLastModel] }).usd, 0.61);
+
+  for (const duration of ["15.5", "16", "3"]) {
+    const estimate = estimateGraphCost(h3Video("ivideo", { duration }), h3Catalog);
+    assert.equal(estimate.unpriced, 1);
+  }
+});
+
+test("MiniMax H3 Hyper leaves authored references on the legacy quote path", () => {
+  const reference = "https://fixture.invalid/image.png";
+  for (const reference_images of [[reference], JSON.stringify([reference]), reference]) {
+    const estimate = estimateGraphCost(h3Video("tvideo", { modelOpts: { reference_images } }), h3Catalog);
+    const legacy = estimateGraphCost(h3Video("tvideo", {
+      modelOpts: { mode: "reference-to-video", reference_images },
+    }), h3Catalog);
+    assert.deepEqual(estimate, legacy);
+  }
+  for (const reference_images of [[], "[]", ""]) {
+    assert.equal(estimateGraphCost(h3Video("tvideo", { modelOpts: { reference_images } }), h3Catalog).usd, 0.16);
+  }
+});
+
+test("MiniMax H3 Hyper leaves a wired duration unpriced instead of quoting the stored fallback", async t => {
+  const server = await startMockServer();
+  t.after(() => server.close());
+  server.script("POST /api/generate-video", { json: { runId: "h3-wired-offline-fixture" } });
+  server.script("GET /api/video/status", { json: { status: "COMPLETED", output: { url: "https://cdn.example/fixture.mp4" } } });
+  const graph = h3Video("tvideo", { duration: "4" });
+  graph.nodes.push({ id: "seconds", type: "choice", fields: { options: "4\n15", selected: "15" } });
+  graph.links.push({ from: { node: "seconds", port: "text" }, to: { node: "h3", port: "duration" } });
+  await Workflow.fromJSON(graph, mockOpts(server, { catalog: h3Catalog })).run({});
+  assert.equal(server.of("POST /api/generate-video")[0].json.duration, "15");
+  assert.equal(estimateGraphCost(graph, h3Catalog).unpriced, 1);
 });
