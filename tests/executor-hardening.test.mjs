@@ -14,7 +14,7 @@ import {
   Workflow, mediaFromFile, MEDIA_INLINE_MAX, coerceMediaInput,
   wiredFramesFloor, deriveSettings,
 } from "../src/index.mjs";
-import { trimAudioToWav } from "../src/local-media.mjs";
+import { encodeWavMono, trimAudioToWav } from "../src/local-media.mjs";
 import { bytesToDataUrl } from "../src/media.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -213,9 +213,7 @@ test("local-only graph accepts oversized data: media input", async () => {
 });
 
 test("network graph still refuses oversized audio inputs before any spend", async () => {
-  // Image inputs are deferred to the consuming node (fitImage downscales them —
-  // see inline-image-fit.test.mjs); audio/video can't be shrunk that way, so the
-  // early load-time guard stays for them.
+  // Keep the preflight guard on a raw audio input that goes directly to a provider.
   const bigUrl = "data:audio/wav;base64," + "A".repeat(Math.floor(MEDIA_INLINE_MAX));
   assert.ok(bigUrl.length > MEDIA_INLINE_MAX);
   const wf = Workflow.fromJSON({
@@ -226,8 +224,42 @@ test("network graph still refuses oversized audio inputs before any spend", asyn
     links: [
       { from: { node: "u", port: "audio" }, to: { node: "s", port: "audio" } },
     ],
-  }, { apiKey: "k" });
+  }, { apiKey: "k", baseUrl: "http://127.0.0.1:1", fetch: () => assert.fail("unexpected provider request") });
   await assert.rejects(() => wf.run({ Audio: bigUrl }), /too large to send inline/);
+});
+
+test("oversized audio is accepted when all uses go through local Trim first", async () => {
+  const sampleRate = 48000;
+  const wav = encodeWavMono(new Float32Array(40 * sampleRate), sampleRate);
+  const audio = bytesToDataUrl(wav, "audio/wav");
+  assert.ok(audio.length > MEDIA_INLINE_MAX);
+  const wire = (from, to) => ({ from: { node: from, port: "audio" }, to: { node: to, port: "audio" } });
+  const graph = {
+    nodes: [
+      { id: "source", type: "aupload" },
+      { id: "clip", type: "trim", fields: { start: "0", length: "1" } },
+      { id: "asr", type: "transcribe", fields: { model: "fixture-asr" } },
+    ],
+    links: [wire("source", "clip"), wire("clip", "asr")],
+  };
+  const uploads = [];
+  const options = {
+    apiKey: "offline",
+    baseUrl: "http://127.0.0.1:1",
+    async fetch(url, { body }) {
+      assert.equal(url, "http://127.0.0.1:1/api/v1/audio/transcriptions");
+      uploads.push(body.get("file").size);
+      return Response.json({ text: "short audio", cost: 0 });
+    },
+  };
+  const result = await Workflow.fromJSON(graph, options).run({ Audio: audio });
+  assert.equal(result.get("asr"), "short audio");
+  assert.deepEqual(uploads, [32044]);
+
+  graph.nodes.push({ id: "direct", type: "transcribe", fields: { model: "fixture-asr" } });
+  graph.links.push(wire("source", "direct"));
+  await assert.rejects(Workflow.fromJSON(graph, options).run({ Audio: audio }), /too large to send inline/);
+  assert.deepEqual(uploads, [32044]);
 });
 
 /* ---------- pure WAV truncated header clamp ---------- */

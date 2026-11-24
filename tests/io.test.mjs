@@ -184,6 +184,47 @@ test("duplicate input keys get ' 2' suffixes and stay addressable", async () => 
   assert.equal(result.get("n3"), "c");
 });
 
+test("friendly input names cannot redirect canonical node addresses", async () => {
+  const wf = Workflow.fromJSON({
+    nodes: [
+      { id: "alias", type: "text", name: "chapter.writer.text", fields: { text: "first default" } },
+      { id: "other", type: "text", name: "CHAPTER.WRITER", fields: { text: "second default" } },
+      { id: "chapter.writer", type: "text", name: "Draft", fields: { text: "draft default" } },
+    ],
+  }, noNet);
+  assert.deepEqual(wf.inputs.map((i) => i.key), ["chapter.writer.text 2", "CHAPTER.WRITER 2", "Draft"]);
+  const byField = await wf.run({ "chapter.writer.TEXT": "draft", "CHAPTER.WRITER 2": "second" });
+  assert.equal(byField.get("chapter.writer"), "draft");
+  assert.equal(byField.get("alias"), "first default");
+  assert.equal(byField.get("other"), "second");
+  const byId = await wf.run({ "CHAPTER.WRITER": "bare id", "chapter.writer.text 2": "first" });
+  assert.equal(byId.get("chapter.writer"), "bare id");
+  assert.equal(byId.get("alias"), "first");
+});
+
+test("qualified input IDs preserve exact case and reserve wired fields", async () => {
+  const wf = Workflow.fromJSON({
+    nodes: [
+      { id: "source", type: "text", fields: { text: "wired" } },
+      { id: "draft", type: "llm", fields: {} },
+      { id: "Draft", type: "text", fields: { text: "original" } },
+      { id: "DRAFT", type: "text", fields: { text: "second" } },
+      { id: "alias", type: "text", name: "draft.prompt", fields: { text: "alias" } },
+    ],
+    links: [{ from: { node: "source", port: "text" }, to: { node: "draft", port: "prompt" } }],
+  }, noNet);
+  assert.equal(wf.inputs.find((i) => i.nodeId === "alias").key, "draft.prompt 2");
+  await assert.rejects(wf.run({ "DRAFT.PROMPT": "override" }), /wired from another node/);
+  await assert.rejects(wf.run({ "dRaFt.text": "override" }), /ambiguous.*Draft\.text.*DRAFT\.text/);
+
+  const local = Workflow.fromJSON({
+    nodes: wf.graph.nodes.filter((n) => n.type === "text"),
+  }, noNet);
+  const result = await local.run({ "Draft.TEXT": "first change", "DRAFT.text": "second change" });
+  assert.equal(result.get("Draft"), "first change");
+  assert.equal(result.get("DRAFT"), "second change");
+});
+
 test("field override: wire into llm 'system' beats the typed field", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());

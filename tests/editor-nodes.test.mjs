@@ -206,6 +206,23 @@ test("endpoint: a wired Choice path joins onto the typed host", async (t) => {
   assert.equal(result.get("Custom endpoint"), "echoed");
 });
 
+test("endpoint: a text wire supplies the prompt without a second input", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /echo", { json: { text: "echoed" } });
+  const wf = Workflow.fromJSON({
+    nodes: [
+      { id: "source", type: "text", fields: { text: "from the wire" } },
+      { id: "endpoint", type: "endpoint", fields: { url: srv.url + "/echo", mode: "json" } },
+    ],
+    links: [{ from: { node: "source", port: "text" }, to: { node: "endpoint", port: "text" } }],
+  }, { quiet: true });
+  const result = await wf.run();
+  assert.equal(result.get("endpoint"), "echoed");
+  assert.equal(wf.inputs.find(input => input.nodeId === "endpoint").optional, true);
+  assert.deepEqual(srv.requests.map(req => req.json), [{ text: "from the wire" }]);
+});
+
 test("endpoint sink publishes the port chosen by a wired mode on each run", async () => {
   const fixtures = {
     chat: { port: "text", value: "", json: { choices: [{ message: { content: "" } }] } },

@@ -129,7 +129,11 @@ test('an invoice decoded after the deadline never reaches the payment callback',
 });
 
 for (const mode of ['run timeout', 'outer abort', 'node timeout during publication']) {
-  test(`${mode} settles even when injected I/O ignores cancellation`, { timeout: 1500 }, async () => {
+  test(`${mode} settles even when injected I/O ignores cancellation`, { timeout: 1500 }, async (t) => {
+    // Enter the held I/O before expiring the deadline, even on a busy runner.
+    let now = 0;
+    t.mock.method(performance, 'now', () => now);
+    t.mock.timers.enable({ apis: ['setTimeout'] });
     let release, started;
     const ready = new Promise(resolve => { started = resolve; });
     const held = new Promise(resolve => { release = resolve; });
@@ -141,21 +145,26 @@ for (const mode of ['run timeout', 'outer abort', 'node timeout during publicati
       return held;
     } });
     const run = wf.run({}, { ...(mode === 'run timeout' ? { timeoutMs: 30 } : {}), signal: controller.signal, onProgress: e => events.push(e) });
-    await ready;
-    if (mode === 'outer abort') controller.abort(new Error('stop now'));
     let result;
+    const settled = assert.rejects(run, e => {
+      assert.ok(e instanceof RunError);
+      assert.equal(e.result.nodes.n.status, 'error');
+      assert.match(e.message, /timed out|stop now/);
+      result = e.result;
+      return true;
+    });
     try {
-      await assert.rejects(run, e => {
-        assert.ok(e instanceof RunError);
-        assert.equal(e.result.nodes.n.status, 'error');
-        assert.match(e.message, /timed out|stop now/);
-        result = e.result;
-        return true;
-      });
+      await Promise.race([ready, settled.then(() => assert.fail('run ended before starting the held I/O'))]);
+      if (mode === 'outer abort') controller.abort(new Error('stop now'));
+      else {
+        now += 30;
+        t.mock.timers.tick(30);
+      }
+      await settled;
       const snapshot = JSON.stringify(result);
       const eventCount = events.length;
       release(mode.startsWith('node') ? new Response('bytes') : json({ data: [{ url: 'https://cdn.invalid/image.png' }], cost: 0.9 }));
-      await new Promise(resolve => setTimeout(resolve, 20));
+      await nextTurn();
       assert.equal(JSON.stringify(result), snapshot);
       assert.equal(events.length, eventCount);
     } finally { release(json({ data: [{ url: 'https://cdn.invalid/image.png' }] })); }

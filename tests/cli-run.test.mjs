@@ -268,6 +268,64 @@ test("CLI: hosted media outputs are named from the download's Content-Type, not 
   await stat(join(cwd, "noodle-out", "Image.png")); // throws if missing (e.g. saved as Image.bin)
 });
 
+test("CLI retains the run summary and other outputs when a hosted media download fails", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /v1/images/generations", {
+    json: { data: [{ url: srv.url + "/media/missing?sig=fixture-signature" }], cost: 0.02 },
+  });
+  srv.script("GET /media/missing", { status: 404 });
+  const cwd = await mkdtemp(join(tmpdir(), "nanoodle-cli-download-error-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  await writeFile(join(cwd, "graph.json"), JSON.stringify({
+    nodes: [
+      { id: "remote", type: "image", name: "Remote", fields: { model: "fixture", prompt: "synthetic pixels" } },
+      { id: "inline", type: "upload", name: "Inline", fields: { image: "data:image/png;base64," + PNG_B64 } },
+      { id: "note", type: "text", name: "Note", fields: { text: "keep this output" } },
+    ],
+  }));
+  const r = await runCli(["run", "graph.json", "--json"], { cwd, env: { NANOGPT_BASE_URL: srv.url } });
+  assert.equal(r.status, 1, r.stderr);
+  const summary = JSON.parse(r.stdout);
+  assert.deepEqual(summary.outputs, { Remote: null, Inline: join("noodle-out", "Inline.png"), Note: "keep this output" });
+  assert.equal(summary.costUsd, 0.02);
+  assert.equal(summary.costExact, true);
+  assert.equal(summary.nodes.remote.status, "done");
+  assert.equal(summary.errors.length, 1);
+  const [error] = summary.errors;
+  assert.equal(error.code, "output-save-failed");
+  assert.equal(error.nodeId, "remote");
+  assert.match(error.message, /could not save output "Remote".*couldn't download media \(404\)/);
+  assert.match(r.stderr, /could not save output "Remote"/);
+  assert.doesNotMatch(r.stdout + r.stderr, /fixture-signature/);
+  assert.deepEqual(await readFile(join(cwd, summary.outputs.Inline)), Buffer.from(PNG_B64, "base64"));
+  assert.deepEqual(srv.requests.map(req => req.method + " " + req.path), ["POST /v1/images/generations", "GET /media/missing"]);
+});
+
+test("CLI reports a failed output directory without losing the run summary", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "nanoodle-cli-output-error-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  await writeFile(join(cwd, "blocked"), "existing file");
+  await writeFile(join(cwd, "graph.json"), JSON.stringify({
+    nodes: [
+      { id: "inline", type: "upload", name: "Inline", fields: { image: "data:image/png;base64," + PNG_B64 } },
+      { id: "note", type: "text", name: "Note", fields: { text: "keep this output" } },
+    ],
+  }));
+  const r = await runCli(["run", "graph.json", "--out", "blocked", "--json"], {
+    cwd, env: { NANOGPT_BASE_URL: "http://127.0.0.1:1" },
+  });
+  assert.equal(r.status, 1, r.stderr);
+  const summary = JSON.parse(r.stdout);
+  assert.deepEqual(summary.outputs, { Inline: null, Note: "keep this output" });
+  assert.equal(summary.nodes.inline.status, "done");
+  assert.equal(summary.errors.length, 1);
+  assert.equal(summary.errors[0].code, "output-save-failed");
+  assert.equal(summary.errors[0].nodeId, "inline");
+  assert.match(summary.errors[0].message, /could not save output "Inline"/);
+  assert.equal(await readFile(join(cwd, "blocked"), "utf8"), "existing file");
+});
+
 test("CLI contract: a closed ⚖️ Decide gate exits 0 and reports gated, not failed", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());
