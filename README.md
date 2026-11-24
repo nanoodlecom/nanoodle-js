@@ -81,13 +81,16 @@ npx nanoodle run walk.json --input m.model=@character.glb --out ./sprites
 ```
 
 Media outputs are saved under `--out` (default `./noodle-out`, created only
-when there is media to save); a JSON run summary always goes to stdout,
-progress lines to stderr; exit code `0` on success, `1` on failure.
+when there is media to save). The JSON run summary goes to stdout, and
+progress lines go to stderr. A failed download or write reports an
+`output-save-failed` error and a null value for that output. The summary
+retains the run cost and other outputs. The CLI exits `0` on success or `1`
+on failure.
 
 - `--input k=@path` — read a file (media as media; `.txt` / `.md` / `.json` as text)
 - `--set k=v` — override a setting (`n3.model=flux-pro`)
 - `--out dir` — where media outputs land (default `./noodle-out`)
-- `--timeout ms` — overall run timeout
+- `--timeout ms` — overall run timeout in decimal milliseconds, from `0` to `2147483647`. Omit it or pass `0` to leave the run without an overall deadline.
 - `--json` — quiet mode: skip the stderr progress lines (the JSON summary is printed either way)
 - `--env-file path` — load `NANOGPT_API_KEY` from a `.env`-style file (`--key` wins if both are set)
 
@@ -170,6 +173,8 @@ const result = await wf.run(
 Failures in lanes no output depends on only appear in `result.errors`.
 Unknown node types, missing required inputs, bad keys, and a missing API key
 all fail **before** anything is spent.
+The run and per-node `timeoutMs` settings accept milliseconds from `0` to
+`2147483647`. Omit the value or use `0` to leave that deadline unset.
 
 ### Gates (Decide said no)
 

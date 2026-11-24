@@ -211,6 +211,34 @@ test("video refs: catalog resolves the model's real wire key + cap; a known no-r
   assert.deepEqual(b3.reference_images, [PNG_DATA_URL], "vedit forwards wired refs");
 });
 
+test("video edit routes the character image only to models that take one", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  const done = { json: { data: { status: "COMPLETED", output: { video: { url: "https://cdn.example/v.mp4" } } } } };
+  const model = "motion-control";
+  const clip = "data:video/mp4;base64,AAAA";
+  const nodes = [
+    { id: "portrait", type: "upload", fields: { image: PNG_DATA_URL } },
+    { id: "driver", type: "vupload", fields: { video: clip } },
+    { id: "video", type: "vedit", fields: { model, prompt: "animate" } },
+  ];
+  const links = [
+    { from: { node: "portrait", port: "image" }, to: { node: "video", port: "image" } },
+    { from: { node: "driver", port: "video" }, to: { node: "video", port: "video" } },
+  ];
+  for (const inputs of [["image", "video"], ["text", "video"]]) {
+    srv.script("POST /api/generate-video", { json: { runId: "vid_motion", cost: 0 } });
+    srv.script("GET /api/video/status", done);
+    const catalog = { video: [{ id: model, architecture: { input_modalities: inputs } }] };
+    const workflow = one(srv, nodes, links, { catalog });
+    assert.deepEqual(workflow.warnings, []);
+    await workflow.run();
+    const { json } = srv.of("POST /api/generate-video").at(-1);
+    assert.equal(json.videoDataUrl, clip);
+    assert.equal(json.imageDataUrl, inputs.includes("image") ? PNG_DATA_URL : undefined);
+  }
+});
+
 test("video refs: pricing evidence stands in for the missing param (minimax-h3), cap 9 by family", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());

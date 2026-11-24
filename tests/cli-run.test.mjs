@@ -25,7 +25,8 @@ const starterFixture = join(here, "fixtures", "starter-graph.json");
 // event loop can never answer the child CLI's request (deadlock until undici's 5-min timeout)
 function runCli(args, { env = {}, cwd } = {}) {
   return new Promise((resolve, reject) => {
-    const p = spawn(process.execPath, [bin, ...args], {
+    // End Node's own option parsing so Nanoodle sees --env-file itself.
+    const p = spawn(process.execPath, ["--", bin, ...args], {
       cwd,
       env: { ...process.env, NANOGPT_API_KEY: "test-key", ...env },
     });
@@ -140,6 +141,64 @@ test("CLI contract: a failed sink exits 1 but still emits the JSON summary with 
   assert.ok(summary.errors.length >= 1, "summary.errors must name the failure");
 });
 
+test("CLI reports preflight failures as one zero-cost run summary", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /api/v1/chat/completions", chatJson("unexpected request"));
+  const cwd = await mkdtemp(join(tmpdir(), "nanoodle-cli-preflight-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+
+  const source = { id: "source", type: "text", fields: { text: "wired value" } };
+  const writer = { id: "writer", type: "llm", fields: { model: "fixture", prompt: "stored prompt" } };
+  const wire = (from, to) => ({ from: { node: from, port: "text" }, to: { node: "writer", port: to } });
+  const files = {
+    "invalid-target.json": { nodes: [source, writer], links: [wire("source", "promtp")] },
+    "missing-source.json": { nodes: [writer], links: [wire("source", "prompt")] },
+    "missing-node-type.json": { nodes: [writer, { id: "damaged" }] },
+    "missing-node-id.json": { nodes: [{ type: "text" }, writer] },
+    "null-node.json": { nodes: [null, writer] },
+    "required.json": { nodes: [{ ...writer, fields: { ...writer.fields, prompt: "" } }] },
+    "deadline.json": { nodes: [{ ...writer, fields: { ...writer.fields, timeoutMs: 2147483648 } }] },
+    "unknown.json": { nodes: [{ id: "future", type: "future-node" }] },
+    "valid.json": { nodes: [writer] },
+  };
+  await Promise.all(Object.entries(files).map(([path, data]) => writeFile(join(cwd, path), JSON.stringify(data))));
+  await writeFile(join(cwd, "malformed.json"), "{");
+  const cases = [
+    { file: "missing.json", message: /ENOENT/, code: "ENOENT" },
+    { file: "malformed.json", message: /JSON/i },
+    { file: "invalid-target.json", message: /undeclared target port "promtp"/, code: "invalid-target-port" },
+    { file: "missing-source.json", message: /missing source node "source"/, code: "missing-wire-node" },
+    { file: "missing-node-type.json", message: /node at position 2 has a missing or invalid type/, code: "invalid-node-record" },
+    { file: "missing-node-id.json", message: /node at position 1 has a missing or invalid id/, code: "invalid-node-record" },
+    { file: "null-node.json", message: /node at position 1 must be an object/, code: "invalid-node-record" },
+    { file: "required.json", message: /missing required input.*writer\.prompt/, json: false },
+    { file: "deadline.json", message: /node writer timeoutMs expects milliseconds/, code: "invalid-timeout" },
+    { file: "unknown.json", message: /unknown node type/, nodeId: "future", nodeType: "future-node" },
+    { file: "valid.json", args: ["--set", "missing.model=foo"], message: /unknown setting/ },
+    { file: "valid.json", args: ["--input", "writer.prompt=@missing.txt"], message: /missing\.txt/, code: "ENOENT" },
+    { file: "valid.json", args: ["--env-file", "missing.env"], message: /--env-file: cannot read missing\.env/, code: "ENOENT" },
+  ];
+  for (const { file, args = [], message, code, nodeId, nodeType, json = true } of cases) {
+    const r = await runCli(["run", file, ...args, ...(json ? ["--json"] : [])], {
+      cwd, env: { NANOGPT_BASE_URL: srv.url },
+    });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, message);
+    const { errors, ...summary } = JSON.parse(r.stdout);
+    assert.deepEqual(summary, {
+      outputs: {}, costUsd: 0, costExact: true, remainingBalance: null, gated: [], nodes: {},
+    });
+    assert.equal(errors.length, 1);
+    assert.match(errors[0].message, message);
+    assert.equal(errors[0].code, code);
+    assert.equal(errors[0].nodeId, nodeId);
+    assert.equal(errors[0].nodeType, nodeType);
+    assert.equal(srv.requests.length, 0);
+  }
+  await assert.rejects(stat(join(cwd, "noodle-out")), { code: "ENOENT" });
+});
+
 test("CLI contract: --help exits 0 and reads like docs (runnable examples, default out dir, share URLs)", async () => {
   const r = await runCli(["--help"]);
   assert.equal(r.status, 0);
@@ -209,6 +268,64 @@ test("CLI: hosted media outputs are named from the download's Content-Type, not 
   await stat(join(cwd, "noodle-out", "Image.png")); // throws if missing (e.g. saved as Image.bin)
 });
 
+test("CLI retains the run summary and other outputs when a hosted media download fails", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /v1/images/generations", {
+    json: { data: [{ url: srv.url + "/media/missing?sig=fixture-signature" }], cost: 0.02 },
+  });
+  srv.script("GET /media/missing", { status: 404 });
+  const cwd = await mkdtemp(join(tmpdir(), "nanoodle-cli-download-error-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  await writeFile(join(cwd, "graph.json"), JSON.stringify({
+    nodes: [
+      { id: "remote", type: "image", name: "Remote", fields: { model: "fixture", prompt: "synthetic pixels" } },
+      { id: "inline", type: "upload", name: "Inline", fields: { image: "data:image/png;base64," + PNG_B64 } },
+      { id: "note", type: "text", name: "Note", fields: { text: "keep this output" } },
+    ],
+  }));
+  const r = await runCli(["run", "graph.json", "--json"], { cwd, env: { NANOGPT_BASE_URL: srv.url } });
+  assert.equal(r.status, 1, r.stderr);
+  const summary = JSON.parse(r.stdout);
+  assert.deepEqual(summary.outputs, { Remote: null, Inline: join("noodle-out", "Inline.png"), Note: "keep this output" });
+  assert.equal(summary.costUsd, 0.02);
+  assert.equal(summary.costExact, true);
+  assert.equal(summary.nodes.remote.status, "done");
+  assert.equal(summary.errors.length, 1);
+  const [error] = summary.errors;
+  assert.equal(error.code, "output-save-failed");
+  assert.equal(error.nodeId, "remote");
+  assert.match(error.message, /could not save output "Remote".*couldn't download media \(404\)/);
+  assert.match(r.stderr, /could not save output "Remote"/);
+  assert.doesNotMatch(r.stdout + r.stderr, /fixture-signature/);
+  assert.deepEqual(await readFile(join(cwd, summary.outputs.Inline)), Buffer.from(PNG_B64, "base64"));
+  assert.deepEqual(srv.requests.map(req => req.method + " " + req.path), ["POST /v1/images/generations", "GET /media/missing"]);
+});
+
+test("CLI reports a failed output directory without losing the run summary", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "nanoodle-cli-output-error-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  await writeFile(join(cwd, "blocked"), "existing file");
+  await writeFile(join(cwd, "graph.json"), JSON.stringify({
+    nodes: [
+      { id: "inline", type: "upload", name: "Inline", fields: { image: "data:image/png;base64," + PNG_B64 } },
+      { id: "note", type: "text", name: "Note", fields: { text: "keep this output" } },
+    ],
+  }));
+  const r = await runCli(["run", "graph.json", "--out", "blocked", "--json"], {
+    cwd, env: { NANOGPT_BASE_URL: "http://127.0.0.1:1" },
+  });
+  assert.equal(r.status, 1, r.stderr);
+  const summary = JSON.parse(r.stdout);
+  assert.deepEqual(summary.outputs, { Inline: null, Note: "keep this output" });
+  assert.equal(summary.nodes.inline.status, "done");
+  assert.equal(summary.errors.length, 1);
+  assert.equal(summary.errors[0].code, "output-save-failed");
+  assert.equal(summary.errors[0].nodeId, "inline");
+  assert.match(summary.errors[0].message, /could not save output "Inline"/);
+  assert.equal(await readFile(join(cwd, "blocked"), "utf8"), "existing file");
+});
+
 test("CLI contract: a closed ⚖️ Decide gate exits 0 and reports gated, not failed", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());
@@ -256,6 +373,53 @@ test('CLI failure summary retains accepted job ID for recovery', async (t) => {
   const summary = JSON.parse(r.stdout);
   assert.equal(summary.nodes.v.runId, 'accepted-job');
   assert.equal(summary.nodes.v.status, 'error');
+});
+
+test("CLI rejects malformed or out-of-range --timeout before running the workflow", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  scriptStarterRoutes(srv);
+  const cwd = await mkdtemp(join(tmpdir(), "nanoodle-cli-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  for (const value of ["nonsense", "", "  ", "500ms", "0x20", "Infinity", "-1", "2147483648", "1e-500"]) {
+    const r = await runCli(["run", starterFixture, "--timeout", value, "--json"], {
+      cwd, env: { NANOGPT_BASE_URL: srv.url },
+    });
+    assert.equal(r.status, 1, JSON.stringify(value));
+    assert.equal(r.stdout, "", JSON.stringify(value));
+    assert.match(r.stderr, /--timeout expects milliseconds between 0 and 2147483647/);
+    assert.equal(srv.requests.length, 0);
+  }
+});
+
+test("CLI reports a missing option value before another flag", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  scriptStarterRoutes(srv);
+  const cwd = await mkdtemp(join(tmpdir(), "nanoodle-cli-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  for (const flag of ["--timeout", "--input", "--set", "--out", "--key", "--env-file"]) {
+    const r = await runCli(["run", starterFixture, flag, "--json"], {
+      cwd, env: { NANOGPT_BASE_URL: srv.url },
+    });
+    assert.equal(r.status, 1, flag);
+    assert.equal(r.stdout, "", flag);
+    assert.match(r.stderr, new RegExp(`${flag} expects a value`));
+    assert.equal(srv.requests.length, 0);
+  }
+});
+
+test("CLI preserves valid timeouts, dash-leading input names, and quiet JSON output", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "nanoodle-cli-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const graph = join(cwd, "g.json");
+  await writeFile(graph, JSON.stringify({ nodes: [{ id: "t", type: "text", name: "--prompt", fields: { text: "saved" } }] }));
+  for (const value of ["0", "1500.5", "2e3", "2147483647"]) {
+    const r = await runCli(["run", graph, "--timeout", value, "--input", "--prompt=--hello", "--json"], { cwd });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stderr, "");
+    assert.equal(JSON.parse(r.stdout).outputs["--prompt"], "--hello");
+  }
 });
 
 test("CLI --pay JSON reports the original payment after a completion failure", async (t) => {

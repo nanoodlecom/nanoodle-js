@@ -2,12 +2,15 @@ import { NanoodleError } from "./errors.mjs";
 import { NODE_TYPES, displayName, lockedNode, optionalNode, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
 import { endpointOutPort } from "./endpoint.mjs";
 import { CHARACTER_SLICE_DEFAULTS } from "./sprite-slices.mjs";
+import { INPUT_SPECS, SETTING_SPECS } from "./io-specs.mjs";
+
+export { INPUT_SPECS, SETTING_SPECS };
 
 // Allocate the final key, not just a count of the unsuffixed name: an authored
 // "Out 2" can otherwise collide with the suffix generated for a second "Out".
-function uniqueKey(base, used, reserved = new Set()) {
+function uniqueKey(base, used, isReserved) {
   let key = base;
-  for (let suffix = 2; used.has(key.toLowerCase()) || reserved.has(key.toLowerCase()); suffix++) key = base + " " + suffix;
+  for (let suffix = 2; used.has(key.toLowerCase()) || isReserved(key.toLowerCase()); suffix++) key = base + " " + suffix;
   used.add(key.toLowerCase());
   return key;
 }
@@ -15,25 +18,6 @@ function uniqueKey(base, used, reserved = new Set()) {
 /* ============================== INPUTS ============================== */
 
 export const MEDIA_INPUT_KINDS = new Set(["image", "audio", "video", "model3d", "inpaint"]);
-
-/** Which node types contribute user inputs, and with what fields (mirrors play.html INPUT_SPECS). */
-export const INPUT_SPECS = {
-  text:    [{ f: "text",   label: "Text",  kind: "textarea" }],
-  upload:  [{ f: "image",  label: "Image", kind: "image" }],
-  aupload: [{ f: "audio",  label: "Audio", kind: "audio" }],
-  vupload: [{ f: "video",  label: "Video", kind: "video" }],
-  mupload: [{ f: "model",  label: "3D file", kind: "model3d" }],
-  llm:     [{ f: "prompt", label: "Prompt", kind: "textarea" },
-            { f: "system", label: "System prompt", kind: "textarea", optional: true, def: "You are a helpful, concise assistant." }],
-  image:   [{ f: "prompt", label: "Image prompt", kind: "textarea" }],
-  tvideo:  [{ f: "prompt", label: "Video prompt", kind: "textarea" }],
-  music:   [{ f: "prompt", label: "Style / prompt", kind: "textarea" }],
-  remix:   [{ f: "prompt", label: "Style / direction", kind: "textarea" }],
-  tts:     [{ f: "prompt", label: "Text to speak", kind: "textarea" }],
-  // Optional: image-only 3D models run with a photo and no prompt.
-  model3d: [{ f: "prompt", label: "3D prompt", kind: "textarea", optional: true }],
-  endpoint:[{ f: "prompt", label: "Prompt", kind: "textarea" }],
-};
 
 /**
  * Derive the workflow's user inputs: INPUT_SPECS fields not fed by a wire, plus the
@@ -81,21 +65,39 @@ export function deriveInputs(graph) {
     if (!specs) continue;
     for (const s of specs) {
       if (fed(n.id, s.f)) continue;
-      entries.push(mk(n, s.f, s.label, s.kind, s.optional, s.def));
+      const optional = s.optional || (n.type === "endpoint" && s.f === "prompt" && fed(n.id, "text"));
+      entries.push(mk(n, s.f, s.label, s.kind, optional, s.def));
     }
   }
   // Friendly keys: a node's custom name labels its input when it contributes exactly one
   // REQUIRED input (app PR #138) — or exactly one input at all, so an author-optional
   // renamed node (e.g. an optional "Style reference" upload) keeps its name as the key.
-  // Otherwise the generic spec label. Dedupe with " 2", " 3".
+  // Otherwise the generic spec label. Suffix collisions with other names or addresses.
+  const byNode = new Map();
+  for (const e of entries) {
+    if (!byNode.has(e.nodeId)) byNode.set(e.nodeId, []);
+    byNode.get(e.nodeId).push(e);
+  }
+  const reserved = new Map();
+  const reserve = (address, owner) => {
+    const key = address.trim().toLowerCase();
+    reserved.set(key, reserved.has(key) && reserved.get(key) !== owner ? null : owner);
+  };
+  for (const e of entries) {
+    reserve(`${e.nodeId}.${e.field}`, e);
+    if (byNode.get(e.nodeId).length === 1) reserve(e.nodeId, e);
+  }
+  for (const { to } of graph.links) {
+    if (to.node != null) reserve(`${to.node}.${to.port}`, null);
+  }
   const used = new Set();
   for (const e of entries) {
-    const nodeEntries = entries.filter((x) => x.nodeId === e.nodeId);
+    const nodeEntries = byNode.get(e.nodeId);
     const required = nodeEntries.filter((x) => !x.optional);
     const custom = (e._node.name || "").trim();
     const names = (required.length === 1 && required[0] === e) ||
                   (required.length === 0 && nodeEntries.length === 1);
-    e.key = uniqueKey(custom && names ? custom : e.label, used);
+    e.key = uniqueKey(custom && names ? custom : e.label, used, key => reserved.has(key) && reserved.get(key) !== e);
   }
   for (const e of entries) delete e._node;
   return entries;
@@ -109,12 +111,44 @@ function ambiguous(userKey, candidates) {
 
 /**
  * Resolve a user-supplied input name to a derived input entry (case-insensitive, trimmed).
- * Order: derived key → exact node custom name → nodeId.field / bare nodeId → label/field if unique.
+ * Order: derived key → nodeId.field / bare nodeId → node custom name → label/field if unique.
  */
 export function resolveInputKey(graph, inputs, userKey) {
-  const norm = String(userKey).trim().toLowerCase();
+  const spelling = String(userKey).trim();
+  const norm = spelling.toLowerCase();
   const byKey = inputs.filter((i) => i.key.toLowerCase() === norm);
   if (byKey.length === 1) return byKey[0];
+
+  const dot = spelling.lastIndexOf(".");
+  if (dot > 0) {
+    const head = spelling.slice(0, dot);
+    const field = spelling.slice(dot + 1).toLowerCase();
+    const canonical = new Map(inputs.filter(i => `${i.nodeId}.${i.field}`.trim().toLowerCase() === norm)
+      .map(i => [i.nodeId, i]));
+    for (const { to } of graph.links) {
+      if (to.node != null && `${to.node}.${to.port}`.trim().toLowerCase() === norm) {
+        canonical.set(to.node, null);
+      }
+    }
+    const addressed = canonical.has(head) ? [head] : [...canonical.keys()];
+    if (addressed.length === 1) {
+      const input = canonical.get(addressed[0]);
+      if (input) return input;
+      throw new NanoodleError(`"${userKey}" is wired from another node in this workflow and can't be supplied as an input`);
+    }
+    if (addressed.length > 1) {
+      const keys = addressed.map(id => {
+        const input = canonical.get(id);
+        return input ? `${id}.${input.field}` : `${id}.${field} (wired)`;
+      });
+      throw new NanoodleError(`input "${userKey}" is ambiguous — matches ${keys.join(", ")}`);
+    }
+  }
+  const byNode = inputs.filter(i => i.nodeId.trim().toLowerCase() === norm);
+  const exact = byNode.filter(i => i.nodeId === spelling);
+  const addressed = exact.length ? exact : byNode;
+  if (addressed.length === 1) return addressed[0];
+  if (addressed.length > 1) throw ambiguous(userKey, addressed);
 
   const named = graph.nodes.filter((n) => (n.name || "").trim().toLowerCase() === norm);
   if (named.length) {
@@ -122,20 +156,6 @@ export function resolveInputKey(graph, inputs, userKey) {
     if (cand.length === 1) return cand[0];
     if (cand.length > 1) throw ambiguous(userKey, cand);
   }
-
-  const dot = norm.lastIndexOf(".");
-  if (dot > 0) {
-    const nid = norm.slice(0, dot), field = norm.slice(dot + 1);
-    const hit = inputs.find((i) => i.nodeId.toLowerCase() === nid && i.field.toLowerCase() === field);
-    if (hit) return hit;
-    const node = graph.nodes.find((n) => n.id.toLowerCase() === nid);
-    if (node && graph.links.some((l) => l.to.node === node.id && l.to.port.toLowerCase() === field)) {
-      throw new NanoodleError(`"${userKey}" is wired from another node in this workflow and can't be supplied as an input`);
-    }
-  }
-  const byNode = inputs.filter((i) => i.nodeId.toLowerCase() === norm);
-  if (byNode.length === 1) return byNode[0];
-  if (byNode.length > 1) throw ambiguous(userKey, byNode);
 
   const byLabel = inputs.filter((i) => i.label.toLowerCase() === norm || i.field.toLowerCase() === norm);
   if (byLabel.length === 1) return byLabel[0];
@@ -165,7 +185,7 @@ export function deriveOutputs(graph) {
   const used = new Set();
   return sinks.map((n) => {
     const aliases = new Set(sinks.filter(other => other.id !== n.id).map(other => other.id.toLowerCase()));
-    const key = uniqueKey(displayName(n), used, aliases);
+    const key = uniqueKey(displayName(n), used, key => aliases.has(key));
     const t = NODE_TYPES[n.type];
     let ports = t.outputs.map((p) => ({ ...p }));
     // vframes grows frame1..frameN from max(fields.frames, wired floor) (mirrors browser)
@@ -183,179 +203,6 @@ export function deriveOutputs(graph) {
 }
 
 /* ============================== SETTINGS ============================== */
-
-// Option lists verbatim from play.html (SIZES line 897, DURATIONS line 3232).
-const SIZES = ["1024x1024", "1024x1536", "1536x1024", "auto"];
-const DURATIONS = ["5", "10"];
-
-/** Per-node knobs that are not part of the IO shape (mirrors play.html SETTING_SPECS). */
-export const SETTING_SPECS = {
-  llm: [
-    { f: "model", label: "Model", kind: "model" },
-    { f: "temperature", label: "Temperature", kind: "number", def: "0.8" },
-    { f: "maxTokens", label: "Max tokens", kind: "number" },
-    { f: "format", label: "Output format", kind: "select", options: ["Text", "JSON"], def: "Text" },
-    { f: "reasoningEffort", label: "Reasoning effort", kind: "select", options: ["default", "low", "medium", "high"], def: "default" },
-    { f: "showThinking", label: "Show thinking", kind: "boolean" },
-  ],
-  vision: [
-    { f: "model", label: "Model", kind: "model" },
-    { f: "q", label: "Question", kind: "textarea", def: "Describe this image." },
-  ],
-  decide: [
-    { f: "model", label: "Model", kind: "model" },
-    { f: "mode", label: "Decide", kind: "select", options: ["pick", "choose", "score", "yesno"], def: "pick" },
-    { f: "question", label: "Question", kind: "textarea" },
-    { f: "options", label: "Labels (one per line)", kind: "textarea" },
-    { f: "levels", label: "Scale (worst → best, one per line)", kind: "textarea", def: "poor\nokay\ngood\ngreat" },
-    { f: "gate", label: "Gate: stop downstream on no", kind: "boolean" },
-  ],
-  image: [
-    { f: "model", label: "Model", kind: "model" },
-    { f: "size", label: "Image size", kind: "select", options: SIZES, def: "1024x1024" },
-    { f: "variations", label: "Variations", kind: "number", def: "1" },
-    { f: "seed", label: "Seed", kind: "number" },
-  ],
-  edit: [
-    { f: "model", label: "Model", kind: "model" },
-    { f: "prompt", label: "Edit instruction", kind: "textarea" },
-    { f: "size", label: "Image size", kind: "select", options: SIZES, def: "1024x1024" },
-    { f: "seed", label: "Seed", kind: "number" },
-  ],
-  tvideo: [
-    { f: "model", label: "Model", kind: "model" },
-    { f: "resolution", label: "Resolution", kind: "select", def: "" },
-    { f: "aspect", label: "Aspect ratio", kind: "select", options: ["16:9", "9:16", "1:1", "4:3", "3:4"], def: "16:9" },
-    { f: "duration", label: "Duration", kind: "select", options: DURATIONS, def: "5" },
-  ],
-  ivideo: [
-    { f: "model", label: "Model", kind: "model" },
-    { f: "prompt", label: "Motion prompt", kind: "textarea" },
-    { f: "resolution", label: "Resolution", kind: "select", def: "" },
-    { f: "aspect", label: "Aspect ratio", kind: "select", options: ["16:9", "9:16", "1:1", "4:3", "3:4"], def: "16:9" },
-    { f: "duration", label: "Duration", kind: "select", options: DURATIONS, def: "5" },
-  ],
-  vedit: [
-    { f: "model", label: "Model", kind: "model" },
-    { f: "prompt", label: "Edit instruction", kind: "textarea" },
-    { f: "resolution", label: "Resolution", kind: "select", def: "" },
-  ],
-  lipsync: [
-    { f: "model", label: "Model", kind: "model" },
-    { f: "prompt", label: "Guidance prompt", kind: "textarea" },
-    { f: "resolution", label: "Resolution", kind: "select", def: "" },
-  ],
-  music: [
-    { f: "model", label: "Model", kind: "model" },
-    { f: "lyrics", label: "Lyrics", kind: "textarea" },
-    { f: "instrumental", label: "Instrumental", kind: "boolean" },
-    { f: "duration", label: "Duration (s)", kind: "number" },
-    { f: "negative_prompt", label: "Negative prompt", kind: "textarea" },
-    { f: "seed", label: "Seed", kind: "number" },
-  ],
-  remix: [
-    { f: "model", label: "Model", kind: "model" },
-    { f: "lyrics", label: "Lyrics", kind: "textarea" },
-    { f: "duration", label: "Duration (s)", kind: "number" },
-  ],
-  tts: [
-    { f: "model", label: "Model", kind: "model" },
-    { f: "voice", label: "Voice", kind: "text" },
-    { f: "speed", label: "Speed", kind: "number", def: "1" },
-    { f: "instructions", label: "Voice instructions", kind: "textarea" },
-  ],
-  transcribe: [
-    { f: "model", label: "Model", kind: "model" },
-    { f: "language", label: "Language", kind: "text", def: "auto" },
-  ],
-  cleanvoice: [
-    { f: "model", label: "Model", kind: "model" },
-    { f: "url", label: "Public link (when nothing is wired)", kind: "text" },
-  ],
-  model3d: [
-    { f: "model", label: "Model", kind: "model" },
-  ],
-  endpoint: [
-    { f: "url", label: "URL", kind: "text", def: "http://127.0.0.1:8787/v1/chat/completions" },
-    { f: "mode", label: "Mode", kind: "select", options: ["chat", "image", "video", "audio", "json"], def: "chat" },
-    { f: "model", label: "Model", kind: "text", def: "local" },
-    { f: "auth", label: "Authorization (optional)", kind: "text", def: "" },
-  ],
-  join: [{ f: "sep", label: "Separator (use \\n for a line break)", kind: "text", def: " " }],
-  inpaint: [
-    { f: "model", label: "Model", kind: "model" },
-    { f: "size", label: "Image size", kind: "select", options: SIZES, def: "1024x1024" },
-    { f: "seed", label: "Seed", kind: "number" },
-  ],
-  // local media knobs (play.html SETTING_SPECS) — shape-affecting fields for vframes/combine
-  "slice-3d": [
-    { f: "preset", label: "Preset", kind: "select", options: ["default", "character"], def: "default" },
-    { f: "clip", label: "Animation clip", kind: "text", def: "" },
-    { f: "frames", label: "Pose frames", kind: "number", min: 1, max: 64, def: "1" },
-    { f: "slices", label: "Slices", kind: "number", min: 8, max: 128, def: "48" },
-    { f: "resolution", label: "Tile resolution", kind: "number", min: 16, max: 128, def: "48" },
-    { f: "palette", label: "Palette colors", kind: "number", min: 0, max: 64, def: "16" },
-    { f: "outline", label: "Outline", kind: "boolean", def: true },
-    { f: "upAxis", label: "Up axis", kind: "select", options: ["auto", "x", "y", "z"], def: "auto" },
-  ],
-  "sprite-stack-render": [
-    { f: "yaw", label: "Yaw (degrees)", kind: "number", def: "35" },
-    { f: "pitch", label: "Pitch (degrees)", kind: "number", min: 0, max: 90, def: "30" },
-    { f: "spacing", label: "Layer spacing", kind: "number", min: 0, max: 4, def: "1" },
-    { f: "scale", label: "Pixel scale", kind: "number", min: 1, max: 8, def: "3" },
-    { f: "turntable", label: "Record turntable", kind: "boolean", def: false },
-    { f: "duration", label: "Duration (s)", kind: "number", min: 0.25, max: 30, def: "3" },
-    { f: "fps", label: "Frames per second", kind: "number", min: 1, max: 60, def: "24" },
-    { f: "yawStart", label: "Start yaw", kind: "number", def: "0" },
-    { f: "yawEnd", label: "End yaw", kind: "number", def: "360" },
-  ],
-  resize: [
-    { f: "mode", label: "Mode", kind: "select", options: ["fit", "fill", "exact"], def: "fit" },
-    { f: "width", label: "Width", kind: "number" },
-    { f: "height", label: "Height", kind: "number" },
-  ],
-  vframes: [
-    { f: "dir", label: "Start from", kind: "select", options: ["end", "start"], def: "end" },
-    { f: "frames", label: "Frames", kind: "number", def: "1", min: 1, max: 48 },
-    { f: "gap", label: "Gap (s)", kind: "number", def: "0.5" },
-    { f: "stride", label: "Stride (every Nth frame)", kind: "number", def: "1", min: 1 },
-    { f: "startSec", label: "Range start (s)", kind: "number" },
-    { f: "endSec", label: "Range end (s)", kind: "number" },
-  ],
-  render3d: [
-    { f: "mode", label: "Output", kind: "select", options: ["image", "video"], def: "image" },
-    { f: "azimuth", label: "Azimuth (deg)", kind: "number", def: "35" },
-    { f: "elevation", label: "Elevation (deg)", kind: "number", def: "18" },
-    { f: "distance", label: "Distance (× size)", kind: "number", def: "1.9" },
-    { f: "width", label: "Width", kind: "number", def: "800" },
-    { f: "height", label: "Height", kind: "number", def: "600" },
-    { f: "background", label: "Background", kind: "select", options: ["dark", "light", "transparent"], def: "dark" },
-    { f: "clipAxis", label: "Slice axis", kind: "select", options: ["none", "x", "y", "z"], def: "none" },
-    { f: "clipPos", label: "Slice position (-1..1)", kind: "number", def: "0" },
-    { f: "clipSweep", label: "Video: sweep the slice", kind: "boolean" },
-    { f: "explode", label: "Explode parts (0..1)", kind: "number", def: "0" },
-    { f: "isolate", label: "Isolate part (index, name, or largest)", kind: "text" },
-    { f: "animClip", label: "Animation clip (name or index)", kind: "text" },
-    { f: "animTime", label: "Animation time (s)", kind: "number", def: "0" },
-    { f: "turntable", label: "Video: turntable (deg)", kind: "number", def: "360" },
-    { f: "duration", label: "Video: duration (s)", kind: "number", def: "2" },
-    { f: "fps", label: "Video: fps", kind: "number", def: "24" },
-  ],
-  combine: [
-    { f: "dedup", label: "Trim duplicate seam frame", kind: "boolean", def: true },
-  ],
-  soundtrack: [
-    { f: "loop", label: "Loop audio to fill video", kind: "boolean", def: false },
-  ],
-  trim: [
-    { f: "start", label: "Start (s)", kind: "number", def: "0" },
-    { f: "length", label: "Length (s)", kind: "number", def: "30" },
-  ],
-  extractaudio: [
-    { f: "start", label: "Start (s)", kind: "number", def: "0" },
-    { f: "length", label: "Length (s)", kind: "number" },
-  ],
-};
 
 /**
  * Derive overridable settings: SETTING_SPECS fields that aren't wired.
@@ -397,27 +244,40 @@ export function deriveSettings(graph) {
  * Refuses wired fields with a clear error.
  */
 export function resolveSettingKey(graph, settings, userKey) {
-  const norm = String(userKey).trim().toLowerCase();
-  const exact = settings.find((s) => s.key.toLowerCase() === norm);
-  if (exact) return exact;
+  const spelling = String(userKey).trim();
+  const norm = spelling.toLowerCase();
+  const dot = spelling.lastIndexOf(".");
+  if (dot >= 0) {
+    const spelledHead = spelling.slice(0, dot);
+    const head = spelledHead.toLowerCase(), field = spelling.slice(dot + 1).toLowerCase();
+    const wiredError = `setting "${userKey}": that field is wired from another node and can't be overridden`;
+    const canonical = new Map(settings.filter((s) => s.key.toLowerCase() === norm).map((s) => [s.nodeId, s]));
+    const wired = new Set();
+    for (const { to } of graph.links) {
+      if (to.port.toLowerCase() !== field) continue;
+      wired.add(to.node);
+      // A wire reserves the canonical address even when the settings list omits it.
+      if (`${to.node}.${to.port}`.toLowerCase() === norm) canonical.set(to.node, null);
+    }
 
-  const dot = norm.lastIndexOf(".");
-  if (dot > 0) {
-    const head = norm.slice(0, dot), field = norm.slice(dot + 1);
-    const nodes = graph.nodes.filter((n) =>
-      n.id.toLowerCase() === head ||
-      (n.name || "").trim().toLowerCase() === head ||
-      displayName(n).toLowerCase() === head);
+    const addressed = canonical.has(spelledHead) ? [spelledHead] : [...canonical.keys()];
+    if (addressed.length === 1) {
+      const spec = canonical.get(addressed[0]);
+      if (spec) return spec;
+      throw new NanoodleError(wiredError);
+    }
+    if (addressed.length > 1) {
+      const keys = addressed.map((id) => canonical.get(id)?.key ?? `${id}.${field} (wired)`);
+      throw new NanoodleError(`setting "${userKey}" is ambiguous — matches ${keys.join(", ")}`);
+    }
+
+    const nodes = graph.nodes.filter((n) => displayName(n).toLowerCase() === head);
     const cand = settings.filter((s) => nodes.some((n) => n.id === s.nodeId) && s.field.toLowerCase() === field);
     if (cand.length === 1) return cand[0];
     if (cand.length > 1) {
       throw new NanoodleError(`setting "${userKey}" is ambiguous — matches ${cand.map((c) => c.key).join(", ")}`);
     }
-    for (const n of nodes) {
-      if (graph.links.some((l) => l.to.node === n.id && l.to.port.toLowerCase() === field)) {
-        throw new NanoodleError(`setting "${userKey}": that field is wired from another node and can't be overridden`);
-      }
-    }
+    if (nodes.some((n) => wired.has(n.id))) throw new NanoodleError(wiredError);
   }
 
   const byField = settings.filter((s) => s.field.toLowerCase() === norm || s.label.toLowerCase() === norm);

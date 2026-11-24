@@ -18,8 +18,11 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, extname } from "node:path";
 import process from "node:process";
 import { MEDIA_INPUT_KINDS } from "../src/io.mjs";
-import { Workflow, RunError, mediaFromFile } from "../src/index.mjs";
+import { Workflow, NanoodleError, RunError, mediaFromFile } from "../src/index.mjs";
 import { MediaRef, extForMime, sniffMime } from "../src/media.mjs";
+
+// Node schedules a 1 ms timer for delays above the signed 32-bit limit.
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 
 const HELP = `nanoodle — run nanoodle.com visual AI workflows from the terminal
 
@@ -46,7 +49,7 @@ flags:
   --pay         accountless run — no API key or account: each paid call prints a Nano (XNO)
                 invoice as a scannable QR + nano: URI on stderr and waits for the deposit
                 (x402; ignores any configured key; self-custody wallet does the send)
-  --timeout ms  overall run timeout
+  --timeout ms  overall run timeout (0 disables it; maximum ${MAX_TIMEOUT_MS} ms)
 
 examples:
   # scaffold the starter graph and see its inputs/outputs — no API key needed
@@ -82,6 +85,17 @@ function parseKv(arg, flag) {
   return [arg.slice(0, eq), arg.slice(eq + 1)];
 }
 
+function parseTimeout(value) {
+  const decimal = /^(?<mantissa>[+-]?(?:\d+(?:\.\d*)?|\.\d+))(?:e[+-]?\d+)?$/i.exec(value.trim());
+  const timeoutMs = Number(value);
+  if (!decimal || timeoutMs < 0 || timeoutMs > MAX_TIMEOUT_MS ||
+      (timeoutMs === 0 && /[1-9]/.test(decimal.groups.mantissa))) {
+    console.error(`--timeout expects milliseconds between 0 and ${MAX_TIMEOUT_MS}`);
+    usage();
+  }
+  return timeoutMs;
+}
+
 const TEXT_EXT = new Set([".txt", ".md", ".json", ".csv", ".html", ".xml"]);
 
 async function resolveValue(v) {
@@ -89,6 +103,68 @@ async function resolveValue(v) {
   const path = v.slice(1);
   if (TEXT_EXT.has(extname(path).toLowerCase())) return await readFile(path, "utf8");
   return mediaFromFile(path);
+}
+
+async function loadWorkflow(graphPath, { keyFlag, envFile, pay }) {
+  // key precedence: --key > --env-file > NANOGPT_API_KEY (same .env parsing as scripts/live-spot-check.mjs)
+  let apiKey = keyFlag ?? process.env.NANOGPT_API_KEY;
+  if (envFile && keyFlag == null) {
+    let envText;
+    try { envText = await readFile(envFile, "utf8"); }
+    catch (e) { throw new NanoodleError(`--env-file: cannot read ${envFile}: ${e.message}`, { code: e.code }); }
+    const m = envText.match(/^NANOGPT_API_KEY\s*=\s*"?([^"\n]+)"?/m);
+    if (!m) throw new NanoodleError(`--env-file: no NANOGPT_API_KEY entry in ${envFile}`);
+    apiKey = m[1].trim();
+  }
+
+  // --pay = accountless x402: the key (flag or env) is deliberately ignored, each paid call
+  // prints a Nano invoice on stderr and the run resumes once the deposit is seen on-chain.
+  // The send happens in the user's own wallet — the CLI never asks for a seed or key.
+  let payment;
+  if (pay) {
+    apiKey = null; // null, not undefined — undefined would let Workflow's NANOGPT_API_KEY env fallback re-inject a key
+    const { qrTerminal } = await import("../src/qr.mjs");
+    payment = async (inv) => {
+      const mins = inv.expiresAt ? Math.max(1, Math.round((inv.expiresAt - Date.now()) / 60000)) : null;
+      console.error(`\n⚡ payment required: ${inv.amount || inv.amountRaw + " raw"}${inv.amountUsd != null ? ` (~$${inv.amountUsd})` : ""}`);
+      console.error(qrTerminal(inv.uri));
+      console.error("scan with your Nano wallet (dark terminals scan best), or send to:");
+      console.error("  " + inv.payTo);
+      console.error("  " + inv.uri);
+      if (inv.explorerUrl) console.error("  explorer: " + inv.explorerUrl);
+      console.error(`waiting for the deposit…${mins ? ` (invoice expires in ~${mins} min,` : " ("}Ctrl-C aborts)\n`);
+    };
+  }
+
+  return Workflow.load(graphPath, { apiKey, payment, baseUrl: process.env.NANOGPT_BASE_URL || undefined });
+}
+
+function printRunSummary(result, outputs, outputErrors = []) {
+  console.log(JSON.stringify({
+    outputs,
+    costUsd: result.costUsd,
+    costExact: result.costExact,
+    remainingBalance: result.remainingBalance,
+    errors: [...result.errors, ...outputErrors],
+    gated: result.gated || [],
+    ...(result.payments?.length ? { payments: result.payments } : {}),
+    nodes: Object.fromEntries(Object.entries(result.nodes).map(([id, r]) => [id, {
+      status: r.status, ms: r.ms, costUsd: r.costUsd, error: r.error,
+      ...(r.runId != null ? { runId: r.runId } : {}),
+      ...(r.gate ? { gate: r.gate } : {}), ...(r.gatedBy ? { gatedBy: r.gatedBy } : {}),
+    }])),
+  }, null, 2));
+}
+
+function reportUnstartedRun(error) {
+  const message = error?.message || String(error);
+  const { code, nodeId, nodeType } = error ?? {};
+  console.error("error: " + message);
+  printRunSummary({
+    costUsd: 0, costExact: true, remainingBalance: null, nodes: {},
+    errors: [{ message, code, nodeId, nodeType }],
+  }, {});
+  process.exitCode = 1;
 }
 
 async function main() {
@@ -124,58 +200,41 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
   let graphPath = null, outDir = null, quiet = false, keyFlag = null, envFile = null, timeoutMs, pay = false;
   const inputArgs = [], setArgs = [];
   let i = 0;
-  const val = (flag) => { // a value-taking flag at end of argv is a usage error, not a TypeError
+  const val = (flag) => {
     const v = argv[++i];
-    if (v === undefined) { console.error(`${flag} expects a value`); usage(); }
+    if (v === undefined || handlers.has(v) || ["--help", "-h", "--version"].includes(v)) {
+      console.error(`${flag} expects a value`);
+      usage();
+    }
     return v;
   };
+  const handlers = new Map([
+    ["--input", flag => inputArgs.push(val(flag))],
+    ["--set", flag => setArgs.push(val(flag))],
+    ["--out", flag => { outDir = val(flag); }],
+    ["--json", () => { quiet = true; }],
+    ["--key", flag => { keyFlag = val(flag); }],
+    ["--env-file", flag => { envFile = val(flag); }],
+    ["--pay", () => { pay = true; }],
+    ["--timeout", flag => { timeoutMs = parseTimeout(val(flag)); }],
+  ]);
   for (; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--input") inputArgs.push(val("--input"));
-    else if (a === "--set") setArgs.push(val("--set"));
-    else if (a === "--out") outDir = val("--out");
-    else if (a === "--json") quiet = true;
-    else if (a === "--key") keyFlag = val("--key");
-    else if (a === "--env-file") envFile = val("--env-file");
-    else if (a === "--pay") pay = true;
-    else if (a === "--timeout") timeoutMs = +val("--timeout");
+    const handle = handlers.get(a);
+    if (handle) handle(a);
     else if (a.startsWith("-")) { console.error("unknown flag: " + a); usage(); }
     else if (!graphPath) graphPath = a;
     else { console.error("unexpected argument: " + a); usage(); }
   }
   if (!graphPath) usage();
 
-  // key precedence: --key > --env-file > NANOGPT_API_KEY (same .env parsing as scripts/live-spot-check.mjs)
-  let apiKey = keyFlag ?? process.env.NANOGPT_API_KEY;
-  if (envFile && keyFlag == null) {
-    let envText;
-    try { envText = await readFile(envFile, "utf8"); }
-    catch (e) { console.error(`--env-file: cannot read ${envFile}: ${e.message}`); process.exit(1); }
-    const m = envText.match(/^NANOGPT_API_KEY\s*=\s*"?([^"\n]+)"?/m);
-    if (!m) { console.error(`--env-file: no NANOGPT_API_KEY entry in ${envFile}`); process.exit(1); }
-    apiKey = m[1].trim();
+  let wf;
+  try {
+    wf = await loadWorkflow(graphPath, { keyFlag, envFile, pay });
+  } catch (e) {
+    if (cmd === "inspect") throw e;
+    return reportUnstartedRun(e);
   }
-
-  // --pay = accountless x402: the key (flag or env) is deliberately ignored, each paid call
-  // prints a Nano invoice on stderr and the run resumes once the deposit is seen on-chain.
-  // The send happens in the user's own wallet — the CLI never asks for a seed or key.
-  let payment;
-  if (pay) {
-    apiKey = null; // null, not undefined — undefined would let Workflow's NANOGPT_API_KEY env fallback re-inject a key
-    const { qrTerminal } = await import("../src/qr.mjs");
-    payment = async (inv) => {
-      const mins = inv.expiresAt ? Math.max(1, Math.round((inv.expiresAt - Date.now()) / 60000)) : null;
-      console.error(`\n⚡ payment required: ${inv.amount || inv.amountRaw + " raw"}${inv.amountUsd != null ? ` (~$${inv.amountUsd})` : ""}`);
-      console.error(qrTerminal(inv.uri));
-      console.error("scan with your Nano wallet (dark terminals scan best), or send to:");
-      console.error("  " + inv.payTo);
-      console.error("  " + inv.uri);
-      if (inv.explorerUrl) console.error("  explorer: " + inv.explorerUrl);
-      console.error(`waiting for the deposit…${mins ? ` (invoice expires in ~${mins} min,` : " ("}Ctrl-C aborts)\n`);
-    };
-  }
-
-  const wf = await Workflow.load(graphPath, { apiKey, payment, baseUrl: process.env.NANOGPT_BASE_URL || undefined });
 
   if (cmd === "inspect") {
     const pad = (s, n) => String(s).padEnd(n);
@@ -223,22 +282,24 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
   }
 
   // ---- run ----
-  const inputs = Object.create(null);
-  for (const arg of inputArgs) {
-    const [k, v] = parseKv(arg, "--input");
-    inputs[k] = await resolveValue(v);
-  }
-  const settings = Object.create(null);
-  for (const arg of setArgs) {
-    const [k, v] = parseKv(arg, "--set");
-    settings[k] = v;
-  }
-
   let result;
+  let started = false;
   try {
+    const inputs = Object.create(null);
+    for (const arg of inputArgs) {
+      const [k, v] = parseKv(arg, "--input");
+      inputs[k] = await resolveValue(v);
+    }
+    const settings = Object.create(null);
+    for (const arg of setArgs) {
+      const [k, v] = parseKv(arg, "--set");
+      settings[k] = v;
+    }
     result = await wf.run(inputs, {
       settings, timeoutMs,
-      onProgress: quiet ? undefined : (e) => {
+      onProgress: (e) => {
+        if (e.type === "node-start") started = true;
+        if (quiet) return;
         if (e.type === "node-start") console.error(`▶ ${e.name} (${e.nodeId})`);
         if (e.type === "node-done") console.error(`✔ ${e.name} (${e.nodeId}) ${e.ms}ms${e.costUsd != null ? ` $${e.costUsd}` : ""}`);
         if (e.type === "node-error") console.error(`✖ ${e.name} (${e.nodeId}): ${e.error}`);
@@ -251,10 +312,8 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
       console.error("run failed: " + e.message);
       result = e.result;
       process.exitCode = 1;
-    } else {
-      console.error("error: " + e.message);
-      process.exit(1);
-    }
+    } else if (!started) return reportUnstartedRun(e);
+    else throw e;
   }
 
   // media outputs land under --out (default ./noodle-out; created only if there is media to save)
@@ -262,26 +321,35 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
   let dirMade = false;
   const printable = Object.create(null);
   const savedNames = new Set();
+  const outputErrors = [];
   for (const o of wf.outputs) {
     const value = result.outputs[o.key];
     if (value === undefined) { printable[o.key] = null; continue; }
     if (value instanceof MediaRef) {
-      if (!dirMade) { await mkdir(dir, { recursive: true }); dirMade = true; }
-      const safe = o.key.replace(/[^\w.-]+/g, "_");
-      // fetch before naming: hosted media only reveals its mime via the response Content-Type
-      const data = await value.bytes();
-      const ext = extForMime(value.mime || sniffMime(data));
-      let filename = safe + "." + ext;
-      // Friendly keys can collapse during sanitization ("A B" / "A_B").
-      // Also avoid case-only collisions on case-insensitive filesystems.
-      for (let suffix = 2; savedNames.has(filename.toLowerCase()); suffix++) {
-        filename = safe + "_" + suffix + "." + ext;
+      try {
+        if (!dirMade) { await mkdir(dir, { recursive: true }); dirMade = true; }
+        const safe = o.key.replace(/[^\w.-]+/g, "_");
+        // fetch before naming: hosted media only reveals its mime via the response Content-Type
+        const data = await value.bytes();
+        const ext = extForMime(value.mime || sniffMime(data));
+        let filename = safe + "." + ext;
+        // Friendly keys can collapse during sanitization ("A B" / "A_B").
+        // Also avoid case-only collisions on case-insensitive filesystems.
+        for (let suffix = 2; savedNames.has(filename.toLowerCase()); suffix++) {
+          filename = safe + "_" + suffix + "." + ext;
+        }
+        savedNames.add(filename.toLowerCase());
+        const path = join(dir, filename);
+        await writeFile(path, data);
+        printable[o.key] = path;
+        if (!quiet) console.error(`${o.key}: saved ${path}`);
+      } catch (error) {
+        const message = `could not save output "${o.key}" — ${error?.message || String(error)}`;
+        outputErrors.push({ nodeId: o.nodeId, name: o.key, code: "output-save-failed", message });
+        printable[o.key] = null;
+        process.exitCode = 1;
+        console.error("error: " + message);
       }
-      savedNames.add(filename.toLowerCase());
-      const path = join(dir, filename);
-      await writeFile(path, data);
-      printable[o.key] = path;
-      if (!quiet) console.error(`${o.key}: saved ${path}`);
     } else {
       printable[o.key] = value;
       if (!quiet) console.error(`${o.key}: ${value}`);
@@ -289,20 +357,7 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
   }
 
   // the run summary is ALWAYS the JSON on stdout (contract shared with nanoodle-py and the docs)
-  console.log(JSON.stringify({
-    outputs: printable,
-    costUsd: result.costUsd,
-    costExact: result.costExact,
-    remainingBalance: result.remainingBalance,
-    errors: result.errors,
-    gated: result.gated || [],
-    ...(result.payments?.length ? { payments: result.payments } : {}),
-    nodes: Object.fromEntries(Object.entries(result.nodes).map(([id, r]) => [id, {
-      status: r.status, ms: r.ms, costUsd: r.costUsd, error: r.error,
-      ...(r.runId != null ? { runId: r.runId } : {}),
-      ...(r.gate ? { gate: r.gate } : {}), ...(r.gatedBy ? { gatedBy: r.gatedBy } : {}),
-    }])),
-  }, null, 2));
+  printRunSummary(result, printable, outputErrors);
   if (!quiet) {
     const approx = result.costExact ? "" : "≥ ";
     console.error(`cost: ${approx}$${result.costUsd}${result.remainingBalance != null ? ` · balance: $${result.remainingBalance}` : ""}`);

@@ -111,10 +111,10 @@ Present-but-zero = known-included (subscription), keep 0. Absent → cost unknow
 No streaming retries needed (engine is non-streaming). Poll GET failures: silently continue the loop until timeout.
 
 ## Execution (runGraph 3000-3133)
-1. Alias/filter nodes (materialize): audio→tts, drop unknown types + orphaned links, migrate music/tts inbound "text" port → "prompt".
+1. Materialize the graph: alias audio→tts and migrate music/tts inbound "text" ports to "prompt". Keep unknown nodes and invalid wires with inspection warnings. Reject them before execution.
 2. Kahn topological order; cyclic → error naming the cyclic nodes.
 3. Concurrency: node starts when ITS deps finish (siblings run concurrently). Library: same semantics (asyncio / Promise per node).
-4. Input resolution per node: for declared ports, value = srcNode.out[from.port]. Dynamic families: img\d+ / image\d*, vid\d+, clip\d+, audio, endframe, ref\d+, frame\d+ (vframes outputs). ANY other inbound link = FIELD OVERRIDE: run with fields = {...fields, [port]: value} (that's how wired prompt/system/lyrics/q override typed values).
+4. Input resolution per node: declared data inputs receive srcNode.out[from.port]. A node type can declare dynamic input families, such as img1… on LLM or Decide and image/image2… on Edit. A wire to a supported field such as prompt, system, lyrics, or q overrides its stored value. Endpoint URL and mode wires go to the route resolver.
 5. Node failure: record error for that node, continue independent lanes (library default: collect; raise at end if a sink failed — see DESIGN).
 6. comment nodes never run. Fixed-seed skip-cache: optional for a library (stateless one-shot runs don't need it) — SKIP in v1.
 
@@ -138,8 +138,8 @@ Implemented in `src/local-media.mjs` + `src/mp4cat.mjs` (JS) / `nanoodle/local_m
 
 Node behaviour:
 - **resize** — `mode` fit|fill|exact, width/height; fit never upscales; PNG stays PNG else JPEG.
-- **vframes** — `frames` 1–12, `gap` seconds, `dir` end|start; emits `frame1..frameN` JPEG data URLs.
-  - **wiredFramesFloor**: before run, `fields.frames` is raised to the highest wired outbound `frameK` port (same as play.html). Prevents starving a `frame3` consumer when a saved graph still has `frames:1` after paid upstream steps. Settings UI also floors the knob to that value.
+- **vframes** — `frames` 1–48, `gap` seconds, `dir` end|start; emits `frame1..frameN` JPEG data URLs.
+  - **wiredFramesFloor**: after resolving incoming wires, the requested count is raised to match the highest wired outbound `frameK` port. The extractor still honors the requested stride and time range. The settings UI also uses the outbound floor.
 - **combine** — clip1../vid1.. inputs (≥2), ordered by port number across both families; remux when params match, else re-encode; `dedup` only on re-encode path.
 - **soundtrack** — video+audio; `loop` loops audio to fill video length; mux → mp4.
 - **trim** — audio → mono WAV @ 16 kHz; `start` + `length` (default 30s when blank).

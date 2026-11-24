@@ -1,6 +1,7 @@
 import { NanoodleError, RunError, UnsupportedNodeError } from "./errors.mjs";
-import { abortReason, enforceDeadline, startDeadline, throwIfAborted } from "./deadline.mjs";
-import { NODE_TYPES, displayName, isInputPort, lockedNode, materialize, topoSort, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
+import { abortReason, enforceDeadline, normalizeTimeoutMs, startDeadline, throwIfAborted } from "./deadline.mjs";
+import { NODE_TYPES, assertNodeRecord, displayName, isInputPort, lockedNode, materialize, topoSort, wireIssue, wiredFramesFloor, MAX_FRAMES } from "./graph.mjs";
+import { COMPETING_INPUT_WIRES, competingInputIssues, staticCompetingInputIssues } from "./input-wires.mjs";
 import { endpointOutPort } from "./endpoint.mjs";
 import { MEDIA_INPUT_KINDS, deriveInputs, deriveOutputs, deriveSettings, resolveInputKey, resolveSettingKey } from "./io.mjs";
 import { NanoClient } from "./client.mjs";
@@ -164,6 +165,13 @@ function isPlainObject(v) {
   return proto === Object.prototype || proto === null;
 }
 
+function isTrimmedAudioInput(entry, graph, byId) {
+  if (entry.kind !== "audio" || byId.get(entry.nodeId)?.type !== "aupload") return false;
+  const destinations = graph.links.filter(link => link.from.node === entry.nodeId);
+  return destinations.length > 0 && destinations.every(({ from, to }) =>
+    from.port === "audio" && to.port === "audio" && byId.get(to.node)?.type === "trim");
+}
+
 export class Workflow {
   /**
    * @param {object} graphData parsed noodle-graph.json
@@ -182,7 +190,7 @@ export class Workflow {
      * the next run of the same Workflow, which is where a retry actually happens.
      */
     this._promptCaps = new Map();
-    /** Load-time warnings (unknown / unsupported node types). load() only warns; run() fails fast. */
+    /** Load-time graph warnings, including unknown node types and invalid wires. */
     this.warnings = warnings;
     this.client = new NanoClient({
       apiKey: opts.apiKey !== undefined ? opts.apiKey : envApiKey(),
@@ -248,6 +256,22 @@ export class Workflow {
     const { settings = {}, defaults = true, timeoutMs, signal, onProgress } = runOpts;
     const graph = this.graph;
 
+    for (const [index, n] of graph.nodes.entries()) {
+      // Workflow.graph can be edited after materialize; validate before scheduling it.
+      assertNodeRecord(n, index);
+      if (n.unknown || !Object.hasOwn(NODE_TYPES, n.type)) {
+        throw new UnsupportedNodeError(
+          `node ${n.id}: unknown node type '${n.type}' — this graph needs a newer nanoodle library`,
+          { nodeId: n.id, nodeType: n.type });
+      }
+    }
+
+    const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+    for (const link of graph.links) {
+      const issue = wireIssue(link, byId);
+      if (issue) throw new NanoodleError(issue.message, { code: issue.code });
+    }
+
     // bare scalar → the single required input
     if (!isPlainObject(inputs)) {
       const required = this.inputs.filter((i) => !i.optional);
@@ -278,15 +302,6 @@ export class Workflow {
       settingAssignments.push({ entry, value });
     }
 
-    // unknown node types fail fast — before any network call
-    for (const n of graph.nodes) {
-      if (n.unknown) {
-        throw new UnsupportedNodeError(
-          `node ${n.id}: unknown node type '${n.type}' — this graph needs a newer nanoodle library`,
-          { nodeId: n.id, nodeType: n.type });
-      }
-    }
-
     const order = topoSort(graph); // throws naming cyclic nodes
     const branches = planBranches(graph, order.map(n => n.id));
 
@@ -300,19 +315,15 @@ export class Workflow {
     for (const { entry, value } of settingAssignments) {
       effFields.get(entry.nodeId)[entry.field] = this._coerceSetting(entry, value);
     }
+    const inputConflict = staticCompetingInputIssues(graph, order, branches, node => effFields.get(node.id))[0];
+    if (inputConflict) throw new NanoodleError(inputConflict, { code: COMPETING_INPUT_WIRES });
     const explicit = new Set();
     for (const { entry, value } of inputAssignments) {
-      effFields.get(entry.nodeId)[entry.field] = this._coerceInput(entry, value, mediaCoerceOpts);
+      // When all uses go through Trim, only the trimmed output can reach a request.
+      const opts = hasNetwork && isTrimmedAudioInput(entry, graph, byId)
+        ? { enforceInlineMax: false } : mediaCoerceOpts;
+      effFields.get(entry.nodeId)[entry.field] = this._coerceInput(entry, value, opts);
       explicit.add(entry);
-    }
-    // vframes: raise frames to highest wired frameK (play.html wiredFramesFloor) so a
-    // persisted frames=1 with frame3 wired doesn't starve the consumer after paid upstream.
-    for (const n of graph.nodes) {
-      if (n.type !== "vframes") continue;
-      const fields = effFields.get(n.id);
-      const floor = wiredFramesFloor(graph, n.id);
-      const cur = Math.max(1, Math.min(MAX_FRAMES, parseInt(fields.frames, 10) || 1));
-      if (floor > cur) fields.frames = String(floor);
     }
     // defaults + required check
     for (const entry of this.inputs) {
@@ -329,6 +340,11 @@ export class Workflow {
       }
     }
 
+    const runTimeoutMs = normalizeTimeoutMs(timeoutMs, "run timeoutMs");
+    for (const n of graph.nodes) {
+      normalizeTimeoutMs(effFields.get(n.id).timeoutMs, `node ${n.id} timeoutMs`);
+    }
+
     // API key (or an x402 payment callback) required only when the graph actually calls NanoGPT
     if (!this.client.apiKey && !this.client.payment && hasNetwork) {
       throw new NanoodleError("no API key — pass { apiKey } to Workflow.load/fromJSON, set NANOGPT_API_KEY, or pass { payment } for accountless x402 runs (this workflow calls the NanoGPT API)");
@@ -342,8 +358,8 @@ export class Workflow {
       if (signal.aborted) ac.abort(signal.reason);
       else signal.addEventListener("abort", onOuterAbort, { once: true });
     }
-    if (timeoutMs) {
-      timer = startDeadline(ac, timeoutMs, `run timed out after ${timeoutMs}ms`);
+    if (runTimeoutMs != null) {
+      timer = startDeadline(ac, runTimeoutMs, `run timed out after ${runTimeoutMs}ms`);
     }
 
     const emit = (evt) => { if (onProgress) { try { onProgress(evt); } catch { /* listener errors never kill the run */ } } };
@@ -352,7 +368,6 @@ export class Workflow {
     const payments = [];
     const canPay = !this.client.apiKey && this.client.payment;
     const cost = { total: 0, exact: true, balance: null };
-    const byId = new Map(graph.nodes.map((n) => [n.id, n]));
     const promises = new Map();
     const mediaFetch = this.client.fetch;
 
@@ -433,8 +448,7 @@ export class Workflow {
             return {};
           }
         }
-        const inp = {};
-        let fields = effFields.get(n.id);
+        const supplied = [];
         let upstreamFail = null, gatedBy = null, skippedIn = 0;
         for (const l of inbound) {
           let srcOut;
@@ -448,23 +462,7 @@ export class Workflow {
             continue;
           }
           const v = srcOut[l.from.port];
-          if (isInputPort(n, l.to.port)) {
-            // Node boundary: a relative content URL from the upstream provider is
-            // resolved (authed redirect → absolute file URL, or inlined bytes)
-            // before this node builds videoUrl / videoDataUrl / audio / image.
-            inp[l.to.port] = (typeof v === "string" && v && HANDED_MEDIA_PORT.test(l.to.port))
-              ? await withSignal(() => this.client.resolveContentUrl(v, { signal: ac.signal }), ac.signal)
-              : v;
-          }
-          // Custom endpoint url/mode: a Choice path like "/post" must ride inp so
-          // endpointResolveTarget can join it onto the typed host. Overwriting
-          // fields.url with "/post" rejects the joined URL.
-          else if (n.type === "endpoint" && (l.to.port === "url" || l.to.port === "mode")) {
-            if (v != null) inp[l.to.port] = v;
-          }
-          // wired textarea port = field override; a missing upstream port (degraded save) must
-          // NOT clobber the typed field with undefined — the app only applies v != null
-          else if (v != null) fields = { ...fields, [l.to.port]: v };
+          if (v != null) supplied.push({ link: l, value: v });
         }
         // a real failure upstream wins over a gate (the browser runners agree): that is an error
         if (upstreamFail) throw new NanoodleError("upstream failed: " + upstreamFail);
@@ -483,6 +481,33 @@ export class Workflow {
           throw new GateSkip(gatedBy);
         }
         throwIfAborted(ac.signal);
+        const conflict = competingInputIssues(supplied.map(({ link }) => link))[0];
+        if (conflict) throw new NanoodleError(conflict, { code: COMPETING_INPUT_WIRES });
+        const inp = {};
+        let fields = effFields.get(n.id);
+        for (const { link, value } of supplied) {
+          const port = link.to.port;
+          if (isInputPort(n, port)) {
+            // Resolve an upstream provider's content URL before the consumer builds its payload.
+            inp[port] = (typeof value === "string" && value && HANDED_MEDIA_PORT.test(port))
+              ? await withSignal(() => this.client.resolveContentUrl(value, { signal: ac.signal }), ac.signal)
+              : value;
+          }
+          // Custom endpoint url/mode: a Choice path like "/post" must ride inp so
+          // endpointResolveTarget can join it onto the typed host.
+          else if (n.type === "endpoint" && (port === "url" || port === "mode")) {
+            inp[port] = value;
+          }
+          else fields = { ...fields, [port]: value };
+        }
+        // The floor applies to the resolved frame count, which a wire can override.
+        // The extractor still uses the requested stride and range.
+        if (n.type === "vframes") {
+          const floor = wiredFramesFloor(graph, n.id);
+          const count = Math.max(1, Math.min(MAX_FRAMES, parseInt(fields.frames, 10) || 1));
+          if (floor > count) fields = { ...fields, frames: String(floor) };
+        }
+        throwIfAborted(ac.signal);
         // Prompt length caps (see prompt-caps.mjs). Many image/video models reject an over-long
         // prompt at the route, and in a graph the prompt is WRITTEN by an upstream LLM — so a
         // caller has nothing to shorten. Trim it to fit rather than send a request certain to 400,
@@ -493,15 +518,15 @@ export class Workflow {
         throwIfAborted(ac.signal);
         const t0 = Date.now();
         // The node deadline covers progress callbacks, the runner and media publication.
-        const timeoutMs = Number(fields.timeoutMs);
-        const timedNode = Number.isFinite(timeoutMs) && timeoutMs > 0;
-        if (timedNode || canPay) {
+        // Incoming wires can override the stored timeout after preflight.
+        const timeoutMs = normalizeTimeoutMs(fields.timeoutMs, `node ${n.id} timeoutMs`);
+        if (timeoutMs != null || canPay) {
           nodeController = new AbortController();
           const onRunAbort = () => nodeController.abort(ac.signal.reason);
           ac.signal.addEventListener("abort", onRunAbort, { once: true });
           unlinkNode = () => ac.signal.removeEventListener("abort", onRunAbort);
           nodeSignal = nodeController.signal;
-          nodeTimer = startDeadline(nodeController, timedNode ? timeoutMs : null, `node timed out after ${timeoutMs}ms`, ac.signal);
+          nodeTimer = startDeadline(nodeController, timeoutMs, `node timed out after ${timeoutMs}ms`, ac.signal);
         }
         rec.started = true;
         emit({ type: "node-start", nodeId: n.id, name: displayName(n) });
@@ -623,7 +648,12 @@ export class Workflow {
     for (const o of this.outputs) {
       const rec = nodesRec[o.nodeId];
       if (!rec || !(rec.status === "done" || (rec.status === "gated" && rec.out))) continue;
-      const primary = o.type === "endpoint" ? endpointOutPort(byId.get(o.nodeId), rec.out) : o.ports[0];
+      let primary = o.ports[0];
+      if (o.type === "endpoint") primary = endpointOutPort(byId.get(o.nodeId), rec.out);
+      else if (o.type === "render3d") {
+        // Render 3D emits only one port. Settings and wires can change its mode after inspection.
+        primary = o.ports.find(p => Object.hasOwn(rec.out, p.name)) ?? primary;
+      }
       const value = this._wrapValue(rec.out[primary.name], primary.type);
       outputEntries.push([o.key, value], [o.nodeId, value]);
     }

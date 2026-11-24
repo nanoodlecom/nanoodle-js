@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { Workflow } from "../src/index.mjs";
+import { resolveSettingKey } from "../src/io.mjs";
 import { startMockServer, mockOpts, chatJson, PNG_B64 } from "./harness/mock-server.mjs";
 
 const fixture = (name) => fileURLToPath(new URL("./fixtures/" + name, import.meta.url));
@@ -118,6 +119,52 @@ test("settings override applies; wired setting refused; unknown setting lists ke
   await assert.rejects(wf.run({}, { settings: { nope: 1 } }), /unknown setting "nope".*n3\.model/s);
 });
 
+test("a wired canonical setting takes precedence over another node's friendly alias", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  srv.script("POST /api/v1/chat/completions", chatJson("ok"));
+
+  const wf = Workflow.fromJSON({
+    nodes: [
+      { id: "draft", type: "llm", name: "writer", fields: { model: "draft-model", prompt: "Draft prompt" } },
+      { id: "writer", type: "llm", name: "Final.Writer", fields: { model: "stored-model", prompt: "Actual prompt" } },
+      { id: "model", type: "text", fields: { text: "wired-model" } },
+    ],
+    links: [{ from: { node: "model", port: "text" }, to: { node: "writer", port: "model" } }],
+  }, mockOpts(srv));
+
+  for (const key of ["writer.model", "  WRITEr.MODEL  ", "Final.Writer.Model"]) {
+    await assert.rejects(wf.run({}, { settings: { [key]: "override-model" } }), /wired from another node/);
+  }
+  assert.equal(srv.requests.length, 0);
+
+  await wf.run({}, { settings: { Model: "override-model" } });
+  const sent = srv.of("POST /api/v1/chat/completions").map(({ json }) => [json.messages.at(-1).content, json.model]);
+  assert.deepEqual(Object.fromEntries(sent), { "Draft prompt": "override-model", "Actual prompt": "wired-model" });
+});
+
+test("dotted setting addresses respect exact node ID case and retain friendly aliases", () => {
+  const wf = Workflow.fromJSON({
+    nodes: [
+      { id: "chapter.writer", type: "llm", name: "First draft", fields: {} },
+      { id: "chapter.Writer", type: "llm", name: "Final.Draft", fields: {} },
+      { id: "alias", type: "llm", name: "chapter.Writer", fields: {} },
+      { id: "speech-node", type: "tts", fields: {} },
+      { id: "model", type: "text", fields: { text: "wired-model" } },
+    ],
+    links: [{ from: { node: "model", port: "text" }, to: { node: "chapter.writer", port: "model" } }],
+  }, noNet);
+  const key = (name) => resolveSettingKey(wf.graph, wf.settings, name).key;
+  assert.equal(key("chapter.writer.MAXTOKENS"), "chapter.writer.maxTokens");
+  assert.equal(key("chapter.Writer.MAXTOKENS"), "chapter.Writer.maxTokens");
+  assert.throws(() => key("chapter.WRITER.maxTokens"), /ambiguous.*chapter\.writer\.maxTokens.*chapter\.Writer\.maxTokens/);
+  assert.throws(() => key("chapter.writer.MODEL"), /wired from another node/);
+  assert.equal(key("chapter.Writer.MODEL"), "chapter.Writer.model");
+  assert.throws(() => key("chapter.WRITER.MODEL"), /ambiguous.*chapter\.Writer\.model.*chapter\.writer\.model \(wired\)/);
+  assert.equal(key("  FINAL.DRAFT.Model  "), "chapter.Writer.model");
+  assert.equal(key("Speech.voice"), "speech-node.voice");
+});
+
 test("duplicate sink display names get ' 2' suffixes; node-id keys always work", async () => {
   const wf = await Workflow.load(fixture("duplicate-names.json"), noNet);
   assert.deepEqual(wf.outputs.map((o) => o.key), ["Out", "Out 2", "Text"]);
@@ -135,6 +182,47 @@ test("duplicate input keys get ' 2' suffixes and stay addressable", async () => 
   const result = await wf.run({ Out: "a", "Out 2": "b", Text: "c" });
   assert.equal(result.get("n2"), "b");
   assert.equal(result.get("n3"), "c");
+});
+
+test("friendly input names cannot redirect canonical node addresses", async () => {
+  const wf = Workflow.fromJSON({
+    nodes: [
+      { id: "alias", type: "text", name: "chapter.writer.text", fields: { text: "first default" } },
+      { id: "other", type: "text", name: "CHAPTER.WRITER", fields: { text: "second default" } },
+      { id: "chapter.writer", type: "text", name: "Draft", fields: { text: "draft default" } },
+    ],
+  }, noNet);
+  assert.deepEqual(wf.inputs.map((i) => i.key), ["chapter.writer.text 2", "CHAPTER.WRITER 2", "Draft"]);
+  const byField = await wf.run({ "chapter.writer.TEXT": "draft", "CHAPTER.WRITER 2": "second" });
+  assert.equal(byField.get("chapter.writer"), "draft");
+  assert.equal(byField.get("alias"), "first default");
+  assert.equal(byField.get("other"), "second");
+  const byId = await wf.run({ "CHAPTER.WRITER": "bare id", "chapter.writer.text 2": "first" });
+  assert.equal(byId.get("chapter.writer"), "bare id");
+  assert.equal(byId.get("alias"), "first");
+});
+
+test("qualified input IDs preserve exact case and reserve wired fields", async () => {
+  const wf = Workflow.fromJSON({
+    nodes: [
+      { id: "source", type: "text", fields: { text: "wired" } },
+      { id: "draft", type: "llm", fields: {} },
+      { id: "Draft", type: "text", fields: { text: "original" } },
+      { id: "DRAFT", type: "text", fields: { text: "second" } },
+      { id: "alias", type: "text", name: "draft.prompt", fields: { text: "alias" } },
+    ],
+    links: [{ from: { node: "source", port: "text" }, to: { node: "draft", port: "prompt" } }],
+  }, noNet);
+  assert.equal(wf.inputs.find((i) => i.nodeId === "alias").key, "draft.prompt 2");
+  await assert.rejects(wf.run({ "DRAFT.PROMPT": "override" }), /wired from another node/);
+  await assert.rejects(wf.run({ "dRaFt.text": "override" }), /ambiguous.*Draft\.text.*DRAFT\.text/);
+
+  const local = Workflow.fromJSON({
+    nodes: wf.graph.nodes.filter((n) => n.type === "text"),
+  }, noNet);
+  const result = await local.run({ "Draft.TEXT": "first change", "DRAFT.text": "second change" });
+  assert.equal(result.get("Draft"), "first change");
+  assert.equal(result.get("DRAFT"), "second change");
 });
 
 test("field override: wire into llm 'system' beats the typed field", async (t) => {
@@ -196,8 +284,8 @@ test("author-marked optional input (fields.optional): derived, skippable, keeps 
       { id: "n3", type: "join", fields: { sep: "+" } },
     ],
     links: [
-      { from: { node: "n1", port: "text" }, to: { node: "n3", port: "text1" } },
-      { from: { node: "n2", port: "text" }, to: { node: "n3", port: "text2" } },
+      { from: { node: "n1", port: "text" }, to: { node: "n3", port: "a" } },
+      { from: { node: "n2", port: "text" }, to: { node: "n3", port: "b" } },
     ],
   }, noNet);
   const extra = wf.inputs.find((i) => i.nodeId === "n2");
@@ -206,6 +294,7 @@ test("author-marked optional input (fields.optional): derived, skippable, keeps 
   assert.equal(wf.inputs.find((i) => i.nodeId === "n1").optional, false);
   const result = await wf.run({ Text: "hi" });   // optional input omitted → runs, empty value
   assert.equal(result.nodes.n2.out.text, "");
+  assert.equal(result.nodes.n3.out.text, "hi");
   assert.equal(result.nodes.n2.status, "done");
 });
 

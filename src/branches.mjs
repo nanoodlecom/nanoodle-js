@@ -35,6 +35,7 @@ export function planBranches(graph, order) {
   }
   const skipped = new Set();
   return {
+    isRouted: id => selectors.has(id),
     // Call after this node's upstreams have settled. A failed router is left
     // to the usual upstream-error handling, which must also prevent execution.
     activeLinks(id, outFor) {

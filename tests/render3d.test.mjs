@@ -1,16 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
+import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { readFile } from "node:fs/promises";
+import { PassThrough } from "node:stream";
 import { Workflow } from "../src/index.mjs";
-import { render3dSceneFields, render3dMedia, findChromium } from "../src/render3d.mjs";
+import { unpackGlb } from "../src/gltf-scene.mjs";
+import { render3dSceneFields, render3dMedia, findChromium, waitForDevTools } from "../src/render3d.mjs";
 import { decodePng } from "../src/local-media.mjs";
+import { MP4CAT } from "../src/mp4cat.mjs";
 
 // render3d (Edge Styles S2): a local node that renders a GLB — camera,
 // clip plane (slice-3D), explode over scene-graph parts. The render tests
 // build a tiny two-cube GLB in-test (red cube + blue cube) and drive the
 // real headless Chromium when one is discoverable; they skip elsewhere.
 
-function twoCubeGlb() {
+function twoCubeGlb(images) {
   const FACES = [
     { n: [1, 0, 0], c: [[1, -1, 1], [1, -1, -1], [1, 1, -1], [1, 1, 1]] },
     { n: [-1, 0, 0], c: [[-1, -1, -1], [-1, -1, 1], [-1, 1, 1], [-1, 1, -1]] },
@@ -57,6 +62,7 @@ function twoCubeGlb() {
       { bufferView: 2, componentType: 5123, count: 36, type: "SCALAR" },
     ],
   };
+  if (images) gltf.images = images;
   const jsonBuf = Buffer.from(JSON.stringify(gltf));
   const pad4 = (b, fill) => Buffer.concat([b, Buffer.alloc((4 - (b.length % 4)) % 4, fill)]);
   const j = pad4(jsonBuf, 0x20), b = pad4(bin, 0);
@@ -67,11 +73,13 @@ function twoCubeGlb() {
   return Buffer.concat([head, jh, j, bh, b]);
 }
 
-const GLB_DATA_URL = "data:model/gltf-binary;base64," + twoCubeGlb().toString("base64");
+const GLB_BYTES = twoCubeGlb();
+const GLB_DATA_URL = "data:model/gltf-binary;base64," + GLB_BYTES.toString("base64");
+const gltfUrl = (json) => "data:model/gltf+json;base64," + Buffer.from(JSON.stringify(json)).toString("base64");
 
-const graph = (fields) => ({
+const graph = (fields, model = GLB_DATA_URL) => ({
   nodes: [
-    { id: "u", type: "mupload", fields: { model: GLB_DATA_URL } },
+    { id: "u", type: "mupload", fields: { model } },
     { id: "r", type: "render3d", fields: { width: "320", height: "240", ...fields } },
   ],
   links: [{ id: "l1", from: { node: "u", port: "model" }, to: { node: "r", port: "model" } }],
@@ -112,6 +120,9 @@ test("render budgets are checked before obtaining the model", async () => {
   await assert.rejects(render3dMedia(model, { width: 2049 }, opts), /dimensions/);
   await assert.rejects(render3dMedia(model, { mode: "video", fps: 60, duration: 10 }, opts), /240 frames/);
   await assert.rejects(render3dMedia(model, { mode: "video", width: 319 }, opts), /even dimensions/);
+  for (const duration of [0.1, 0.9]) {
+    await assert.rejects(render3dMedia(model, { mode: "video", fps: 1, duration }, opts), /at least one frame/);
+  }
 });
 
 test("render3d selects the primary workflow output for the render mode", () => {
@@ -119,25 +130,55 @@ test("render3d selects the primary workflow output for the render mode", () => {
   assert.equal(Workflow.fromJSON(graph({ mode: "video" })).outputs[0].ports[0].name, "video");
 });
 
-test("Chromium rejects a model that references an unbundled asset", async (t) => {
-  if (!(await findChromium())) { t.skip("no chromium discoverable"); return; }
-  let requests = 0;
-  const asset = createServer((_req, res) => { requests++; res.writeHead(404).end(); });
-  await new Promise(resolve => asset.listen(0, "127.0.0.1", resolve));
-  t.after(() => asset.close());
-  const glb = twoCubeGlb();
-  const model = JSON.parse(glb.subarray(20, 20 + glb.readUInt32LE(12)));
-  model.buffers[0].uri = `http://127.0.0.1:${asset.address().port}/model.bin`;
-  const url = "data:model/gltf+json;base64," + Buffer.from(JSON.stringify(model)).toString("base64");
+test("Chromium readiness survives a split address followed by a large stderr chunk", async () => {
+  const child = new EventEmitter();
+  child.stderr = new PassThrough();
+  const abort = new AbortController();
+  const ready = waitForDevTools(child, abort.signal);
+  child.stderr.write("DevTools listening on ws://127.0.0.1:1234/devtools/");
+  child.stderr.end("browser/test\n" + "diagnostic output\n".repeat(1000));
+  abort.abort(new Error("DevTools address was lost"));
+  assert.equal(await ready, "ws://127.0.0.1:1234/devtools/browser/test");
+});
+
+test("render3d rejects external glTF buffers and GLB images before starting Chromium", async (t) => {
+  const chrome = process.env.NANOODLE_CHROME;
+  process.env.NANOODLE_CHROME = process.execPath;
+  t.after(() => {
+    if (chrome === undefined) delete process.env.NANOODLE_CHROME;
+    else process.env.NANOODLE_CHROME = chrome;
+  });
+
+  const { json } = unpackGlb(GLB_BYTES);
+  json.buffers[0].uri = "https://example.invalid/model.bin";
+  await assert.rejects(render3dMedia(gltfUrl(json)), /self-contained model/);
+
+  const glb = twoCubeGlb([{ uri: "texture.png" }]);
+  const url = "data:model/gltf-binary;base64," + glb.toString("base64");
   await assert.rejects(render3dMedia(url), /self-contained model/);
-  assert.equal(requests, 0);
 });
 
 test("render3d node: renders both parts; explode separates; clip cuts", async (t) => {
   if (!(await findChromium())) { t.skip("no chromium discoverable"); return; }
-  const run = async (fields) => (await Workflow.fromJSON(graph(fields), { apiKey: "fixture" }).run({})).nodes.r.out;
+  const commands = [];
+  const send = WebSocket.prototype.send;
+  t.mock.method(WebSocket.prototype, "send", function (data) {
+    commands.push(JSON.parse(data));
+    return send.call(this, data);
+  });
+  const run = async (fields, model) => (await Workflow.fromJSON(graph(fields, model), { apiKey: "fixture" }).run({}, {
+    signal: AbortSignal.timeout(30_000),
+  })).nodes.r.out;
 
   const plain = await pixels((await run({ azimuth: "0", elevation: "0" })).image);
+  assert.equal(commands.some(command => command.method === "Target.createTarget"), false, "use Chromium's existing incognito page");
+  const targets = commands.findIndex(command => command.method === "Target.getTargets");
+  const attach = commands.findIndex(command => command.method === "Target.attachToTarget");
+  const navigate = commands.findIndex(command => command.method === "Page.navigate");
+  const probe = commands.findIndex(command => command.method === "Runtime.evaluate");
+  assert.ok(targets >= 0 && targets < attach && attach < navigate && navigate < probe);
+  assert.notEqual(commands[probe].params.awaitPromise, true, "a discarded document must not own the readiness wait");
+
   assert.equal(plain.width, 320);
   assert.equal(plain.height, 240);
   const red = countColor(plain, isRed), blue = countColor(plain, isBlue);
@@ -152,7 +193,37 @@ test("render3d node: renders both parts; explode separates; clip cuts", async (t
   const afterClip = countColor(clipped, isRed) + countColor(clipped, isBlue);
   assert.ok(afterClip < (red + blue) * 0.75, "clip plane removes the +x half: " + afterClip + " vs " + (red + blue));
 
-  const iso = await pixels((await run({ azimuth: "0", elevation: "0", isolate: "0" })).image);
+  const { json, bin } = unpackGlb(GLB_BYTES);
+  json.buffers[0].uri = "data:application/octet-stream;base64," + Buffer.from(bin).toString("base64");
+  const iso = await pixels((await run({ azimuth: "0", elevation: "0", isolate: "0" }, gltfUrl(json))).image);
   assert.ok(countColor(iso, isRed) > 500);
   assert.equal(countColor(iso, isBlue), 0);
+});
+
+test("render3d video rounds to one frame and renders the start of each sweep", async (t) => {
+  if (!(await findChromium())) return t.skip("no chromium discoverable");
+  if (spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status !== 0) return t.skip("no ffmpeg on PATH");
+
+  const poses = [];
+  const send = WebSocket.prototype.send;
+  const apply = "window.__render3d.apply(";
+  t.mock.method(WebSocket.prototype, "send", function (data) {
+    const { method, params } = JSON.parse(data);
+    if (method === "Runtime.evaluate" && params.expression.startsWith(apply)) {
+      poses.push(JSON.parse(params.expression.slice(apply.length, -1)));
+    }
+    return send.call(this, data);
+  });
+
+  const fox = await readFile(new URL("./fixtures/fox/Fox.glb", import.meta.url));
+  const model = "data:model/gltf-binary;base64," + fox.toString("base64");
+  const { video } = await render3dMedia(model, {
+    mode: "video", width: 64, height: 64, fps: 4, duration: 0.3,
+    azimuth: 17, turntable: 80, animClip: 0, animTime: 2, clipAxis: "x", clipSweep: true,
+  }, { signal: AbortSignal.timeout(30_000) });
+  assert.match(video, /^data:video\/mp4;base64,/);
+  const [track] = MP4CAT.parseMp4(Buffer.from(video.split(",")[1], "base64")).tracks;
+  assert.equal(track.samples.length, 1);
+  assert.equal(track.samples[0].dur / track.timescale, 0.25);
+  assert.deepEqual(poses.map(({ azimuth, animTime, clipPos }) => [azimuth, animTime, clipPos]), [[17, 0, 1.05]]);
 });

@@ -14,7 +14,7 @@ import {
   Workflow, mediaFromFile, MEDIA_INLINE_MAX, coerceMediaInput,
   wiredFramesFloor, deriveSettings,
 } from "../src/index.mjs";
-import { trimAudioToWav } from "../src/local-media.mjs";
+import { encodeWavMono, trimAudioToWav } from "../src/local-media.mjs";
 import { bytesToDataUrl } from "../src/media.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -60,6 +60,46 @@ test("vframes: frames=1 with frame3 wired still emits frame3 (no starve)", async
   assert.match(result.get("Out").url, /^data:image\//);
 });
 
+test("vframes counts supplied by wires honor outbound frames and the extraction interval", async (t) => {
+  if (!hasFfmpeg) return t.skip("ffmpeg not on PATH");
+  const vid = await mediaFromFile(media("clipA.mp4"));
+  for (const [mode, selection] of [
+    ["legacy gap", { gap: "0.04" }],
+    ["stride and range", { stride: "2", startSec: "0.04", endSec: "0.64" }],
+  ]) {
+    await t.test(mode, async () => {
+      const wf = Workflow.fromJSON({
+        nodes: [
+          { id: "v", type: "vupload", fields: {} },
+          { id: "count", type: "text", fields: { text: "1" } },
+          { id: "f", type: "vframes", fields: { frames: "1", dir: "start", ...selection } },
+          { id: "r", type: "resize", name: "Out", fields: { mode: "fit", width: "32", height: "32" } },
+        ],
+        links: [
+          { from: { node: "v", port: "video" }, to: { node: "f", port: "video" } },
+          { from: { node: "count", port: "text" }, to: { node: "f", port: "frames" } },
+          { from: { node: "f", port: "frame3" }, to: { node: "r", port: "image" } },
+        ],
+      }, { apiKey: null, fetch: () => assert.fail("unexpected network request") });
+      for (const [requested, emitted] of [["1", 3], ["5", 5]]) {
+        const result = await wf.run({ Video: vid, "count.text": requested });
+        assert.equal(Object.keys(result.nodes.f.out).length, emitted);
+        assert.equal(result.nodes.r.status, "done");
+        assert.match(result.get("Out").url, /^data:image\//);
+      }
+      if (selection.stride) {
+        await assert.rejects(wf.run({ Video: vid }, { settings: { "f.endSec": 0.13 } }), error => {
+          // Two samples fit from 0.04 to 0.13 at stride 2. The floor cannot expand that interval.
+          assert.deepEqual(Object.keys(error.result.nodes.f.out), ["frame1", "frame2"]);
+          assert.equal(error.result.nodes.r.error, "no image input");
+          return true;
+        });
+      }
+      assert.equal(wf.graph.nodes.find(node => node.id === "f").fields.frames, "1");
+    });
+  }
+});
+
 test("deriveSettings: vframes frames min rises to wired floor", () => {
   const graph = {
     nodes: [{ id: "f", type: "vframes", fields: { frames: "1" } }],
@@ -71,6 +111,25 @@ test("deriveSettings: vframes frames min rises to wired floor", () => {
   const frames = settings.find((s) => s.field === "frames");
   assert.ok(frames);
   assert.equal(frames.min, 3);
+});
+
+test("vframes source wires use canonical frame numbers within the extraction limit", async () => {
+  const graph = (port) => ({
+    nodes: [
+      { id: "f", type: "vframes", fields: { frames: "1" } },
+      { id: "r", type: "resize", fields: {} },
+    ],
+    links: [{ from: { node: "f", port }, to: { node: "r", port: "image" } }],
+  });
+  const options = { apiKey: null, quiet: true };
+  const valid = Workflow.fromJSON(graph("frame48"), options);
+  assert.deepEqual(valid.warnings, []);
+  assert.equal(valid.settings.find(s => s.key === "f.frames").min, 48);
+  for (const port of ["frame0", "frame01", "frame49"]) {
+    const invalid = Workflow.fromJSON(graph(port), options);
+    assert.equal(invalid.warnings.length, 1);
+    await assert.rejects(invalid.run(), { code: "invalid-source-port" });
+  }
 });
 
 /* ---------- timeout / abort ---------- */
@@ -154,9 +213,7 @@ test("local-only graph accepts oversized data: media input", async () => {
 });
 
 test("network graph still refuses oversized audio inputs before any spend", async () => {
-  // Image inputs are deferred to the consuming node (fitImage downscales them —
-  // see inline-image-fit.test.mjs); audio/video can't be shrunk that way, so the
-  // early load-time guard stays for them.
+  // Keep the preflight guard on a raw audio input that goes directly to a provider.
   const bigUrl = "data:audio/wav;base64," + "A".repeat(Math.floor(MEDIA_INLINE_MAX));
   assert.ok(bigUrl.length > MEDIA_INLINE_MAX);
   const wf = Workflow.fromJSON({
@@ -167,8 +224,42 @@ test("network graph still refuses oversized audio inputs before any spend", asyn
     links: [
       { from: { node: "u", port: "audio" }, to: { node: "s", port: "audio" } },
     ],
-  }, { apiKey: "k" });
+  }, { apiKey: "k", baseUrl: "http://127.0.0.1:1", fetch: () => assert.fail("unexpected provider request") });
   await assert.rejects(() => wf.run({ Audio: bigUrl }), /too large to send inline/);
+});
+
+test("oversized audio is accepted when all uses go through local Trim first", async () => {
+  const sampleRate = 48000;
+  const wav = encodeWavMono(new Float32Array(40 * sampleRate), sampleRate);
+  const audio = bytesToDataUrl(wav, "audio/wav");
+  assert.ok(audio.length > MEDIA_INLINE_MAX);
+  const wire = (from, to) => ({ from: { node: from, port: "audio" }, to: { node: to, port: "audio" } });
+  const graph = {
+    nodes: [
+      { id: "source", type: "aupload" },
+      { id: "clip", type: "trim", fields: { start: "0", length: "1" } },
+      { id: "asr", type: "transcribe", fields: { model: "fixture-asr" } },
+    ],
+    links: [wire("source", "clip"), wire("clip", "asr")],
+  };
+  const uploads = [];
+  const options = {
+    apiKey: "offline",
+    baseUrl: "http://127.0.0.1:1",
+    async fetch(url, { body }) {
+      assert.equal(url, "http://127.0.0.1:1/api/v1/audio/transcriptions");
+      uploads.push(body.get("file").size);
+      return Response.json({ text: "short audio", cost: 0 });
+    },
+  };
+  const result = await Workflow.fromJSON(graph, options).run({ Audio: audio });
+  assert.equal(result.get("asr"), "short audio");
+  assert.deepEqual(uploads, [32044]);
+
+  graph.nodes.push({ id: "direct", type: "transcribe", fields: { model: "fixture-asr" } });
+  graph.links.push(wire("source", "direct"));
+  await assert.rejects(Workflow.fromJSON(graph, options).run({ Audio: audio }), /too large to send inline/);
+  assert.deepEqual(uploads, [32044]);
 });
 
 /* ---------- pure WAV truncated header clamp ---------- */

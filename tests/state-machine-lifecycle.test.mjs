@@ -31,6 +31,67 @@ for (const scope of ['run', 'node']) {
   });
 }
 
+for (const scope of ['run', 'node']) {
+  test(`${scope} rejects invalid timeout values before starting any request`, async () => {
+    const events = [];
+    let requests = 0;
+    for (const timeoutMs of [2_147_483_648, '2147483648', Infinity, NaN, -1, '1e-500', '500ms']) {
+      const data = graph(scope === 'node' ? { timeoutMs } : {});
+      data.nodes.unshift({ id: 'first', type: 'image', fields: { prompt: 'hi', model: 'test' } });
+      const wf = Workflow.fromJSON(data, { apiKey: 'k', fetch: async () => {
+        requests++;
+        return json({ data: [{ url: 'https://cdn.invalid/image.png' }] });
+      } });
+      await assert.rejects(wf.run({}, {
+        ...(scope === 'run' ? { timeoutMs } : {}),
+        onProgress: event => events.push(event),
+      }), {
+        code: 'invalid-timeout',
+        message: /^(?:run|node n) timeoutMs expects milliseconds between 0 and 2147483647$/,
+      });
+    }
+    assert.equal(requests, 0);
+    assert.deepEqual(events, []);
+  });
+}
+
+test('run and node timers support zero, fractional milliseconds, and the largest safe delay', async (t) => {
+  const delays = [];
+  const schedule = globalThis.setTimeout;
+  t.mock.method(performance, 'now', () => 0);
+  t.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) => {
+    delays.push(delay);
+    return schedule(callback, delay, ...args);
+  });
+  for (const [timeoutMs, expected] of [[0, []], [1.5, [2, 2]], [2_147_483_647, [2_147_483_647, 2_147_483_647]]]) {
+    delays.length = 0;
+    const wf = Workflow.fromJSON(graph({ timeoutMs: String(timeoutMs) }), {
+      apiKey: 'k', fetch: async () => json({ data: [{ url: 'https://cdn.invalid/image.png' }] }),
+    });
+    assert.equal((await wf.run({}, { timeoutMs })).nodes.n.status, 'done');
+    assert.deepEqual(delays, expected);
+  }
+});
+
+test('a wired node deadline is checked before its consuming provider is called', async () => {
+  const data = graph({ timeoutMs: 1000 });
+  data.nodes.unshift({ id: 'limit', name: 'Limit', type: 'text', fields: { text: '0' } });
+  data.links.push({ from: { node: 'limit', port: 'text' }, to: { node: 'n', port: 'timeoutMs' } });
+  let requests = 0;
+  const wf = Workflow.fromJSON(data, { apiKey: 'k', fetch: async () => {
+    requests++;
+    return json({ data: [{ url: 'https://cdn.invalid/image.png' }] });
+  } });
+  assert.equal((await wf.run()).nodes.n.status, 'done');
+  await assert.rejects(wf.run({ Limit: '2147483648' }), (e) => {
+    assert.ok(e instanceof RunError);
+    assert.equal(e.result.errors[0].code, 'invalid-timeout');
+    assert.match(e.message, /node n timeoutMs expects milliseconds/);
+    return true;
+  });
+  assert.equal(requests, 1);
+});
+
 test('a response fulfilled after the deadline retains billing but cannot publish outputs', async (t) => {
   let now = 0;
   const requests = [];
@@ -68,7 +129,11 @@ test('an invoice decoded after the deadline never reaches the payment callback',
 });
 
 for (const mode of ['run timeout', 'outer abort', 'node timeout during publication']) {
-  test(`${mode} settles even when injected I/O ignores cancellation`, { timeout: 1500 }, async () => {
+  test(`${mode} settles even when injected I/O ignores cancellation`, { timeout: 1500 }, async (t) => {
+    // Enter the held I/O before expiring the deadline, even on a busy runner.
+    let now = 0;
+    t.mock.method(performance, 'now', () => now);
+    t.mock.timers.enable({ apis: ['setTimeout'] });
     let release, started;
     const ready = new Promise(resolve => { started = resolve; });
     const held = new Promise(resolve => { release = resolve; });
@@ -80,21 +145,26 @@ for (const mode of ['run timeout', 'outer abort', 'node timeout during publicati
       return held;
     } });
     const run = wf.run({}, { ...(mode === 'run timeout' ? { timeoutMs: 30 } : {}), signal: controller.signal, onProgress: e => events.push(e) });
-    await ready;
-    if (mode === 'outer abort') controller.abort(new Error('stop now'));
     let result;
+    const settled = assert.rejects(run, e => {
+      assert.ok(e instanceof RunError);
+      assert.equal(e.result.nodes.n.status, 'error');
+      assert.match(e.message, /timed out|stop now/);
+      result = e.result;
+      return true;
+    });
     try {
-      await assert.rejects(run, e => {
-        assert.ok(e instanceof RunError);
-        assert.equal(e.result.nodes.n.status, 'error');
-        assert.match(e.message, /timed out|stop now/);
-        result = e.result;
-        return true;
-      });
+      await Promise.race([ready, settled.then(() => assert.fail('run ended before starting the held I/O'))]);
+      if (mode === 'outer abort') controller.abort(new Error('stop now'));
+      else {
+        now += 30;
+        t.mock.timers.tick(30);
+      }
+      await settled;
       const snapshot = JSON.stringify(result);
       const eventCount = events.length;
       release(mode.startsWith('node') ? new Response('bytes') : json({ data: [{ url: 'https://cdn.invalid/image.png' }], cost: 0.9 }));
-      await new Promise(resolve => setTimeout(resolve, 20));
+      await nextTurn();
       assert.equal(JSON.stringify(result), snapshot);
       assert.equal(events.length, eventCount);
     } finally { release(json({ data: [{ url: 'https://cdn.invalid/image.png' }] })); }
