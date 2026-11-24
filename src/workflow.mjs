@@ -165,6 +165,13 @@ function isPlainObject(v) {
   return proto === Object.prototype || proto === null;
 }
 
+function isTrimmedAudioInput(entry, graph, byId) {
+  if (entry.kind !== "audio" || byId.get(entry.nodeId)?.type !== "aupload") return false;
+  const destinations = graph.links.filter(link => link.from.node === entry.nodeId);
+  return destinations.length > 0 && destinations.every(({ from, to }) =>
+    from.port === "audio" && to.port === "audio" && byId.get(to.node)?.type === "trim");
+}
+
 export class Workflow {
   /**
    * @param {object} graphData parsed noodle-graph.json
@@ -312,7 +319,10 @@ export class Workflow {
     if (inputConflict) throw new NanoodleError(inputConflict, { code: COMPETING_INPUT_WIRES });
     const explicit = new Set();
     for (const { entry, value } of inputAssignments) {
-      effFields.get(entry.nodeId)[entry.field] = this._coerceInput(entry, value, mediaCoerceOpts);
+      // When all uses go through Trim, only the trimmed output can reach a request.
+      const opts = hasNetwork && isTrimmedAudioInput(entry, graph, byId)
+        ? { enforceInlineMax: false } : mediaCoerceOpts;
+      effFields.get(entry.nodeId)[entry.field] = this._coerceInput(entry, value, opts);
       explicit.add(entry);
     }
     // defaults + required check
