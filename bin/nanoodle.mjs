@@ -139,13 +139,13 @@ async function loadWorkflow(graphPath, { keyFlag, envFile, pay }) {
   return Workflow.load(graphPath, { apiKey, payment, baseUrl: process.env.NANOGPT_BASE_URL || undefined });
 }
 
-function printRunSummary(result, outputs) {
+function printRunSummary(result, outputs, outputErrors = []) {
   console.log(JSON.stringify({
     outputs,
     costUsd: result.costUsd,
     costExact: result.costExact,
     remainingBalance: result.remainingBalance,
-    errors: result.errors,
+    errors: [...result.errors, ...outputErrors],
     gated: result.gated || [],
     ...(result.payments?.length ? { payments: result.payments } : {}),
     nodes: Object.fromEntries(Object.entries(result.nodes).map(([id, r]) => [id, {
@@ -321,26 +321,35 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
   let dirMade = false;
   const printable = Object.create(null);
   const savedNames = new Set();
+  const outputErrors = [];
   for (const o of wf.outputs) {
     const value = result.outputs[o.key];
     if (value === undefined) { printable[o.key] = null; continue; }
     if (value instanceof MediaRef) {
-      if (!dirMade) { await mkdir(dir, { recursive: true }); dirMade = true; }
-      const safe = o.key.replace(/[^\w.-]+/g, "_");
-      // fetch before naming: hosted media only reveals its mime via the response Content-Type
-      const data = await value.bytes();
-      const ext = extForMime(value.mime || sniffMime(data));
-      let filename = safe + "." + ext;
-      // Friendly keys can collapse during sanitization ("A B" / "A_B").
-      // Also avoid case-only collisions on case-insensitive filesystems.
-      for (let suffix = 2; savedNames.has(filename.toLowerCase()); suffix++) {
-        filename = safe + "_" + suffix + "." + ext;
+      try {
+        if (!dirMade) { await mkdir(dir, { recursive: true }); dirMade = true; }
+        const safe = o.key.replace(/[^\w.-]+/g, "_");
+        // fetch before naming: hosted media only reveals its mime via the response Content-Type
+        const data = await value.bytes();
+        const ext = extForMime(value.mime || sniffMime(data));
+        let filename = safe + "." + ext;
+        // Friendly keys can collapse during sanitization ("A B" / "A_B").
+        // Also avoid case-only collisions on case-insensitive filesystems.
+        for (let suffix = 2; savedNames.has(filename.toLowerCase()); suffix++) {
+          filename = safe + "_" + suffix + "." + ext;
+        }
+        savedNames.add(filename.toLowerCase());
+        const path = join(dir, filename);
+        await writeFile(path, data);
+        printable[o.key] = path;
+        if (!quiet) console.error(`${o.key}: saved ${path}`);
+      } catch (error) {
+        const message = `could not save output "${o.key}" — ${error?.message || String(error)}`;
+        outputErrors.push({ nodeId: o.nodeId, name: o.key, code: "output-save-failed", message });
+        printable[o.key] = null;
+        process.exitCode = 1;
+        console.error("error: " + message);
       }
-      savedNames.add(filename.toLowerCase());
-      const path = join(dir, filename);
-      await writeFile(path, data);
-      printable[o.key] = path;
-      if (!quiet) console.error(`${o.key}: saved ${path}`);
     } else {
       printable[o.key] = value;
       if (!quiet) console.error(`${o.key}: ${value}`);
@@ -348,7 +357,7 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
   }
 
   // the run summary is ALWAYS the JSON on stdout (contract shared with nanoodle-py and the docs)
-  printRunSummary(result, printable);
+  printRunSummary(result, printable, outputErrors);
   if (!quiet) {
     const approx = result.costExact ? "" : "≥ ";
     console.error(`cost: ${approx}$${result.costUsd}${result.remainingBalance != null ? ` · balance: $${result.remainingBalance}` : ""}`);
