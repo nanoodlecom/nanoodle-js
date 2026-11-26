@@ -122,7 +122,10 @@ async function urlBytes(url, fetchFn, signal) {
 
 async function writeInput(dir, name, url, fetchFn, signal) {
   await ensureNodeDeps();
-  const bytes = await urlBytes(url, fetchFn, signal);
+  return writeInputBytes(dir, name, url, await urlBytes(url, fetchFn, signal));
+}
+
+async function writeInputBytes(dir, name, url, bytes) {
   // preserve a sensible extension so ffmpeg picks the demuxer
   let ext = ".bin";
   if (/^data:/i.test(String(typeof url === "object" ? url.url : url))) {
@@ -740,13 +743,14 @@ export async function trimAudioToWav(url, start, len, rate = 16000, { fetch: fet
     }
   }
 
-  return trimAudioToWavFfmpeg(url, start, len, rate, { fetch: fetchFn, wholeIfBlank, signal });
+  // The format check already loaded the input. Decode those same bytes if PCM trimming is unavailable.
+  return trimAudioToWavFfmpeg(url, bytes, start, len, rate, { wholeIfBlank, signal });
 }
 
-async function trimAudioToWavFfmpeg(url, start, len, rate = 16000, { fetch: fetchFn, wholeIfBlank = false, signal } = {}) {
+async function trimAudioToWavFfmpeg(url, bytes, start, len, rate, { wholeIfBlank, signal }) {
   return withTemp(async (dir) => {
     throwIfAborted(signal);
-    const inPath = await writeInput(dir, "in", url, fetchFn, signal);
+    const inPath = await writeInputBytes(dir, "in", url, bytes);
     const outPath = join(dir, "out.wav");
     const s = Math.max(0, Number(start) || 0);
 
