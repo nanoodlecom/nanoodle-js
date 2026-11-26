@@ -90,7 +90,7 @@ on failure.
 - `--input k=@path` — read a file (media as media; `.txt` / `.md` / `.json` as text)
 - `--set k=v` — override a setting (`n3.model=flux-pro`)
 - `--out dir` — where media outputs land (default `./noodle-out`)
-- `--timeout ms` — overall run timeout in decimal milliseconds, from `0` to `2147483647`. Omit it or pass `0` to leave the run without an overall deadline.
+- `--timeout ms` — deadline for the run and its media downloads, in decimal milliseconds from `0` to `2147483647`. Omit it or pass `0` to run without this deadline.
 - `--json` — quiet mode: skip the stderr progress lines (the JSON summary is printed either way)
 - `--env-file path` — load `NANOGPT_API_KEY` from a `.env`-style file (`--key` wins if both are set)
 
