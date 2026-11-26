@@ -20,6 +20,7 @@ import process from "node:process";
 import { MEDIA_INPUT_KINDS } from "../src/io.mjs";
 import { Workflow, NanoodleError, RunError, mediaFromFile } from "../src/index.mjs";
 import { MediaRef, extForMime, sniffMime } from "../src/media.mjs";
+import { startDeadline, throwIfAborted } from "../src/deadline.mjs";
 
 // Node schedules a 1 ms timer for delays above the signed 32-bit limit.
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
@@ -49,7 +50,7 @@ flags:
   --pay         accountless run — no API key or account: each paid call prints a Nano (XNO)
                 invoice as a scannable QR + nano: URI on stderr and waits for the deposit
                 (x402; ignores any configured key; self-custody wallet does the send)
-  --timeout ms  overall run timeout (0 disables it; maximum ${MAX_TIMEOUT_MS} ms)
+  --timeout ms  run and media-download timeout (0 disables it; maximum ${MAX_TIMEOUT_MS} ms)
 
 examples:
   # scaffold the starter graph and see its inputs/outputs — no API key needed
@@ -284,6 +285,7 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
   // ---- run ----
   let result;
   let started = false;
+  let runStartedAt;
   try {
     const inputs = Object.create(null);
     for (const arg of inputArgs) {
@@ -295,6 +297,7 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
       const [k, v] = parseKv(arg, "--set");
       settings[k] = v;
     }
+    runStartedAt = performance.now();
     result = await wf.run(inputs, {
       settings, timeoutMs,
       onProgress: (e) => {
@@ -322,15 +325,26 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
   const printable = Object.create(null);
   const savedNames = new Set();
   const outputErrors = [];
+  // Workflow returns lazy media. Downloads share the original budget instead
+  // of starting a fresh timeout after generation.
+  const outputController = new AbortController();
+  const outputSignal = outputController.signal;
+  const outputTimer = timeoutMs > 0
+    ? startDeadline(outputController, Math.max(0, timeoutMs - (performance.now() - runStartedAt)),
+      `run timed out after ${timeoutMs}ms`)
+    : null;
   for (const o of wf.outputs) {
     const value = result.outputs[o.key];
     if (value === undefined) { printable[o.key] = null; continue; }
     if (value instanceof MediaRef) {
       try {
+        throwIfAborted(outputSignal);
         if (!dirMade) { await mkdir(dir, { recursive: true }); dirMade = true; }
+        throwIfAborted(outputSignal);
         const safe = o.key.replace(/[^\w.-]+/g, "_");
         // fetch before naming: hosted media only reveals its mime via the response Content-Type
-        const data = await value.bytes();
+        const data = await value.bytes({ signal: outputSignal });
+        throwIfAborted(outputSignal);
         const ext = extForMime(value.mime || sniffMime(data));
         let filename = safe + "." + ext;
         // Friendly keys can collapse during sanitization ("A B" / "A_B").
@@ -355,6 +369,7 @@ then: NANOGPT_API_KEY=... nanoodle run ${dest} --input Text="your idea"`);
       if (!quiet) console.error(`${o.key}: ${value}`);
     }
   }
+  if (outputTimer) clearTimeout(outputTimer);
 
   // the run summary is ALWAYS the JSON on stdout (contract shared with nanoodle-py and the docs)
   printRunSummary(result, printable, outputErrors);

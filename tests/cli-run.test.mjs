@@ -326,6 +326,36 @@ test("CLI reports a failed output directory without losing the run summary", asy
   assert.equal(await readFile(join(cwd, "blocked"), "utf8"), "existing file");
 });
 
+test("CLI media downloads share the workflow timeout and keep the partial summary", async (t) => {
+  const srv = await startMockServer();
+  t.after(() => srv.close());
+  // Each request fits the deadline on its own, but their combined time does not.
+  srv.script("POST /render", {
+    delayMs: 700, json: { data: [{ url: srv.url + "/media/slow.png" }] },
+  });
+  srv.script("GET /media/slow.png", {
+    delayMs: 850, headers: { "content-type": "image/png" }, body: Buffer.from(PNG_B64, "base64"),
+  });
+  const cwd = await mkdtemp(join(tmpdir(), "nanoodle-cli-output-timeout-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  await writeFile(join(cwd, "graph.json"), JSON.stringify({
+    nodes: [
+      { id: "remote", type: "endpoint", name: "Remote", fields: { url: srv.url + "/render", mode: "image", prompt: "fixture" } },
+      { id: "note", type: "text", name: "Note", fields: { text: "keep this output" } },
+    ],
+  }));
+  const r = await runCli(["run", "graph.json", "--timeout", "1200", "--json"], { cwd, env: { NANOGPT_BASE_URL: srv.url } });
+  assert.equal(r.status, 1, r.stderr);
+  const summary = JSON.parse(r.stdout);
+  assert.deepEqual(summary.outputs, { Remote: null, Note: "keep this output" });
+  assert.equal(summary.nodes.remote.status, "done");
+  assert.equal(summary.errors.length, 1);
+  assert.equal(summary.errors[0].code, "output-save-failed");
+  assert.match(summary.errors[0].message, /run timed out after 1200ms/);
+  assert.deepEqual(srv.requests.map(req => req.method + " " + req.path), ["POST /render", "GET /media/slow.png"]);
+  await assert.rejects(stat(join(cwd, "noodle-out", "Remote.png")), { code: "ENOENT" });
+});
+
 test("CLI contract: a closed ⚖️ Decide gate exits 0 and reports gated, not failed", async (t) => {
   const srv = await startMockServer();
   t.after(() => srv.close());
