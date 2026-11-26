@@ -956,14 +956,16 @@ export async function concatVideos(urls, dedup = true, { fetch: fetchFn, onProgr
   if (!urls || urls.length < 2) throw new NanoodleError("wire at least two clips to combine");
   throwIfAborted(signal);
 
-  // Pure path: load all bytes, try MP4CAT (exact browser primary path)
+  // Load each clip once. A failed remux can hand the same bytes to FFmpeg.
+  const clips = [];
+  for (let i = 0; i < urls.length; i++) {
+    throwIfAborted(signal);
+    if (onProgress) onProgress(`loading clip ${i + 1}/${urls.length}…`);
+    const url = urls[i];
+    clips.push({ url, bytes: await urlBytes(url, fetchFn, signal) });
+  }
   try {
-    const bufs = [];
-    for (let i = 0; i < urls.length; i++) {
-      throwIfAborted(signal);
-      if (onProgress) onProgress(`loading clip ${i + 1}/${urls.length}…`);
-      bufs.push(await urlBytes(urls[i], fetchFn, signal));
-    }
+    const bufs = clips.map(clip => clip.bytes);
     if (bufs.every((b) => MP4CAT.isMp4(b)) && MP4CAT.mp4ParamsMatch(bufs)) {
       if (onProgress) onProgress("combining…");
       // Browser remux never applies dedup (would drop a keyframe).
@@ -971,24 +973,20 @@ export async function concatVideos(urls, dedup = true, { fetch: fetchFn, onProgr
       return dataUrlFromBytes(out, "video/mp4");
     }
   } catch (e) {
-    if (e && (e.code === "aborted" || e.code === "timeout")) throw e;
-    if (e instanceof NanoodleError) {
-      if (/wire at least two|no media|download media|aborted|timed out/i.test(e.message || "")) throw e;
-      throw e; // other deliberate errors (not remux glitches)
-    }
+    if (e instanceof NanoodleError || e?.code === "aborted" || e?.code === "timeout") throw e;
     // MP4CAT throws plain Error on parse issues → fall through to ffmpeg
   }
 
-  return concatVideosFfmpeg(urls, dedup, { fetch: fetchFn, onProgress, signal });
+  return concatVideosFfmpeg(clips, dedup, { onProgress, signal });
 }
 
-async function concatVideosFfmpeg(urls, dedup = true, { fetch: fetchFn, onProgress, signal } = {}) {
+async function concatVideosFfmpeg(clips, dedup, { onProgress, signal }) {
   return withTemp(async (dir) => {
     const paths = [];
-    for (let i = 0; i < urls.length; i++) {
+    for (const [i, clip] of clips.entries()) {
       throwIfAborted(signal);
-      if (onProgress) onProgress(`loading clip ${i + 1}/${urls.length}…`);
-      paths.push(await writeInput(dir, `c${i}`, urls[i], fetchFn, signal));
+      paths.push(await writeInputBytes(dir, `c${i}`, clip.url, clip.bytes));
+      clip.bytes = null;
     }
 
     // When dedup: trim ~1/30s from the start of clips 2..N (approximate seam-frame drop —

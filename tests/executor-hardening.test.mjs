@@ -315,6 +315,49 @@ test("Trim reads a hosted AAC once when falling back to FFmpeg", async (t) => {
   assert.deepEqual(server.requests.map(request => request.method + " " + request.path), ["GET /once.aac"]);
 });
 
+test("Combine reads each hosted clip once when falling back to FFmpeg", async (t) => {
+  if (!hasFfmpeg) return t.skip("ffmpeg not on PATH");
+  const server = await startMockServer();
+  t.after(() => server.close());
+  const urls = [];
+  for (const name of ["clipA", "clipB"]) {
+    const mkv = spawnSync("ffmpeg", [
+      "-v", "error", "-i", media(name + ".mp4"), "-map", "0:v:0", "-c", "copy", "-f", "matroska", "pipe:1",
+    ]);
+    assert.equal(mkv.status, 0, mkv.stderr?.toString());
+    const path = `/${name}.mkv`;
+    urls.push(server.url + path);
+    server.script("GET " + path, [
+      { headers: { "content-type": "video/x-matroska" }, body: mkv.stdout },
+      { status: 410, body: "URL already used" },
+    ]);
+  }
+
+  const wf = Workflow.fromJSON({
+    nodes: [
+      ...urls.map((video, i) => ({ id: `clip${i + 1}`, type: "vupload", fields: { video } })),
+      { id: "combined", type: "combine", fields: { dedup: false } },
+    ],
+    links: urls.map((_, i) => ({
+      from: { node: `clip${i + 1}`, port: "video" },
+      to: { node: "combined", port: `clip${i + 1}` },
+    })),
+  }, {
+    apiKey: null, baseUrl: server.url,
+    fetch(target, options) {
+      assert.ok(urls.includes(String(target)));
+      return globalThis.fetch(target, options);
+    },
+  });
+  const result = await wf.run();
+  const output = result.get("combined");
+  assert.equal(output.mime, "video/mp4");
+  assert.equal(Buffer.from(await output.bytes()).toString("ascii", 4, 8), "ftyp");
+  assert.deepEqual(server.requests.map(request => request.method + " " + request.path), [
+    "GET /clipA.mkv", "GET /clipB.mkv",
+  ]);
+});
+
 /* ---------- custom fetch reaches local media ---------- */
 
 test("custom fetch is used for https media in local resize", async () => {
