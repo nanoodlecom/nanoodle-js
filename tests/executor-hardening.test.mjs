@@ -16,6 +16,7 @@ import {
 } from "../src/index.mjs";
 import { encodeWavMono, trimAudioToWav } from "../src/local-media.mjs";
 import { bytesToDataUrl } from "../src/media.mjs";
+import { startMockServer } from "./harness/mock-server.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const media = (name) => join(here, "fixtures", "media", name);
@@ -279,6 +280,39 @@ test("trim pure: truncated WAV data chunk does not throw RangeError", async () =
   const url = bytesToDataUrl(new Uint8Array(ab), "audio/wav");
   const out = await trimAudioToWav(url, 0, 0.005, 16000);
   assert.match(out, /^data:audio\/wav/);
+});
+
+test("Trim reads a hosted AAC once when falling back to FFmpeg", async (t) => {
+  if (!hasFfmpeg) return t.skip("ffmpeg not on PATH");
+  const aac = spawnSync("ffmpeg", [
+    "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+    "-t", "0.3", "-c:a", "aac", "-f", "adts", "pipe:1",
+  ]);
+  assert.equal(aac.status, 0, aac.stderr?.toString());
+  const server = await startMockServer();
+  t.after(() => server.close());
+  const url = server.url + "/once.aac";
+  server.script("GET /once.aac", [
+    { headers: { "content-type": "audio/aac" }, body: aac.stdout },
+    { status: 410, body: "URL already used" },
+  ]);
+
+  const wf = Workflow.fromJSON({
+    nodes: [
+      { id: "source", type: "aupload", fields: { audio: url } },
+      { id: "trim", type: "trim", fields: { start: "0.05", length: "0.15" } },
+    ],
+    links: [{ from: { node: "source", port: "audio" }, to: { node: "trim", port: "audio" } }],
+  }, {
+    apiKey: null, baseUrl: server.url,
+    fetch(target, options) {
+      assert.equal(String(target), url);
+      return globalThis.fetch(target, options);
+    },
+  });
+  const result = await wf.run();
+  assert.match(result.get("trim").url, /^data:audio\/wav;base64,/);
+  assert.deepEqual(server.requests.map(request => request.method + " " + request.path), ["GET /once.aac"]);
 });
 
 /* ---------- custom fetch reaches local media ---------- */
